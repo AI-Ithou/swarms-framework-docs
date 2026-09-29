@@ -24,6 +24,7 @@ These agents are inspired by cognitive science and human reasoning processes, in
 | **IRE Agent** | Iterative | Iterative Reflective Expansion framework | Hypothesis generation, path simulation, error reflection, dynamic revision | Complex reasoning tasks, research problems, strategy development |
 | **Reflexion Agent** | Self-reflective | [Reflexion: Language Agents with Verbal Reinforcement Learning](https://arxiv.org/abs/2303.11366) (Shinn et al., 2023) | Self-evaluation, experience memory, adaptive improvement, learning from failures | Continuous improvement tasks, long-term projects, quality refinement |
 | **GKP Agent** | Knowledge-based | [Generated Knowledge Prompting](https://arxiv.org/abs/2110.08387) (Liu et al., 2022) | Knowledge generation, multi-perspective reasoning, information synthesis | Knowledge-intensive tasks, research questions, fact-based reasoning |
+| **Tree of Thoughts** | Search-based | [Tree of Thoughts: Deliberate Problem Solving with Large Language Models](https://arxiv.org/abs/2305.10601) (Yao et al., 2023) | Candidate step generation, 0 to 1 scoring, pruning, BFS or DFS search with backtracking, function-calling outputs | Math and logic puzzles, case analysis, planning, estimation |
 | **Agent Judge** | Evaluation | [Agent-as-a-Judge](https://arxiv.org/abs/2410.10934) | Quality assessment, structured evaluation, performance metrics, feedback generation | Quality control, output evaluation, performance assessment |
 
 ## Agent Architectures
@@ -177,6 +178,32 @@ graph TD
 
 ---
 
+### Tree of Thoughts
+
+Searches a tree of partial solutions instead of answering in one pass: it proposes candidate next steps, scores each from 0 to 1, prunes the weak ones, and explores the rest breadth-first or depth-first before writing the answer from the best path.
+
+```mermaid
+graph TD
+    A[Task Input] --> B[Generate Candidate Steps]
+    B --> C[Score Each Candidate]
+    C --> D{Below Threshold?}
+    D -->|Yes| E[Prune Branch]
+    D -->|No| F{Final Step?}
+    F -->|No| G[BFS Beam or DFS Best Child]
+    G --> B
+    F -->|Yes| H[Answer From Best Path]
+
+    style A fill:#e1f5fe
+    style C fill:#fff3e0
+    style H fill:#c8e6c9
+```
+
+**Use Cases**: Math and logic puzzles, case analysis, scheduling under constraints, planning, estimation
+
+[Tree of Thoughts Guide](/agents/tree-of-thoughts)
+
+---
+
 ### Agent Judge
 
 Specialized evaluation system for assessing agent outputs and system performance, providing structured feedback and quality metrics through comprehensive assessment frameworks.
@@ -257,5 +284,6 @@ reflexion_agent = ReflexionAgent(
 | **Complex research tasks** | Reasoning Duo + GKP | Collaboration + knowledge synthesis |
 | **Learning & improvement** | Reflexion | Built-in self-improvement mechanisms |
 | **Mathematical problems** | Self-Consistency | Proven effectiveness on logical reasoning |
+| **Puzzles and case analysis** | Tree of Thoughts | Scores partial steps, prunes weak branches and backtracks from dead ends |
 | **Quality assessment** | Agent Judge | Specialized evaluation capabilities |
 | **Iterative refinement** | IRE | Designed for progressive improvement |

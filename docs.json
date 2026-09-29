@@ -85,6 +85,7 @@
               "agents/reasoning-duo",
               "agents/reflexion-agent",
               "agents/gkp-agent",
+              "agents/tree-of-thoughts",
               "agents/agent-judge",
               "agents/reasoning-agent-router"
             ]
@@ -273,6 +274,14 @@
               "examples/agents/persistent-memory",
               "examples/agents/context-compression",
               "examples/agents/prompt-caching"
+            ]
+          },
+          {
+            "group": "Tree of Thoughts",
+            "pages": [
+              "examples/tree-of-thoughts/number-theory-counting",
+              "examples/tree-of-thoughts/fermi-estimation",
+              "examples/tree-of-thoughts/knights-and-knaves"
             ]
           },
           {

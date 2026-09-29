@@ -1,0 +1,105 @@
+---
+title: 'Fermi estimate with sampling and votes'
+description: 'Estimate the kinetic energy of every car on US roads at rush hour, with independently sampled steps compared by vote.'
+icon: 'bolt'
+---
+
+A Fermi estimate has no single correct path, only more and less defensible assumptions. Rating one assumption on an absolute scale is hard; comparing three and picking the most defensible is easier. So this search samples each candidate step with its own call and scores the candidates by vote.
+
+| | |
+|---|---|
+| **Class** | [`TreeOfThoughts`](/agents/tree-of-thoughts) |
+| **Search** | `"bfs"`, beam of 2 |
+| **Generation** | `"sample"` |
+| **Evaluation** | `"vote"`, 3 votes per comparison |
+| **Expected answer** | about 10¹³ J |
+
+## Prerequisites
+
+```bash
+pip install git+https://github.com/kyegomez/swarms.git
+export OPENAI_API_KEY="sk-..."
+```
+
+`TreeOfThoughts` is not in `swarms` 15.0.3 on PyPI, so install from GitHub until the next release.
+
+## The code
+
+```python fermi_estimation.py
+from swarms import TreeOfThoughts
+
+agent = TreeOfThoughts(
+    name="Fermi-Estimator",
+    model_name="gpt-5.4",
+    search_algorithm="bfs",
+    generation_strategy="sample",
+    evaluation_strategy="vote",
+    num_thoughts=3,
+    breadth=2,
+    max_depth=4,
+    n_evaluate_samples=3,
+    thought_description=(
+        "One estimation step: a single quantity with a stated, justified "
+        "assumption (for example the number of cars moving, a typical "
+        "mass, a typical speed), or a combination of earlier quantities."
+    ),
+    evaluation_criteria=(
+        "Prefer realistic, explicitly justified assumptions, correct "
+        "arithmetic and units, and steady progress toward one number in "
+        "joules."
+    ),
+)
+
+answer = agent.run(
+    "Estimate, to an order of magnitude, the total kinetic energy in "
+    "joules of all cars moving on United States roads during a weekday "
+    "rush hour. State your assumptions."
+)
+print(f"Answer: {answer}\n")
+
+result = agent.last_result
+for number, step in enumerate(result.steps, 1):
+    print(f"{number}. {step}")
+print(
+    f"\nsolved={result.solved} nodes_expanded={result.nodes_expanded} "
+    f"llm_calls={result.llm_calls} tokens={result.usage['total_tokens']}"
+)
+```
+
+```bash
+python fermi_estimation.py
+```
+
+It prints the estimate with its assumptions, the steps on the best path, and what the search cost.
+
+## What the settings do
+
+- `generation_strategy="sample"` makes three independent calls for one step each, instead of one call for three. Independent calls give more varied assumptions.
+- `evaluation_strategy="vote"` shows the evaluator every candidate on the level and asks which is most defensible. A candidate's score is its votes divided by the leader's votes.
+- `n_evaluate_samples=3` casts three votes per comparison. With one vote, only the winner would clear the default `value_threshold` of 0.5. With three, a runner-up with at least half the leader's votes stays in the beam.
+- `evaluation_criteria` tells the voter what defensible means here: justified assumptions, correct units, and progress toward one number in joules.
+
+## Check the answer
+
+One defensible chain of assumptions:
+
+- About 5 × 10⁷ cars are moving at rush hour.
+- A typical car has a mass of about 1,500 kg.
+- A typical speed, mixing highway and city traffic, is about 15 m/s.
+
+Each car carries ½ × 1,500 × 15² ≈ 1.7 × 10⁵ J, and 5 × 10⁷ cars carry about 8 × 10¹² J. A reasonable answer lands near **10¹³ J**. Different defensible assumptions move the estimate within the same order of magnitude.
+
+## Cost
+
+This configuration expands at most 7 nodes and makes at most 34 model calls: 21 generation calls (3 per expanded node), 12 votes (3 per level over 4 levels) and 1 answer call. See [Cost](/agents/tree-of-thoughts#cost) for the formula.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Knights and knaves" icon="chess-knight" href="/examples/tree-of-thoughts/knights-and-knaves">
+    DFS case analysis with backtracking.
+  </Card>
+  <Card title="TreeOfThoughts reference" icon="book" href="/agents/tree-of-thoughts">
+    Every parameter, strategy, and result field.
+  </Card>
+</CardGroup>

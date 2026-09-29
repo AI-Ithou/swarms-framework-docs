@@ -1,0 +1,105 @@
+---
+title: 'Number theory with a BFS beam'
+description: 'Count the n up to 1000 for which 7 divides n² + n + 1, with a breadth-first beam of 3 and two averaged ratings per step.'
+icon: 'calculator'
+---
+
+A counting problem goes wrong in one of a few places: the modular reduction, a missed residue, or an off-by-one at a boundary. A breadth-first search keeps three lines of work alive at each level, and averaging two ratings per step stops one over-optimistic rating from steering the beam.
+
+| | |
+|---|---|
+| **Class** | [`TreeOfThoughts`](/agents/tree-of-thoughts) |
+| **Search** | `"bfs"`, beam of 3 |
+| **Generation** | `"propose"` |
+| **Evaluation** | `"value"`, 2 ratings averaged |
+| **Expected answer** | 286 |
+
+## Prerequisites
+
+```bash
+pip install git+https://github.com/kyegomez/swarms.git
+export OPENAI_API_KEY="sk-..."
+```
+
+`TreeOfThoughts` is not in `swarms` 15.0.3 on PyPI, so install from GitHub until the next release.
+
+## The code
+
+```python number_theory_counting.py
+from swarms import TreeOfThoughts
+
+agent = TreeOfThoughts(
+    name="Number-Theory-Solver",
+    model_name="gpt-5.4",
+    search_algorithm="bfs",
+    generation_strategy="propose",
+    evaluation_strategy="value",
+    num_thoughts=3,
+    breadth=3,
+    max_depth=4,
+    n_evaluate_samples=2,
+    thought_description=(
+        "One mathematical deduction with its computation shown, e.g. "
+        "reducing the condition modulo 7, testing residues, or counting "
+        "the integers in a residue class up to 1000."
+    ),
+    evaluation_criteria=(
+        "Check the modular arithmetic and every count exactly. A step "
+        "that tests residues must cover all seven. Penalize off-by-one "
+        "errors at the boundaries 1 and 1000."
+    ),
+)
+
+answer = agent.run(
+    "How many positive integers n with n <= 1000 make n^2 + n + 1 "
+    "divisible by 7?"
+)
+print(f"Answer: {answer}\n")
+
+result = agent.last_result
+for number, step in enumerate(result.steps, 1):
+    print(f"{number}. {step}")
+print(
+    f"\nsolved={result.solved} nodes_expanded={result.nodes_expanded} "
+    f"llm_calls={result.llm_calls} tokens={result.usage['total_tokens']}"
+)
+```
+
+```bash
+python number_theory_counting.py
+```
+
+It prints the answer, the steps on the best path, and what the search cost.
+
+## What the settings do
+
+- `breadth=3` keeps the three best open paths at each level instead of the default two.
+- `n_evaluate_samples=2` rates every candidate twice and averages the two scores.
+- `max_depth=4` leaves room for the usual path: reduce modulo 7, test the residues, count each residue class, add.
+- `thought_description` sizes a step as one deduction with its computation shown, so the evaluator can check it.
+- `evaluation_criteria` names the three ways this problem goes wrong: bad modular arithmetic, a missed residue, and an off-by-one at 1 or 1000.
+
+## Check the answer
+
+Test the seven residues of `n` modulo 7:
+
+| `n mod 7` | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| `n² + n + 1 mod 7` | 1 | 3 | 0 | 6 | 0 | 3 | 1 |
+
+Only `n ≡ 2` and `n ≡ 4 (mod 7)` work. From 1 to 1000 there are 143 of each (2, 9, ..., 996 and 4, 11, ..., 998), so the answer is **286**.
+
+## Cost
+
+This configuration expands at most 10 nodes and makes at most 71 model calls: 10 generation calls, 60 ratings (3 candidates × 2 ratings per expanded node) and 1 answer call. See [Cost](/agents/tree-of-thoughts#cost) for the formula.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Fermi estimate" icon="bolt" href="/examples/tree-of-thoughts/fermi-estimation">
+    Sampled steps compared by vote.
+  </Card>
+  <Card title="TreeOfThoughts reference" icon="book" href="/agents/tree-of-thoughts">
+    Every parameter, strategy, and result field.
+  </Card>
+</CardGroup>
