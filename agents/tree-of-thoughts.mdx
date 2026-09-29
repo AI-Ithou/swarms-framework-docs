@@ -1,0 +1,276 @@
+---
+title: Tree of Thoughts
+description: Solve a task by searching a tree of reasoning steps, scoring and pruning branches instead of answering in one pass
+icon: "sitemap"
+---
+
+`TreeOfThoughts` implements [Tree of Thoughts: Deliberate Problem Solving with Large Language Models](https://arxiv.org/abs/2305.10601) (Yao et al., 2023). A single `Agent` answers in one pass. `TreeOfThoughts` grows a tree of partial solutions instead: it proposes candidate next steps, scores each one from 0 to 1, prunes the weak ones, searches the tree breadth-first or depth-first, and writes the answer from the best path it found.
+
+<Warning>
+`TreeOfThoughts` is not in `swarms` 15.0.3, the latest release on PyPI. Until the next release, install from GitHub:
+
+```bash
+pip install git+https://github.com/kyegomez/swarms.git
+```
+
+The GitHub install also reports version 15.0.3, so check for the class, not the version number.
+</Warning>
+
+## Quickstart
+
+```python
+from swarms import TreeOfThoughts
+
+agent = TreeOfThoughts(
+    model_name="gpt-5.4",
+    search_algorithm="dfs",
+    thought_description="One arithmetic operation on two of the remaining numbers.",
+    evaluation_criteria="Can the remaining numbers still reach 24?",
+)
+
+print(agent.run("Use 4, 9, 10 and 13 with + - * / to make 24."))
+print(agent.last_result.steps)
+```
+
+`run` returns the answer. `last_result` keeps the best path, the whole tree, and what the search cost.
+
+<Note>
+The model must support function calling. Every model output is a function call validated against a Pydantic schema, so the search never parses free-form prose. Any LiteLLM model string works, for example `model_name="claude-sonnet-5"`.
+</Note>
+
+## How the search works
+
+1. **Generate.** From a node, ask for `num_thoughts` candidate next steps: all in one call (`"propose"`) or one call per step (`"sample"`). Duplicate candidates from the same parent are dropped.
+2. **Evaluate.** Score every candidate from 0 to 1: rate each one on its own (`"value"`) or compare them and vote (`"vote"`).
+3. **Prune.** A candidate that scores below `value_threshold` is never expanded and never accepted as the answer.
+4. **Search.** `"bfs"` keeps the best `breadth` open nodes per level. `"dfs"` follows the best child first and backtracks when a branch is pruned or runs out.
+5. **Answer.** Write the final answer from the best path.
+
+A candidate that completes the task is final. A step at `max_depth` is always final, whether or not the model flagged it. A final candidate that survives pruning is a solution. BFS stops once its best solution scores at least as high as every open partial path. DFS returns the first solution it reaches. If the search finds no solution, the answer is completed from the highest-scoring partial path and `solved` is `False`.
+
+Each model call goes through a fresh, stateless `Agent` that carries only the schema for that call. Calls at the same level of the tree run concurrently. A call that fails or returns no valid function call is logged as a warning and costs that one candidate, not the search.
+
+### When to use it instead of a single Agent
+
+Use `TreeOfThoughts` when a task breaks into steps you can check, and one wrong early step ruins the answer: arithmetic and proofs, logic puzzles, case analysis, scheduling under constraints, planning, and estimation. The search pays for that with many model calls per task (see [Cost](#cost)).
+
+Use a single [`Agent`](/agents/creating-agents) when one pass is usually right, when steps have no meaningful score, or when latency and cost matter more than accuracy.
+
+## Import
+
+```python
+from swarms import TreeOfThoughts, TreeOfThoughtsResult, ThoughtNode
+```
+
+## Constructor
+
+```python
+TreeOfThoughts(
+    name="Tree-of-Thoughts-Agent",
+    description="Solves tasks by searching a tree of reasoning steps.",
+    model_name="gpt-5.4",
+    system_prompt=TREE_OF_THOUGHTS_SYSTEM_PROMPT,
+    search_algorithm="bfs",
+    generation_strategy="propose",
+    evaluation_strategy="value",
+    num_thoughts=3,
+    breadth=2,
+    max_depth=3,
+    n_evaluate_samples=1,
+    value_threshold=0.5,
+    max_expansions=None,
+    thought_description=None,
+    evaluation_criteria=None,
+    temperature=None,
+    max_workers=8,
+    output_type="final",
+    verbose=False,
+    agent_kwargs=None,
+)
+```
+
+### Identity and model
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | `"Tree-of-Thoughts-Agent"` | Name used in logs, in the conversation, and as the prefix of every internal agent's name (`<name>-generator`, `<name>-evaluator`, `<name>-answerer`). |
+| `description` | `str` | `"Solves tasks by searching a tree of reasoning steps."` | Short description of the agent, for orchestrators. |
+| `model_name` | `str` | `"gpt-5.4"` | Any LiteLLM model string. The model must support function calling. |
+| `system_prompt` | `str` | `TREE_OF_THOUGHTS_SYSTEM_PROMPT` | System prompt for every model call. Replace it to give the search a domain persona. The step, evaluation and answer instructions are sent in each prompt, so they stay in force. |
+| `temperature` | `Optional[float]` | `None` | Sampling temperature for every call. `None` sends no temperature, so the provider's default applies. Some models, such as Claude Sonnet 5, reject the parameter. If you set it, keep it above 0 when sampling or averaging several evaluations. |
+| `agent_kwargs` | `Optional[Dict[str, Any]]` | `None` | Extra `Agent` arguments applied to every internal call, such as `max_tokens`, `llm_api_key` or `llm_base_url`. It cannot override `agent_name`, `system_prompt`, `model_name`, `temperature`, `max_loops`, `tools_list_dictionary`, `output_type`, `print_on` or `persistent_memory`. |
+
+### Search
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `search_algorithm` | `Literal["bfs", "dfs"]` | `"bfs"` | `"bfs"` keeps the best `breadth` nodes per level. `"dfs"` follows the best child first and backtracks when a branch is pruned or exhausted. |
+| `generation_strategy` | `Literal["propose", "sample"]` | `"propose"` | `"propose"` asks for `num_thoughts` distinct steps in one call. `"sample"` makes `num_thoughts` independent calls for one step each. |
+| `evaluation_strategy` | `Literal["value", "vote"]` | `"value"` | `"value"` rates each candidate on its own. `"vote"` compares candidates and scores them by votes. |
+| `num_thoughts` | `int` | `3` | Candidate steps generated per expanded node. |
+| `breadth` | `int` | `2` | BFS beam width: open nodes kept per level. Ignored by DFS. |
+| `max_depth` | `int` | `3` | Maximum number of steps on a path. Steps at this depth must complete the task. |
+| `max_expansions` | `Optional[int]` | `None` | Cap on how many nodes one search may expand, which bounds cost. `None` means no cap. |
+
+### Scoring
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `n_evaluate_samples` | `int` | `1` | Evaluator calls per candidate (`"value"`) or per comparison (`"vote"`). More samples give steadier scores. |
+| `value_threshold` | `float` | `0.5` | Candidates scoring below this are pruned. Between 0 and 1. |
+
+### Adapting to a task
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `thought_description` | `Optional[str]` | `None` | What one step looks like for your task. Shown to the generator. |
+| `evaluation_criteria` | `Optional[str]` | `None` | How to judge progress for your task. Shown to the evaluator, in both `"value"` and `"vote"` mode. |
+
+### Execution and output
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `max_workers` | `int` | `8` | Maximum concurrent model calls. Set it to `1` to run calls one at a time. |
+| `output_type` | `OutputType` | `"final"` | How `run` formats its conversation. `"final"` returns the answer string. See [output types](/agents/structured-outputs#output-types) for the others. |
+| `verbose` | `bool` | `False` | Log every evaluated candidate with its depth, score and flags. |
+
+The constructor raises `ValueError` when a strategy name is unknown, when `num_thoughts`, `breadth`, `max_depth`, `n_evaluate_samples` or `max_workers` is below 1, when `max_expansions` is below 1, or when `value_threshold` is outside 0 to 1.
+
+## Choosing a strategy
+
+| Setting | Use | When |
+|---------|-----|------|
+| `search_algorithm` | `"bfs"` | Several partial solutions are worth keeping at once: scheduling, multi-step calculations. |
+| | `"dfs"` | Case analysis and planning, where you commit to a line and backtrack on a contradiction. |
+| `generation_strategy` | `"propose"` | Constrained steps, where one call can list distinct options. |
+| | `"sample"` | Open-ended steps, where independent calls give more variety. |
+| `evaluation_strategy` | `"value"` | Steps can be checked on their own: arithmetic, logic, units. |
+| | `"vote"` | Quality is relative, so comparing candidates beats rating them: estimation, writing. |
+
+**How `"value"` scores.** Each candidate is rated `n_evaluate_samples` times and the ratings are averaged. The evaluator writes its critique before its score. A candidate whose every rating failed scores 0 and is pruned.
+
+**How `"vote"` scores.** The evaluator sees all candidates at once and votes for the best, `n_evaluate_samples` times. A candidate's score is its votes divided by the leader's votes, so the leader always scores 1. BFS compares every candidate on the level in one vote; DFS compares the children of one node. Two consequences follow:
+
+- Vote mode cannot reject a lone candidate. It scores 1 without a call.
+- With one vote per comparison, only the winner survives the default `value_threshold`. Raise `n_evaluate_samples` to keep more branches.
+
+## Adapting the search to a task
+
+The built-in prompts are domain-agnostic. `thought_description` and `evaluation_criteria` adapt the search to a task more than any other setting.
+
+- `thought_description` tells the generator what one step looks like. It is added to every generation prompt under **WHAT ONE STEP LOOKS LIKE**. Size the step so the evaluator can check it: "one deduction", "one arithmetic operation", "one SQL clause".
+- `evaluation_criteria` tells the evaluator how to judge progress. It is added to every value and vote prompt under **HOW TO JUDGE PROGRESS**. Name what makes a step wrong, not only what makes it good.
+
+```python
+agent = TreeOfThoughts(
+    model_name="gpt-5.4",
+    search_algorithm="dfs",
+    num_thoughts=2,
+    max_depth=4,
+    thought_description=(
+        "One deduction: assume one islander's type and derive what "
+        "follows, or rule out a case by exhibiting a contradiction."
+    ),
+    evaluation_criteria=(
+        "Is each deduction logically valid and consistent with every "
+        "statement? A case that leads to a contradiction must be ruled "
+        "out, not kept."
+    ),
+)
+```
+
+## Running a search
+
+### run
+
+```python
+answer = agent.run(task)
+```
+
+`run` takes the task as a string, searches, writes the answer, and returns the conversation formatted by `output_type`: the answer string for the default `"final"`. The conversation holds the task, the reasoning path, and the answer. Each call replaces `last_result` and `conversation`.
+
+It raises `ValueError` if `task` is empty, and `RuntimeError` if the search found no solution and the final answer call also failed, so there is no answer to return.
+
+### last_result
+
+After `run`, `agent.last_result` is a `TreeOfThoughtsResult` for that search. It is `None` before the first run.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `task` | `str` | The task that was searched. |
+| `answer` | `str` | The final answer written from the best path. |
+| `solved` | `bool` | Whether the search reached a final step that cleared `value_threshold`. When `False`, `answer` was completed from the most promising partial path. |
+| `steps` | `List[str]` | The reasoning steps on the best path, read from `best_node`. Empty when `best_node` is `None`. |
+| `best_node` | `Optional[ThoughtNode]` | The node the answer was written from, or `None` if no candidate was ever evaluated. |
+| `root` | `ThoughtNode` | The root of the search tree, for inspection. |
+| `nodes_expanded` | `int` | How many nodes had candidates generated from them. |
+| `llm_calls` | `int` | How many model calls the search made, including the final answer and any calls that failed. |
+| `usage` | `Dict[str, int]` | Provider token usage summed over this search's calls. |
+
+`to_dict()` serializes all of it, with the whole tree under `"tree"`:
+
+```python
+import json
+
+result = agent.last_result
+print(result.solved, result.nodes_expanded, result.llm_calls)
+print(json.dumps(result.to_dict()["tree"], indent=2))
+```
+
+Every node in the tree is a `ThoughtNode`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `content` | `str` | The reasoning step. Empty for the root. |
+| `depth` | `int` | Number of steps from the root. The root is 0. |
+| `parent` | `Optional[ThoughtNode]` | The node this step continues from. `None` for the root. |
+| `is_final` | `bool` | Whether this step completes the task. |
+| `score` | `Optional[float]` | Evaluation from 0 to 1, or `None` until evaluated. |
+| `evaluation` | `Optional[str]` | The evaluator's critique, or the vote tally. |
+| `pruned` | `bool` | Whether the score fell below `value_threshold`. |
+| `children` | `List[ThoughtNode]` | Candidate next steps generated from this node. |
+| `steps` | `List[str]` | The steps on the path from the root to this node. |
+
+### usage
+
+```python
+totals = agent.usage
+```
+
+A `Dict[str, int]` of provider token usage summed over every search this agent has run. The keys match `Agent.usage`: `input_tokens`, `output_tokens`, `cached_tokens`, `reasoning_tokens` and `total_tokens`. It returns a new dict, so changing it does not affect the agent. For one search only, read `last_result.usage`.
+
+## Cost
+
+Calls grow with `num_thoughts`, `breadth`, `max_depth` and `n_evaluate_samples`. With `t = num_thoughts`, `b = breadth`, `D = max_depth` and `k = n_evaluate_samples`, one search makes at most:
+
+- **Generation:** 1 call per expanded node with `"propose"`, `t` calls with `"sample"`.
+- **Evaluation:** with `"value"`, `k` calls per candidate, so up to `t * k` per expanded node. With `"vote"`, `k` calls per comparison: one comparison per BFS level or per DFS expansion, and none when there is only one candidate.
+- **Answer:** 1 call.
+
+The number of expanded nodes is at most `1 + b * (D - 1)` for BFS and `1 + t + t^2 + ... + t^(D - 1)` for DFS. DFS grows exponentially with depth, so cap it. `max_expansions` caps both: the search stops expanding once it reaches the cap and answers from what it has.
+
+| Settings | Max nodes expanded | Max `llm_calls` |
+|----------|--------------------|-----------------|
+| Defaults: BFS, propose, value, `t=3`, `b=2`, `D=3`, `k=1` | 5 | 21 |
+| [Number theory](/examples/tree-of-thoughts/number-theory-counting): BFS, propose, value, `t=3`, `b=3`, `D=4`, `k=2` | 10 | 71 |
+| [Fermi estimate](/examples/tree-of-thoughts/fermi-estimation): BFS, sample, vote, `t=3`, `b=2`, `D=4`, `k=3` | 7 | 34 |
+| [Knights and knaves](/examples/tree-of-thoughts/knights-and-knaves): DFS, propose, value, `t=2`, `D=4`, `k=1` | 15 | 46 |
+| Knights and knaves with `max_expansions=5` | 5 | 16 |
+
+These are worst cases. A search usually stops sooner: BFS once a solution beats every open path, DFS at its first solution. Read `last_result.llm_calls` and `last_result.usage` to see what a search actually cost.
+
+## Examples
+
+<CardGroup cols={3}>
+  <Card title="Number theory" icon="calculator" href="/examples/tree-of-thoughts/number-theory-counting">
+    BFS with a beam of 3 and averaged ratings.
+  </Card>
+  <Card title="Fermi estimate" icon="bolt" href="/examples/tree-of-thoughts/fermi-estimation">
+    Sampled steps compared by vote.
+  </Card>
+  <Card title="Knights and knaves" icon="chess-knight" href="/examples/tree-of-thoughts/knights-and-knaves">
+    DFS case analysis with backtracking.
+  </Card>
+</CardGroup>
+
+More examples live in [`examples/reasoning_agents/tree_of_thoughts_examples`](https://github.com/kyegomez/swarms/tree/master/examples/reasoning_agents/tree_of_thoughts_examples) in the framework repo.

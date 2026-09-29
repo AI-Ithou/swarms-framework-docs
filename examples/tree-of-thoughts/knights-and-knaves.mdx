@@ -1,0 +1,101 @@
+---
+title: 'Knights and knaves with DFS'
+description: 'Identify the knights and knaves among three islanders by assuming a case, following it, and backtracking on a contradiction.'
+icon: 'chess-knight'
+---
+
+Logic puzzles are case analysis: assume one islander's type, follow the consequences, and drop the case when it contradicts a statement. That is what depth-first search does. It commits to the most promising case, and when the evaluator finds a contradiction and prunes it, the search backtracks to the next one.
+
+| | |
+|---|---|
+| **Class** | [`TreeOfThoughts`](/agents/tree-of-thoughts) |
+| **Search** | `"dfs"` with backtracking |
+| **Generation** | `"propose"`, 2 cases per step |
+| **Evaluation** | `"value"` |
+| **Expected answer** | A is a knight, B is a knave, C is a knight |
+
+## Prerequisites
+
+```bash
+pip install git+https://github.com/kyegomez/swarms.git
+export OPENAI_API_KEY="sk-..."
+```
+
+`TreeOfThoughts` is not in `swarms` 15.0.3 on PyPI, so install from GitHub until the next release.
+
+## The code
+
+```python knights_and_knaves.py
+from swarms import TreeOfThoughts
+
+agent = TreeOfThoughts(
+    name="Logic-Solver",
+    model_name="gpt-5.4",
+    search_algorithm="dfs",
+    generation_strategy="propose",
+    evaluation_strategy="value",
+    num_thoughts=2,
+    max_depth=4,
+    thought_description=(
+        "One deduction: assume one islander's type and derive what "
+        "follows, or rule out a case by exhibiting a contradiction."
+    ),
+    evaluation_criteria=(
+        "Is each deduction logically valid and consistent with every "
+        "statement? A case that leads to a contradiction must be ruled "
+        "out, not kept. A final answer must be consistent with all three "
+        "statements."
+    ),
+)
+
+answer = agent.run(
+    "On an island, knights always tell the truth and knaves always lie. "
+    "A says: 'B is a knave.' B says: 'Exactly one of us three is a "
+    "knight.' C says: 'B and I are different kinds.' Which of A, B and C "
+    "are knights and which are knaves?"
+)
+print(f"Answer: {answer}\n")
+
+result = agent.last_result
+for number, step in enumerate(result.steps, 1):
+    print(f"{number}. {step}")
+print(
+    f"\nsolved={result.solved} nodes_expanded={result.nodes_expanded} "
+    f"llm_calls={result.llm_calls} tokens={result.usage['total_tokens']}"
+)
+```
+
+```bash
+python knights_and_knaves.py
+```
+
+It prints who is which, the deductions on the path that solved it, and what the search cost.
+
+## What the settings do
+
+- `search_algorithm="dfs"` expands the best case first and returns the first solution that survives evaluation. A pruned case sends the search back to the next one.
+- `num_thoughts=2` matches the puzzle: each islander is one of two types, so each step splits into two cases.
+- `max_depth=4` gives room to assume a case, follow it through the other two islanders, and state the answer.
+- `evaluation_criteria` tells the evaluator that a contradicted case must be ruled out, so it scores low and is pruned rather than kept.
+
+## Check the answer
+
+- **Assume A is a knave.** Then B is a knight, so exactly one islander is a knight: B. That makes C a knave, so C's statement is false and B and C are the same kind. But B is a knight and C is a knave. Contradiction.
+- **So A is a knight** and B is a knave. B's statement is false, so the number of knights is not one. A is already a knight, so C must be a knight too. Then C's statement, that B and C differ, is true, which fits.
+
+The answer is **A is a knight, B is a knave, C is a knight**.
+
+## Cost
+
+With no `max_expansions`, DFS can expand up to 1 + 2 + 4 + 8 = 15 nodes here, for at most 46 model calls. It stops at the first solution, so a search that rules out the wrong case early costs far less. Set `max_expansions` to cap it: `max_expansions=5` bounds this search at 16 calls. See [Cost](/agents/tree-of-thoughts#cost) for the formula.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Number theory" icon="calculator" href="/examples/tree-of-thoughts/number-theory-counting">
+    BFS with a beam of 3 and averaged ratings.
+  </Card>
+  <Card title="TreeOfThoughts reference" icon="book" href="/agents/tree-of-thoughts">
+    Every parameter, strategy, and result field.
+  </Card>
+</CardGroup>
