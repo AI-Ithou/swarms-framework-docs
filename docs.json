@@ -152,6 +152,7 @@
             "group": "Core Classes",
             "pages": [
               "api/agent",
+              "api/decision-model",
               "api/llm-manager",
               "api/mcp-manager",
               "api/mcp-deployer",
@@ -243,6 +244,14 @@
               "examples/vision-agent",
               "examples/streaming",
               "examples/agent-streaming-example"
+            ]
+          },
+          {
+            "group": "Decision Models",
+            "pages": [
+              "examples/decision-models/ticket-triage",
+              "examples/decision-models/agent-router",
+              "examples/decision-models/custom-decision-model"
             ]
           },
           {

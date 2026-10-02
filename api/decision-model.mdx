@@ -1,0 +1,296 @@
+---
+title: DecisionModel
+description: Ask typed questions about a state and use structured answers to route, classify, score, and gate actions
+icon: "code-branch"
+---
+
+`DecisionModel` evaluates a state against questions you define. It returns structured decisions rather than generated text. Use it to classify a support ticket, select an agent, score an output, or add a review gate. An [Agent](/api/agent) still uses an LLM to write replies and perform tasks; Jev does not replace that LLM.
+
+<Note>
+This page documents the [implementation at commit `c5e71b8`](https://github.com/kyegomez/swarms/blob/c5e71b85ddc98c60951039c716970a72f61ea6db/swarms/structs/decision_model.py). `DecisionModel` is on the framework's `master` branch. Use the source installation below until your PyPI release includes it.
+</Note>
+
+## Quickstart
+
+Install Swarms from source. You do not need `typesafe-sdk`: this client uses `httpx` directly.
+
+```bash
+python -m pip install "swarms @ git+https://github.com/kyegomez/swarms.git@c5e71b85ddc98c60951039c716970a72f61ea6db"
+export SWARMS_TELEMETRY_ON=false
+```
+
+Configure `TYPESAFE_API_KEY` securely in your environment using a key from the [TypeSafe console](https://console.typesafe.ai/keys). Never put keys in source control. The telemetry setting above disables optional Swarms telemetry for this walkthrough.
+
+```python
+import json
+
+from swarms import DecisionModel
+
+model = DecisionModel()
+try:
+    result = model.run(
+        state="The dashboard fails to load after today's update.",
+        questions={
+            "team": {
+                "type": "choice",
+                "instructions": "Which team owns this support request?",
+                "criteria": {
+                    "technical": "Software errors and integrations",
+                    "billing": "Invoices and payments",
+                    "other": "Requests outside those categories",
+                },
+            },
+        },
+    )
+    print(json.dumps(result, indent=2))
+finally:
+    model.close()
+```
+
+The result has `model`, `answers` keyed by your question IDs, and `usage`. Read `result["answers"]["team"]` for the Choice answer. No live response is reproduced here; run the example with your own credentials to inspect the actual probabilities and token usage.
+
+## State and questions
+
+`state` accepts a string, a JSON object, or a list. Jev evaluates text, not images, audio, or video. Its [model documentation](https://docs.typesafe.ai/models) specifies a 64k-token total request limit, with a separate 32k limit for the state plus the longest question. English is its strongest language. Check the provider's current limits before deploying.
+
+Pass a dictionary of question dictionaries. Each key is an ID you choose to retrieve the answer; put the actual question in `instructions`. These examples use strings for instructions. The TypeSafe API also accepts structured objects and arrays.
+
+### Choice
+
+Use a Choice for unordered alternatives. `criteria` maps option names to descriptions; use `None` when an option needs no description.
+
+```python
+question = {
+    "type": "choice",
+    "instructions": "Which team should handle the ticket?",
+    "criteria": {
+        "billing": "Invoices, payments, and subscription changes",
+        "technical": "Bugs and integration failures",
+        "other": None,
+    },
+}
+```
+
+The answer dictionary contains:
+
+- `type`: `"choice"`
+- `choice`: the selected option name
+- `probabilities`: a mapping from option names to probabilities
+- `confidence`: a value from 0 to 1 derived from the distribution
+
+### Score
+
+Use a Score for an ordered rubric. `criteria` is a list of levels, from lowest to highest.
+
+```python
+question = {
+    "type": "score",
+    "instructions": "How frustrated does the customer appear?",
+    "criteria": ["Calm", "Frustrated but civil", "Very angry"],
+}
+```
+
+The answer contains `type: "score"`, `score`, `legend`, `probabilities`, and `confidence`. `legend` maps string level indices such as `"0"` to their descriptions. The score is a probability-weighted value and can fall between levels; this rubric spans 0 to 2. `probabilities` uses the same string indices.
+
+### Noul
+
+Use a Noul for a yes/no judgment. Its optional `criteria` describes the meanings of true and false.
+
+```python
+question = {
+    "type": "noul",
+    "instructions": "Does the ticket describe a service outage?",
+    "criteria": {
+        "true": "The service is unavailable or unusable",
+        "false": "The service is working, or no outage is described",
+    },
+}
+```
+
+The answer contains `type: "noul"` and `noul`, a value from 0 to 1. Values near 1 indicate yes, near 0 indicate no, and near 0.5 indicate uncertainty. There is no separate confidence field.
+
+For provider schemas and limits, see [TypeSafe primitives](https://docs.typesafe.ai/primitives) and the [HTTP API reference](https://docs.typesafe.ai/api).
+
+<Tip>
+Ask all questions about the same state in one `run` call. TypeSafe reads that state once per request and bills for input tokens. Calling a helper separately for each question sends the state repeatedly.
+</Tip>
+
+## Constructor
+
+```python
+def __init__(
+    self,
+    model_name: str = "jev-latest",
+    api_key: Optional[str] = None,
+    api_key_env: Optional[str] = None,
+    base_url: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    timeout: float = 30.0,
+    max_retries: int = 3,
+    headers: Optional[Dict[str, str]] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+): ...
+```
+
+This is a signature, not an executable constructor call.
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `model_name: str` | `"jev-latest"` | Model ID. Its prefix chooses provider defaults. |
+| `api_key: Optional[str]` | `None` | Explicit key; otherwise read the selected environment variable. Leading and trailing whitespace is stripped. |
+| `api_key_env: Optional[str]` | `None` | Override the key variable. Resolves to `TYPESAFE_API_KEY` for Jev. |
+| `base_url: Optional[str]` | `None` | Override the API root. Resolves to `https://api.typesafe.ai` for Jev. Trailing slashes are removed. |
+| `endpoint: Optional[str]` | `None` | Override the evaluation path. Resolves to `/v1/systemone` for Jev. Include the leading slash. |
+| `timeout: float` | `30.0` | [HTTPX](https://www.python-httpx.org/advanced/timeouts/) connect/read/write/pool timeout in seconds, not an overall request deadline. Retries can increase total elapsed time. |
+| `max_retries: int` | `3` | Retries after the first attempt. Use a nonnegative integer; `0` disables retries. |
+| `headers: Optional[Dict[str, str]]` | `None` | Additional headers, merged after the Bearer authorization and JSON content-type headers. |
+| `extra_body: Optional[Dict[str, Any]]` | `None` | Fields merged after `model`, `state`, and `questions` in every evaluation payload. |
+
+<Warning>
+`headers` and `extra_body` can override built-in fields. Do not overwrite authentication or validated questions unintentionally. A custom `base_url` changes where your key and state are sent; use only a provider you trust.
+</Warning>
+
+### Provider defaults
+
+- Names beginning with `jev` select TypeSafe.
+- Names beginning with `clef` select Cloudflare Workers AI. Set `CLOUDFLARE_AUTH_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The base URL becomes `https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run`, with endpoint `/@cf/cloudflare/{model_name}`.
+- Other names, including OpenRouter's `~typesafe/jev-latest`, fall back to TypeSafe defaults. For a gateway, override its URL and key variable explicitly.
+
+<Note>
+The current constructor has no `models_endpoint` parameter. Earlier proposals used fixed TypeSafe defaults and an instance-specific model-list endpoint. The implementation now resolves provider defaults from `model_name` and discovers models across supported providers.
+</Note>
+
+## Methods
+
+### run and arun
+
+```python
+def run(self, state: State, questions: Questions) -> Dict[str, Any]: ...
+async def arun(self, state: State, questions: Questions) -> Dict[str, Any]: ...
+```
+
+`State` is `Union[str, Dict[str, Any], List[Any]]`. `Questions` is `Dict[str, Dict[str, Any]]`.
+
+Both methods validate the payload, send one evaluation request, and return the full parsed response. Your question IDs appear under `answers`; `model` identifies the model that answered, and `usage` holds the provider's token accounting. The client returns provider metadata rather than reducing the result to the answers alone.
+
+For async code:
+
+```python
+import asyncio
+
+from swarms import DecisionModel
+
+async def main():
+    model = DecisionModel()
+    try:
+        result = await model.arun(
+            state="Our integration is down.",
+            questions={
+                "urgent": {
+                    "type": "noul",
+                    "instructions": "Does the message describe an urgent issue?",
+                },
+            },
+        )
+        print(result["answers"]["urgent"]["noul"])
+    finally:
+        model.close()
+
+asyncio.run(main())
+```
+
+In a notebook with an event loop, use `await main()` instead of `asyncio.run(main())`. `arun` creates and closes an async HTTP client for each call; synchronous `run` reuses a pooled client.
+
+### Single-question helpers
+
+```python
+def choice(
+    self, state: State, instructions: Any, criteria: Dict[str, Any]
+) -> Dict[str, Any]: ...
+
+def score(
+    self, state: State, instructions: Any, criteria: List[Any]
+) -> Dict[str, Any]: ...
+
+def noul(
+    self, state: State, instructions: Any,
+    criteria: Optional[Dict[str, Any]] = None,
+) -> float: ...
+```
+
+Each helper makes its own synchronous `run` call with question ID `"answer"`:
+
+- `choice(...)` returns the answer dictionary, including `choice`, `probabilities`, and `confidence`
+- `score(...)` returns the answer dictionary, including `score`, `legend`, `probabilities`, and `confidence`
+- `noul(...)` returns the `noul` value alone
+
+Use `run` when you need multiple questions or the full response's usage information.
+
+### list_models
+
+```python
+def list_models(self) -> List[str]: ...
+```
+
+Returns names from all supported providers, not only this instance's provider. It calls the exported `get_decision_models()` function, which combines built-in names with live results from providers whose credential environment variables are set. Results are de-duplicated. Failed provider lookups log a warning and retain the built-in names.
+
+```python
+from swarms import get_decision_models
+
+print(get_decision_models())
+```
+
+Without provider credentials, this function returns built-in names without making discovery requests. It does not require constructing a `DecisionModel`. TypeSafe discovery uses `/v1/models`; Cloudflare uses its model search endpoint. Discovery uses a 10-second timeout and does not use the instance's custom URL, explicit `api_key`, headers, timeout, or retry settings. A listed built-in model is not proof your account has access to it.
+
+### close
+
+```python
+def close(self) -> None: ...
+```
+
+Closes and clears the pooled synchronous HTTP client. Call it in `finally` after using the model. It is safe to call when no connection is open. `DecisionModel` does not implement a context manager or an `aclose()` method.
+
+## Validation and errors
+
+The client performs these local checks before an evaluation request:
+
+- Missing credentials at construction, `state=None`, or no questions: `ValueError`
+- Unsupported question type: `ValueError`
+- Choice without a nonempty criteria dictionary: `ValueError`
+- Score without a list or tuple containing at least two levels: `ValueError`
+
+This is not complete provider-schema validation. Supply question dictionaries with `instructions`, JSON-serializable data, and provider-supported criteria. The provider checks additional constraints, such as option limits.
+
+During response parsing, a missing requested answer or an explicitly mismatched answer type raises `RuntimeError`. An omitted answer `type` is accepted as the requested type. The parser does not validate every answer field, probability range, or the presence of `model` and `usage`. Validate additional constraints in your application when required. A Cloudflare `result` envelope is unwrapped automatically.
+
+HTTP error responses raise `httpx.HTTPStatusError` with status, URL, and response body in the message. This helps diagnose validation failures. Avoid sending error bodies or ticket content to public logs. Transport failures such as connection errors and timeouts are raised after retries are exhausted.
+
+## Retries
+
+Both evaluation methods retry `httpx.TransportError` and HTTP statuses **408, 429, 500, 502, 503, 504, and 529**. With the default `max_retries=3`, a request has at most four attempts.
+
+The delay starts from `0.5 * 2**attempt` seconds, capped at 8 seconds before a random multiplier between 0.75 and 1.0. Numeric `retry-after-ms` takes priority over numeric `retry-after`. The final delay is clamped to 0–60 seconds. Invalid header values, including HTTP-date `Retry-After` values, fall back to the calculated backoff.
+
+Other HTTP error statuses, such as 401 and 422, are not retried. Local validation errors and response-shape errors are not retried either.
+
+## Confidence and action gates
+
+Choice and Score confidence summarizes how concentrated the answer's probability distribution is. It is not simply the winning option's probability, and it is not a guarantee of correctness. Noul has no separate confidence; values around 0.5 represent uncertainty about the yes/no question.
+
+Use confidence to decide whether your application should act, ask for clarification, or send the case to a person. Calibrate thresholds using representative inputs and the cost of a wrong action. Keep consequential actions behind appropriate authorization even when confidence is high. See [TypeSafe confidence](https://docs.typesafe.ai/confidence).
+
+## Custom providers and formats
+
+For a TypeSafe-compatible API, configure `base_url`, `endpoint`, `api_key_env`, and `model_name`. For a different wire format, subclass these hooks:
+
+```python
+def build_headers(self) -> Dict[str, str]: ...
+def build_payload(self, state: State, questions: Questions) -> Dict[str, Any]: ...
+def parse_response(
+    self, data: Dict[str, Any], questions: Questions
+) -> Dict[str, Any]: ...
+```
+
+Call `super().build_payload(...)` before reshaping a request to retain local question validation. Normalize a custom response into `model`, `answers`, and `usage`, then call `super().parse_response(...)` to retain answer checks. Override `build_headers()` if the provider requires different authentication.
+
+Continue with [custom decision models](/examples/decision-models/custom-decision-model), [ticket triage](/examples/decision-models/ticket-triage), or [agent routing](/examples/decision-models/agent-router).

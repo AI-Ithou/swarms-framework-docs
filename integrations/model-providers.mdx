@@ -19,6 +19,12 @@ Swarms integrates with all major LLM providers through a consistent API:
 - **XAI** - Grok models
 - **Azure OpenAI** - Enterprise OpenAI deployment
 
+## Decision model providers
+
+[TypeSafe](https://docs.typesafe.ai) provides Jev for structured decisions through [DecisionModel](/api/decision-model). It answers Choice, Score, and Noul questions about text instead of generating an agent's reply. Use it beside an LLM-backed agent for classification, scoring, routing, and review gates.
+
+Configure `TYPESAFE_API_KEY` for direct TypeSafe requests. For source installation and current provider defaults, see the [DecisionModel reference](/api/decision-model). The [custom decision model guide](/examples/decision-models/custom-decision-model) also shows OpenRouter's TypeSafe-compatible endpoint and version pinning.
+
 ## Configuration
 
 ### Environment Setup

@@ -1,0 +1,145 @@
+---
+title: 'Ticket triage with DecisionModel'
+description: 'Ask Choice, Score, and Noul questions in one request, then apply a confidence-aware triage policy.'
+icon: 'ticket'
+---
+
+Classify a support ticket, rate frustration, and estimate urgency with one `DecisionModel.run()` call. Your Python code decides whether to queue the ticket, recommend paging a team, or send it to a human.
+
+## Set up
+
+Use Python 3.10 or later and Git. This example calls TypeSafe's `jev-latest` decision model and needs a `TYPESAFE_API_KEY`. It does not run a generative agent, so it does not need `OPENAI_API_KEY`.
+
+<Warning>
+Support for this API in published Swarms releases has not yet been verified. Install from the inspected GitHub source revision below instead of assuming your installed release includes `DecisionModel`.
+</Warning>
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install "swarms @ git+https://github.com/kyegomez/swarms.git@c5e71b85ddc98c60951039c716970a72f61ea6db"
+export TYPESAFE_API_KEY="your-typesafe-key"
+export SWARMS_TELEMETRY_ON=false
+```
+
+`SWARMS_TELEMETRY_ON=false` disables optional Swarms telemetry for this walkthrough. Set keys in your environment; do not put them in the script or commit them.
+
+## Run the complete example
+
+Save this as `ticket_triage.py`, then run `python ticket_triage.py`. From a checkout of this docs repository, you can also run `python examples/decision-models/code/ticket_triage.py`. Running the example sends the ticket to TypeSafe and may incur API charges.
+
+```python
+"""Ask three typed questions in one request, then apply a local triage policy."""
+
+import json
+
+
+def triage_action(answers: dict) -> str:
+    """Choose an action without making network requests or paging anyone."""
+    department = answers["department"]
+    frustration = answers["frustration"]["score"]
+    urgency = answers["is_urgent"]["noul"]
+
+    if department["confidence"] < 0.6:
+        return "Send to a human: department confidence is below 0.6."
+    if urgency > 0.8 and frustration >= 1:
+        return f"Page the {department['choice']} on-call team."
+    return f"Queue for the {department['choice']} team."
+
+
+def main() -> None:
+    from swarms import DecisionModel
+
+    ticket = {
+        "message": (
+            "Hi, I've been trying to connect my Stripe account for 3 days "
+            "and the integration keeps failing. I'm losing sales. "
+            "Please help ASAP."
+        ),
+        "customer_plan": "enterprise",
+    }
+    model = DecisionModel(model_name="jev-latest")
+    try:
+        # One run call evaluates Choice, Score, and Noul together.
+        result = model.run(
+            state=ticket,
+            questions={
+                "department": {
+                    "type": "choice",
+                    "instructions": "Which team should handle this ticket?",
+                    "criteria": {
+                        "billing": "Payment or subscription issues",
+                        "technical": "Bugs or integration problems",
+                        "sales": "Pricing or account questions",
+                    },
+                },
+                "frustration": {
+                    "type": "score",
+                    "instructions": "How frustrated does the customer appear?",
+                    "criteria": [
+                        "Calm, just stating facts",
+                        "Frustrated but civil",
+                        "Very angry, strong language",
+                    ],
+                },
+                "is_urgent": {
+                    "type": "noul",
+                    "instructions": (
+                        "The message conveys urgency or time-sensitivity."
+                    ),
+                },
+            },
+        )
+    finally:
+        model.close()
+
+    # Keep the full provider response available for inspection.
+    print(json.dumps(result, indent=2))
+    answers = result["answers"]
+    department = answers["department"]
+    print(f"Answered by {result['model']}")
+    print(
+        f"Department: {department['choice']} "
+        f"(confidence {department['confidence']:.2f})"
+    )
+    print(f"Probabilities: {department['probabilities']}")
+    print(f"Frustration: {answers['frustration']['score']:.2f} on a 0-2 scale")
+    print(f"Urgency: {answers['is_urgent']['noul']:.2f}")
+    print(f"Action: {triage_action(answers)}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Read the answers
+
+Each question ID becomes a key under `result["answers"]`:
+
+- `department` is a Choice answer. `choice` names the selected team; `probabilities` reports the alternatives and `confidence` is used by the escalation policy
+- `frustration` is a Score answer. The ordered criteria define levels 0, 1, and 2, from calm to very angry; read the numeric `score`, which need not be an integer
+- `is_urgent` is a Noul answer. Read `noul` as the probability of the statement being true, from 0 to 1, rather than as a Boolean
+
+Calling the three convenience methods separately would make three requests. Grouping the questions in `run()` evaluates them together in one request.
+
+## Apply the policy
+
+`triage_action()` checks the conditions in this order:
+
+1. Department confidence below `0.6`: send the ticket to a human, even if it appears urgent
+2. Otherwise, urgency above `0.8` and frustration at least `1`: recommend paging the selected team's on-call staff
+3. Otherwise: queue the ticket for the selected team
+
+These are application thresholds, not settings inside the model or guarantees of correctness. Evaluate them on representative tickets before enabling automatic actions. This script only prints the recommendation; it does not create tickets or page anyone. The pure `triage_action()` function can be tested with local answer dictionaries without credentials or network calls.
+
+## Inspect your run
+
+<Note>
+Live TypeSafe output has not yet been verified for this walkthrough. No fabricated response is presented as a recorded run.
+</Note>
+
+The script prints the full response first, including any provider usage fields, followed by a readable summary and the selected action. Use that response to inspect the actual probabilities and scores returned for your ticket. `finally` closes the decision model's pooled HTTP client even if the request fails.
+
+Next, use the same typed questions to [route work to an agent](/examples/decision-models/agent-router).
+
+See the [DecisionModel API reference](/api/decision-model) for response fields and the [custom decision-model guide](/examples/decision-models/custom-decision-model) for provider configuration.
