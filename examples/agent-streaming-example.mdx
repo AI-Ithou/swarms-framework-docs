@@ -43,7 +43,7 @@ for token in agent.run_stream(
 
 ## Async Streaming
 
-Drop-in for any async caller. The agent loop runs in a thread executor; tokens flow through an `asyncio.Queue` so the caller's event loop is never blocked.
+Drop-in for any async caller. The agent loop runs in a background thread; tokens flow through an `asyncio.Queue` so the caller's event loop is never blocked.
 
 ```python
 import asyncio
@@ -70,7 +70,7 @@ asyncio.run(main())
 
 ## Streaming Through the Autonomous Loop
 
-When `max_loops="auto"`, the agent runs a plan→execute→summary cycle. All phases stream their tokens — including the final summary phase.
+When `max_loops="auto"`, the agent runs a plan→execute→summary cycle. Both stream methods go through `run()`, so they enter the same [autonomous loop](/agents/autonomous-mode) and every phase streams its tokens — including the final summary phase.
 
 ```python
 import asyncio

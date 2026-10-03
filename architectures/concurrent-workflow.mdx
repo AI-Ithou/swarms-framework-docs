@@ -20,7 +20,8 @@ The `ConcurrentWorkflow` runs multiple agents simultaneously on the same task, e
 - Agent status tracking
 - Streaming callbacks support
 - Thread pool sized by agent count, capped at 32
-- Conversation history aggregation
+- Conversation history aggregation, with a fresh conversation for every run
+- Results recorded in agent order, one final answer per agent
 
 ## Basic Example
 
@@ -108,11 +109,11 @@ results = workflow.run(
 </ParamField>
 
 <ParamField path="output_type" type="str" default="dict-all-except-first">
-  Output format for results
+  Output format for results. The default returns each agent's message as a `{"role", "content"}` dict, without the user's task.
 </ParamField>
 
 <ParamField path="auto_generate_prompts" type="bool" default="False">
-  Enable automatic prompt engineering
+  Accepted and stored, but never read. Setting it has no effect.
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="True">
@@ -139,7 +140,7 @@ results = workflow.run(
 
 ### run()
 
-Execute all agents concurrently on a task.
+Execute all agents concurrently on a task. Each call starts with a fresh conversation, so a reused workflow returns only this task's messages.
 
 ```python
 result = workflow.run(
@@ -151,7 +152,7 @@ result = workflow.run(
 
 ### batch_run()
 
-Process multiple tasks sequentially (each task runs agents concurrently).
+Process multiple tasks sequentially (each task runs agents concurrently). Every task runs in its own conversation, so a result never includes messages from earlier tasks.
 
 ```python
 tasks = [
@@ -217,21 +218,22 @@ processing_team = ConcurrentWorkflow(
     agents=[summary_agent, sentiment_agent, key_points_agent]
 )
 
-documents = ["doc1.txt", "doc2.txt", "doc3.txt"]
+# Tasks are plain strings, so pass each document's text rather than its path
+documents = [open(path).read() for path in ["doc1.txt", "doc2.txt", "doc3.txt"]]
 results = processing_team.batch_run(documents)
 ```
 
 ## Performance Optimization
 
-### CPU Core Utilization
+### Thread pool sizing
 
-The thread pool is sized by agent count, capped at 32, since agent calls are network-bound rather than CPU-bound:
+The thread pool is sized by agent count, capped at 32 (`MAX_CONCURRENT_AGENTS`), since agent calls are network-bound rather than CPU-bound. Pass `max_workers` to override it, for example to stay under a provider's rate limit:
 
 ```python
-import os
-
-# Automatically calculated
-max_workers = max(1, min(len(self.agents), MAX_CONCURRENT_AGENTS))  # MAX_CONCURRENT_AGENTS = 32
+workflow = ConcurrentWorkflow(
+    agents=agents,
+    max_workers=4,
+)
 ```
 
 ### Agent Configuration for Concurrency
@@ -264,7 +266,7 @@ print(workflow.agent_statuses)
 ```python
 result = workflow.run("Task")
 
-# Access aggregated conversation
+# Access the latest run's conversation
 history = workflow.conversation.conversation_history
 
 # Format:
@@ -273,14 +275,17 @@ history = workflow.conversation.conversation_history
 #  {"role": "Agent2", "content": "Response2"}]
 ```
 
+Each agent contributes its final answer, not its whole transcript, and messages follow the order of `agents` rather than completion order.
+
 ## Output Types
 
-Supported output formats:
+Supported output formats include:
 
-- `"dict-all-except-first"`: Dictionary excluding initial user message
-- `"dict"`: Complete conversation dictionary
-- `"str"`: Concatenated string output
-- `"list"`: List of all messages
+- `"dict-all-except-first"` (default): List of message dicts, without the user's task
+- `"dict"` / `"list"`: List of every message dict, task included
+- `"str"` / `"all"`: The transcript as `"role: content"` text
+- `"str-all-except-first"`: The agents' answers as text, without the task
+- `"final"`: The last agent's answer
 
 ```python
 workflow = ConcurrentWorkflow(
@@ -299,7 +304,7 @@ workflow = ConcurrentWorkflow(
 2. **Appropriate Size**: 3-8 agents typically optimal for most systems
 3. **Dashboard Usage**: Enable for debugging, disable for production
 4. **Resource Management**: Monitor CPU/memory with large agent counts
-5. **Error Handling**: One agent failure doesn't stop others
+5. **Error Handling**: With the default `on_error="store"`, one agent failure doesn't stop others
 
 <Warning>
   Concurrent execution means agents run simultaneously - ensure your LLM API can handle parallel requests
@@ -312,7 +317,7 @@ try:
     results = workflow.run("Analyze market")
 except Exception as e:
     print(f"Workflow error: {e}")
-    # Individual agent errors are captured in results
+    # With on_error="store", agent errors appear in results as "<name> (failed)"
 ```
 
 ## Related Architectures

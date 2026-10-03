@@ -21,7 +21,7 @@ This example demonstrates how to build a research team swarm that collaborates t
 We use **HierarchicalSwarm** because:
 - Research flows naturally from data gathering → analysis → synthesis
 - A director agent can coordinate specialist researchers
-- Each layer builds upon the previous layer's output
+- Each loop builds on the previous loop's results
 - Clear separation of concerns (research vs analysis vs writing)
 
 ## Complete Implementation
@@ -107,8 +107,8 @@ research_team = HierarchicalSwarm(
     name="Research-Team-Swarm",
     description="Autonomous research team for comprehensive analysis",
     agents=[researcher_agent, data_analyst, critical_analyst, report_writer],
-    max_loops=1,
-    output_type="final",  # return the final report as a string
+    max_loops=2,  # the second loop can hand the first loop's findings to the report writer
+    output_type="list",
 )
 
 # Execute research project
@@ -126,23 +126,32 @@ if __name__ == "__main__":
     """
     
     # Run the swarm
-    result = research_team.run(research_query)
-    
+    history = research_team.run(research_query)
+
+    # The last message is a loop marker, so take the report writer's latest answer.
+    report = next(
+        message["content"]
+        for message in reversed(history)
+        if message["role"] == "Report-Writer"
+    )
+
     # Save the report
     with open("healthcare_ai_report.md", "w") as f:
-        f.write(result)
+        f.write(report)
     
     print("Research report completed and saved to healthcare_ai_report.md")
 ```
 
 ## How It Works
 
-1. **Primary Researcher** gathers initial information and sources
-2. **Data Analyst** processes the research into structured insights
-3. **Critical Analyst** reviews findings for quality and completeness
-4. **Report Writer** synthesizes everything into a final report
+`HierarchicalSwarm` creates a director (none is passed here) that reads the query and the team roster, then issues orders to the specialists:
 
-Each agent receives the output of previous agents, building upon their work to create a comprehensive final product.
+- **Primary Researcher** gathers initial information and sources
+- **Data Analyst** processes the research into structured insights
+- **Critical Analyst** reviews findings for quality and completeness
+- **Report Writer** synthesizes everything into a final report
+
+Orders within a loop run in parallel, so agents in the same loop do not see each other's answers. Each agent does see the shared conversation from earlier loops, which is why `max_loops=2` lets the director give the report writer the first loop's findings to synthesize.
 
 ## Customization Tips
 
@@ -156,7 +165,7 @@ medical_expert = Agent(
     max_loops=1,
 )
 
-# Insert between data_analyst and critical_analyst
+# Add to the team; the director decides which agents get which orders
 research_team = HierarchicalSwarm(
     agents=[researcher_agent, data_analyst, medical_expert, critical_analyst, report_writer],
     # ... other params
@@ -227,7 +236,7 @@ researcher_agent = Agent(
 For independent research streams:
 
 ```python
-from swarms import ConcurrentWorkflow
+from swarms import Agent, batched_grid_agent_execution
 
 # Research multiple topics in parallel
 topics = [
@@ -236,12 +245,19 @@ topics = [
     "AI in patient care",
 ]
 
-parallel_research = ConcurrentWorkflow(
-    agents=[researcher_agent],
-    max_loops=1,
-)
+# One researcher per topic, so no agent instance is shared between threads.
+researchers = [
+    Agent(
+        agent_name=f"Primary-Researcher-{i}",
+        system_prompt=researcher_agent.system_prompt,
+        model_name="claude-sonnet-4-6",
+        max_loops=1,
+    )
+    for i in range(len(topics))
+]
 
-results = [parallel_research.run(topic) for topic in topics]
+# Results come back in topic order.
+results = batched_grid_agent_execution(agents=researchers, tasks=topics)
 ```
 
 ### Cache Common Research

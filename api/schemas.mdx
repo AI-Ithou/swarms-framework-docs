@@ -1,6 +1,7 @@
 ---
 title: Schemas
 description: Pydantic schemas for agents, conversations, and API interactions in Swarms
+icon: "file-code"
 ---
 
 ## Overview
@@ -14,7 +15,7 @@ The `swarms.schemas` module provides Pydantic models and exception classes used 
 | **Planner/worker schemas** | `TaskPriority`, `PlannerTaskStatus`, `PlannerTask`, `PlannerTaskOutput`, `PlannerTaskSpec`, `CycleVerdict` |
 
 ```python
-from swarms.schemas import (
+from swarms import (
     MCPConnection,
     MCPOAuthConfig,
     AgentError,
@@ -24,7 +25,7 @@ from swarms.schemas import (
 ```
 
 <Note>
-These 17 names are the complete public surface of `swarms.schemas`.
+These 17 names are the complete public surface of `swarms.schemas`. All of them are re-exported from the top-level `swarms` package, so `from swarms import AgentLLMError` and `from swarms.schemas import AgentLLMError` give you the same class.
 </Note>
 
 ## MCP Schemas
@@ -34,7 +35,7 @@ These 17 names are the complete public surface of `swarms.schemas`.
 Defines connection parameters for a Model Context Protocol (MCP) server.
 
 ```python
-from swarms.schemas import MCPConnection
+from swarms import MCPConnection
 
 mcp = MCPConnection(
     url="http://localhost:8000/mcp",
@@ -63,11 +64,11 @@ mcp = MCPConnection(
 </ParamField>
 
 <ParamField path="authorization_token" type="str" default="None">
-  Bearer token for accessing the MCP server
+  Bearer token for accessing the MCP server. Accepts `"env:MY_VAR"` or `"${MY_VAR}"` to read it from the environment
 </ParamField>
 
 <ParamField path="api_key" type="str" default="None">
-  API key for the MCP server. Sent using `api_key_header` / `api_key_prefix`
+  API key for the MCP server. Sent using `api_key_header` / `api_key_prefix`. Accepts `"env:MY_VAR"` or `"${MY_VAR}"`
 </ParamField>
 
 <ParamField path="api_key_header" type="str" default="Authorization">
@@ -131,7 +132,7 @@ OAuth 2.1 configuration for an MCP server, passed as `MCPConnection.oauth`. Thre
 Any string field may use `"env:MY_VAR"` or `"${MY_VAR}"` to read the value from the environment instead of hardcoding a secret.
 
 ```python
-from swarms.schemas import MCPConnection, MCPOAuthConfig
+from swarms import MCPConnection, MCPOAuthConfig
 
 mcp = MCPConnection(
     url="https://mcp.example.com/mcp",
@@ -223,21 +224,29 @@ AgentError                          AgentMCPError
 `AgentMCPError` inherits from `Exception`, **not** from `AgentError`. Catching `AgentError` will not catch MCP failures — catch both if you want blanket coverage.
 </Note>
 
-| Exception | Raised when |
-|---|---|
-| `AgentError` | Base class for all agent-related exceptions |
-| `AgentInitializationError` | The agent fails to initialize; check configuration and parameters |
-| `AgentRunError` | The agent errors during execution; check the task and environment |
-| `AgentLLMError` | There is an issue with the language model; verify availability and compatibility |
-| `AgentLLMInitializationError` | The LLM fails to initialize; check configuration and parameters |
-| `AgentToolExecutionError` | The agent fails to execute a tool; check the tool's configuration and availability |
-| `AgentMCPError` | Base class for MCP-related failures |
-| `AgentMCPConnectionError` | Connecting to an MCP server fails |
-| `AgentMCPToolError` | An MCP tool call fails |
+| Exception | Meaning | Where it is raised |
+|---|---|---|
+| `AgentError` | Base class for all agent-related exceptions | Catch it to handle any of the five subclasses |
+| `AgentInitializationError` | The agent fails to initialize | `Agent(...)` when `max_loops` is not a positive integer or `"auto"`, or `context_length` is missing. Also raised when publishing to the marketplace without `use_cases` |
+| `AgentRunError` | The agent errors during execution | Reserved; nothing in the framework raises it today |
+| `AgentLLMError` | The language model gave no usable response | `Agent.run()` in the standard loop, once every one of `retry_attempts` has failed and any `fallback_models` have also failed. The provider's error is chained as `__cause__` |
+| `AgentLLMInitializationError` | The LLM fails to initialize | Reserved; the framework catches it but does not raise it |
+| `AgentToolExecutionError` | A tool still fails after `tool_retry_attempts` | Raised by the agent's [ToolManager](/api/tool-manager). The agent catches it and writes the failure into the conversation, so it does not escape `Agent.run()` |
+| `AgentMCPError` | Base class for MCP-related failures | Catch it to handle both MCP subclasses |
+| `AgentMCPConnectionError` | Connecting to an MCP server fails | [MCPManager](/api/mcp-manager) when a server cannot be reached, authenticated, or configured |
+| `AgentMCPToolError` | An MCP tool call fails | [MCPManager](/api/mcp-manager) when no configured server exposes the requested tool |
+
+Errors from outside this module that you may also see:
+
+| Exception | Module | Raised when |
+|---|---|---|
+| `NetworkConnectionError` | `swarms.utils` | `LiteLLM.run()` cannot reach the provider. See [Utilities](/api/utils#networkconnectionerror) |
+| `LiteLLMException` | `swarms.utils` | Exported for the LiteLLM wrapper but not raised by the framework today |
+| `BaseToolError` and subclasses | `swarms.tools.base_tool` | A standalone `BaseTool` fails. See [Tools](/api/tools#exceptions) |
 
 ```python
-from swarms import Agent
-from swarms.schemas import (
+from swarms import (
+    Agent,
     AgentError,
     AgentLLMError,
     AgentMCPConnectionError,
@@ -281,7 +290,7 @@ any non-terminal -> CANCELLED
 A single task in the shared planner-worker task queue. Created by planner agents, consumed by worker agents. The `version` field enables optimistic concurrency control.
 
 ```python
-from swarms.schemas import PlannerTask, TaskPriority
+from swarms import PlannerTask, TaskPriority
 
 task = PlannerTask(
     title="Research competitors",
@@ -379,7 +388,7 @@ A single task definition as output from a planner agent.
 Structured output from a planner agent: a plan narrative plus a list of concrete tasks.
 
 ```python
-from swarms.schemas import PlannerTaskOutput, PlannerTaskSpec
+from swarms import PlannerTaskOutput, PlannerTaskSpec
 
 spec = PlannerTaskSpec(
     plan="Research the market, then summarise the findings.",
@@ -437,8 +446,7 @@ Structured output from the judge agent after evaluating a planning cycle.
 ## Example: MCP Connection Setup
 
 ```python
-from swarms import Agent
-from swarms.schemas import MCPConnection
+from swarms import Agent, MCPConnection
 
 # Describe a server with a full connection object
 filesystem_mcp = MCPConnection(
@@ -453,21 +461,25 @@ agent = Agent(
     model_name="gpt-5.4",
 )
 
-# For multiple servers, Agent takes a list of URL strings via `mcp_urls`
-# (not MCPConnection objects):
+# mcp_urls accepts URL strings, MCPConnection objects, or dicts, mixed freely
 agent = Agent(
     agent_name="MultiServer-Agent",
-    mcp_urls=["http://localhost:8000/mcp", "http://localhost:8001/mcp"],
+    mcp_urls=[
+        "http://localhost:8001/mcp",
+        MCPConnection(url="http://localhost:8002/mcp", api_key="env:SEARCH_MCP_KEY"),
+    ],
     model_name="gpt-5.4",
 )
 ```
+
+`Agent` also takes `mcp_config` (one `MCPConnection` or dict) and `mcp_configs` (a list of them). Tools from every server are merged, and each call is routed to the server that owns the tool.
 
 ## Example: Tracking Planner Tasks
 
 ```python
 import time
 
-from swarms.schemas import PlannerTask, PlannerTaskStatus, TaskPriority
+from swarms import PlannerTask, PlannerTaskStatus, TaskPriority
 
 queue = [
     PlannerTask(
@@ -513,7 +525,7 @@ The Pydantic models above (`MCPConnection`, `MCPOAuthConfig`, `PlannerTask`, `Pl
 - Type checking
 
 ```python
-from swarms.schemas import PlannerTask
+from swarms import PlannerTask
 
 task = PlannerTask(title="Research", description="Do research")
 

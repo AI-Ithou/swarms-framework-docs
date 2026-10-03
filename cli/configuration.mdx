@@ -26,7 +26,7 @@ A Swarms YAML configuration file has two main sections:
 ```yaml
 agents:
   - agent_name: "Research-Agent"
-    model_name: "gpt-4"
+    model_name: "gpt-5.4"
     temperature: 0.1
     max_tokens: 2000
     system_prompt: "You are an expert research analyst specializing in technology trends."
@@ -39,7 +39,6 @@ agents:
     user_name: "researcher"
     retry_attempts: 3
     context_length: 4000
-    return_step_meta: false
     output_type: "str"
 
 swarm_architecture:
@@ -56,7 +55,7 @@ swarm_architecture:
 ```yaml
 agents:
   - agent_name: "Financial-Analysis-Agent"
-    model_name: "gpt-4"
+    model_name: "gpt-5.4"
     temperature: 0.1
     max_tokens: 2000
     system_prompt: "You are a financial analyst expert."
@@ -69,11 +68,10 @@ agents:
     user_name: "swarms_corp"
     retry_attempts: 1
     context_length: 4000
-    return_step_meta: false
     output_type: "str"
 
   - agent_name: "Stock-Analysis-Agent"
-    model_name: "gpt-4"
+    model_name: "gpt-5.4"
     temperature: 0.2
     max_tokens: 1500
     system_prompt: "You are a stock market analysis expert."
@@ -86,7 +84,6 @@ agents:
     user_name: "stock_user"
     retry_attempts: 3
     context_length: 4000
-    return_step_meta: true
     output_type: "json"
 
 swarm_architecture:
@@ -115,12 +112,25 @@ swarm_architecture:
   max_loops: 2
   task: "Analyze ROTH IRA setup requirements and provide a comprehensive long-term investment strategy"
   autosave: true
-  return_json: false
-  rules: |
-    1. Financial-Analysis-Agent first explains ROTH IRA setup process and requirements
-    2. Stock-Analysis-Agent then provides specific investment strategies suitable for ROTH IRA
-    3. Both agents should ensure advice is tax-aware and compliant with retirement account regulations
-    4. Focus on practical, actionable steps the user can take
+```
+
+Any extra key in `swarm_architecture` is passed to `SwarmRouter` as a keyword argument. Use this for router parameters such as `rearrange_flow` (required for `AgentRearrange`), `output_type`, or `fallback_swarms`:
+
+```yaml
+agents:
+  - agent_name: "Drafter"
+    system_prompt: "You write a first draft."
+  - agent_name: "Reviewer"
+    system_prompt: "You review drafts for clarity."
+  - agent_name: "Fact-Checker"
+    system_prompt: "You check every factual claim."
+
+swarm_architecture:
+  name: "Review-Pipeline"
+  description: "Draft, then review and fact-check in parallel"
+  swarm_type: "AgentRearrange"
+  rearrange_flow: "Drafter -> Reviewer, Fact-Checker"
+  task: "Write a short brief on solid-state batteries"
 ```
 
 ### Agent Configuration Parameters
@@ -139,13 +149,10 @@ swarm_architecture:
 | `user_name` | string | No | "default_user" | Username associated with agent |
 | `retry_attempts` | integer | No | 3 | Number of retry attempts on failure |
 | `context_length` | integer | No | 100000 | Maximum context length |
-| `return_step_meta` | boolean | No | false | Return metadata for each step |
-| `output_type` | string | No | "str" | Output format ("str" or "json") |
-| `task` | string | No | null | Task for the agent to execute |
-| `auto_generate_prompt` | boolean | No | false | Auto-generate system prompts |
-| `artifacts_on` | boolean | No | false | Enable artifact generation |
-| `artifacts_file_extension` | string | No | ".md" | File extension for artifacts |
-| `artifacts_output_path` | string | No | "" | Output path for artifacts |
+| `output_type` | string | No | "str" | Output format, such as "str", "json", or "dict" |
+| `auto_generate_prompt` | boolean | No | false | Build the system prompt from the agent's name, description, and prompt |
+
+The `autosave`, `user_name`, and `context_length` defaults above come from the YAML loader and differ from the `Agent` class defaults. The loader also accepts `return_step_meta`, `artifacts_on`, `artifacts_file_extension`, and `artifacts_output_path`, but `Agent` no longer has those parameters, so they have no effect. Any other key, such as `temperature` or `max_tokens`, is passed to `Agent` as a keyword argument; keys `Agent` does not recognize are silently ignored.
 
 ### Model Configuration
 
@@ -155,7 +162,7 @@ Model parameters are flat, top-level fields on each agent entry — there is no 
 agents:
   - agent_name: "My-Agent"
     system_prompt: "You are a helpful assistant."
-    model_name: "gpt-4"           # Model identifier
+    model_name: "gpt-5.4"         # Model identifier
     temperature: 0.1               # Randomness (0.0-2.0)
     max_tokens: 2000              # Maximum tokens per response
 ```
@@ -166,13 +173,13 @@ agents:
 |-----------|------|----------|-------------|
 | `name` | string | Yes | Name of the swarm |
 | `description` | string | Yes | Description of swarm purpose |
-| `swarm_type` | string | Yes | Type of swarm (e.g., "SequentialWorkflow") |
-| `max_loops` | integer | No | Maximum loops for swarm execution |
-| `task` | string | No | Overall task for the swarm |
-| `flow` | object | No | Flow configuration for agent routing |
-| `autosave` | boolean | No | Enable swarm state autosave |
-| `return_json` | boolean | No | Return results in JSON format |
-| `rules` | string | No | Rules governing swarm behavior |
+| `swarm_type` | string | Yes | Type of swarm (e.g., "SequentialWorkflow"); any `SwarmRouter` swarm type |
+| `task` | string | Yes, for `run-agents` | The task `run-agents` passes to the swarm |
+| `max_loops` | integer | No | Maximum loops for swarm execution (default 1) |
+| `autosave` | boolean | No | Enable swarm state autosave (default true) |
+| any other key | any | No | Passed to `SwarmRouter`, e.g. `rearrange_flow`, `output_type`, `fallback_swarms` |
+
+The loader also accepts `flow`, `return_json`, and `rules`, but `SwarmRouter` has no such parameters and ignores them. To set an `AgentRearrange` flow, use `rearrange_flow`.
 
 ### Running YAML Configurations
 
@@ -188,7 +195,7 @@ With a custom file path:
 swarms run-agents --yaml-file /path/to/my-config.yaml
 ```
 
-`run-agents` hardcodes `return_type="run_swarm"`, so it always builds and runs a `SwarmRouter`. A YAML file that defines `agents` but omits `swarm_architecture` will fail — there is currently no standalone-agent mode for this command.
+`run-agents` hardcodes `return_type="run_swarm"`, so it always builds and runs a `SwarmRouter`. A YAML file that defines `agents` but omits `swarm_architecture`, or a `swarm_architecture` without a `task`, will fail — there is currently no standalone-agent mode for this command.
 
 ## Environment Variables
 
@@ -196,7 +203,7 @@ The Swarms CLI uses environment variables for API keys and configuration.
 
 ### Required Environment Variables
 
-At least one API key is required:
+At least one provider key is required. `swarms setup-check` looks for one of these four, but any provider LiteLLM supports works for running agents (for example `GROQ_API_KEY`, `XAI_API_KEY`, or `OPENROUTER_API_KEY`):
 
 ```bash
 # OpenAI (most common)
@@ -215,16 +222,17 @@ export COHERE_API_KEY="..."
 ### Optional Environment Variables
 
 ```bash
-# Workspace directory for agent outputs
+# Workspace directory for agent state and logs
 export WORKSPACE_DIR="./agent_workspace"
 
-# Wandb (for tracking)
-export WANDB_API_KEY="..."
-export WANDB_SILENT="true"
+# Swarms platform key, needed for --marketplace-prompt-id
+export SWARMS_API_KEY="..."
 
-# TensorFlow logging level
-export TF_CPP_MIN_LOG_LEVEL="3"
+# Opt out of OpenTelemetry tracing, which is on by default
+export SWARMS_TELEMETRY_ON="false"
 ```
+
+See [Telemetry](/deployment/telemetry) for what tracing captures.
 
 ### Using .env Files
 
@@ -235,18 +243,13 @@ Create a `.env` file in your project root:
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 WORKSPACE_DIR=./agent_workspace
-WANDB_SILENT=true
 ```
 
-The Swarms CLI automatically loads `.env` files from the current directory.
+The Swarms CLI automatically loads the nearest `.env` file, searching upward from the current directory. `swarms init` writes one for you.
 
 ### Environment Variable Priority
 
-The CLI checks for API keys in this order:
-
-1. Environment variables set in the current shell
-2. Variables from `.env` file in current directory
-3. System-wide environment variables
+Variables already set in your environment, whether exported in the shell or set system-wide, take precedence. The `.env` file only fills in variables that are not already set.
 
 ### Workspace Directory
 
@@ -257,18 +260,21 @@ export WORKSPACE_DIR="/path/to/workspace"
 ```
 
 **Default behavior:**
-- If not set, some swarm operations will create a default workspace
-- Agents will autosave state files to this directory
-- Artifacts and outputs are stored here
+- If not set, importing Swarms sets it to `./agent_workspace` and creates the directory
+- Agent state files are saved under `agents/<agent-name>-<id>/`
+- Logs are written to `logs/`
 
 **Directory structure example:**
 ```
 agent_workspace/
-├── finance_agent.json
-├── stock_agent.json
+├── agents/
+│   └── financial-analysis-agent-<id>/
+│       └── finance_agent.json
 ├── logs/
-└── artifacts/
+└── swarms/
 ```
+
+Not everything lives in the workspace: conversation files saved without an explicit path go to `./conversations/` in the current directory, and `~/.swarms/` only caches MCP OAuth tokens.
 
 ## Markdown Agent Configuration
 
@@ -280,11 +286,9 @@ You can also define agents using Markdown files with YAML frontmatter.
 ---
 name: Research Agent
 description: Expert research analyst
-model_name: gpt-4
+model_name: gpt-5.4
 temperature: 0.1
 max_loops: 1
-autosave: true
-verbose: true
 ---
 
 You are an expert research analyst with deep knowledge of:
@@ -296,6 +300,8 @@ You are an expert research analyst with deep knowledge of:
 Provide thorough, well-researched responses backed by evidence.
 ```
 
+The markdown loader reads only `name`, `description`, `model_name` (or `model`), `temperature`, `max_loops`, `mcp_url`, and `streaming_on` from the frontmatter. Other keys are ignored, and the body becomes the system prompt.
+
 ### Loading Markdown Agents
 
 Load a single agent:
@@ -304,17 +310,9 @@ Load a single agent:
 swarms load-markdown --markdown-path ./agent.md
 ```
 
-Load all agents from a directory:
-
-```bash
-swarms load-markdown --markdown-path ./agents/
-```
-
-With concurrent processing:
-
-```bash
-swarms load-markdown --markdown-path ./agents/ --concurrent
-```
+<Warning>
+  In Swarms 15.0.3, passing a directory to `--markdown-path` fails with `Unsupported file type`. Load one file at a time.
+</Warning>
 
 `--concurrent` defaults to `true` and there is no `--no-concurrent` flag to disable it, so this flag is currently always on regardless of whether it's passed.
 
@@ -336,7 +334,7 @@ swarms load-markdown --markdown-path ./agents/ --concurrent
 
 ### 3. Swarm Configuration
 
-- **Define clear rules** for agent collaboration
+- **Put collaboration rules in system prompts**; the `rules` key is ignored
 - **Use descriptive names** for agents and swarms
 - **Test with max_loops=1** before increasing
 - **Enable verbose mode** during development
@@ -402,7 +400,7 @@ swarm_architecture:
 ```yaml
 agents:
   - agent_name: "Production-Agent"
-    model_name: "gpt-4"
+    model_name: "gpt-5.4"
     temperature: 0.2
     max_tokens: 4000
     system_prompt: "You are a production-ready agent with error handling."
@@ -442,10 +440,6 @@ swarm_architecture:
   swarm_type: "SequentialWorkflow"
   max_loops: 1
   task: "Write a report on renewable energy adoption"
-  rules: |
-    1. Researcher gathers information
-    2. Writer creates content from research
-    3. Editor polishes the final output
 ```
 
 ## Troubleshooting

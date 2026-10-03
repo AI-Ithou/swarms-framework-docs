@@ -12,11 +12,11 @@ Swarms agents can persist their interaction history to disk through a per-agent 
 - You want a human-readable transcript of what the agent has seen and produced.
 - You need to inspect, search, or export the agent's interaction log.
 
-For external knowledge retrieval (PDFs, databases, doc stores), use `long_term_memory` (RAG) instead — `MEMORY.md` is for the agent's own history, not a document index.
+For external knowledge (PDFs, databases, doc stores), give the agent a retrieval tool instead — `MEMORY.md` is for the agent's own history, not a document index. See [External knowledge](/agents/agent-memory#external-knowledge).
 
 ## How it works
 
-Memory is keyed by `agent_name` and lives under the workspace directory:
+Memory is keyed by `agent_name` and lives under the workspace directory. When `WORKSPACE_DIR` is not set, it falls back to `./agent_workspace`:
 
 ```text
 $WORKSPACE_DIR/agents/{agent_name}/
@@ -25,25 +25,22 @@ $WORKSPACE_DIR/agents/{agent_name}/
     `-- history_<timestamp>.md
 ```
 
-On construction, Swarms reads `MEMORY.md` and injects it into `conversation_history` as a single `System` message. Every `conversation.add(...)` then write-throughs to disk so nothing is lost on exit.
+On construction, Swarms reads `MEMORY.md` and adds it to `agent.short_memory` as a single `System` message. Every `conversation.add(...)` then writes through to disk so nothing is lost on exit.
 
 ## Basic example
 
-Set `agent_name` and `persistent_memory=True`. On the first run Swarms creates `MEMORY.md`. On subsequent runs the prior conversation is preloaded as a system preamble and the agent picks up where it left off:
+Set `agent_name` and `persistent_memory=True`. The first construction creates `MEMORY.md`, and every turn after that is appended to it:
 
 ```python
 from swarms import Agent
 
-# Persistent agent (default behavior).
-# On first run it creates MEMORY.md. On subsequent runs it picks up
-# where it left off — the model sees the prior conversation as a
-# system preamble.
+# Off by default; opt in to keep a log that survives restarts.
 persistent_agent = Agent(
     agent_name="ResearchAssistant",
     agent_description="Remembers context across sessions",
     model_name="gpt-5.4",
     max_loops=1,
-    persistent_memory=True,  # off by default — opt in to survive restarts
+    persistent_memory=True,
 )
 
 persistent_agent.run("Research low-latency cloud data warehouses for analytics.")
@@ -56,24 +53,42 @@ print(persistent_agent.short_memory.memory_md_path)
 
 ## Resume across restarts
 
-Re-instantiate an agent with the **same** `agent_name` and `persistent_memory=True`. The prior transcript is preloaded as a system message before the new task runs:
+Re-instantiate an agent with the **same** `agent_name` and `persistent_memory=True`. The prior log is loaded into `agent.short_memory` as one `System` message, and new turns keep appending to the same file.
+
+Changing the name starts a fresh memory folder; `id` changes between runs and is not used as the key.
+
+<Warning>
+  `agent.run()` does not currently send that `System` message to the model, so a resumed agent does not see its earlier sessions on its own. Until it does, put the log into `system_prompt` yourself. The system prompt is never written to `MEMORY.md`, so this does not make the log grow.
+</Warning>
 
 ```python
+import os
+from pathlib import Path
+
 from swarms import Agent
+
+memory_file = Path(
+    os.getenv("WORKSPACE_DIR", "agent_workspace"),
+    "agents",
+    "ResearchAssistant",
+    "MEMORY.md",
+)
+earlier = memory_file.read_text() if memory_file.exists() else ""
 
 # Second process, hours later
 agent = Agent(
-    agent_name="ResearchAssistant",  # same name -> same memory
+    agent_name="ResearchAssistant",
     model_name="gpt-5.4",
     max_loops=1,
     persistent_memory=True,
+    system_prompt=(
+        "You are a research assistant.\n\n"
+        f"Your notes from earlier sessions:\n{earlier}"
+    ),
 )
 
-# The agent already "remembers" the GCP shortlist from before
 agent.run("Compare BigQuery vs AlloyDB for our latency requirements.")
 ```
-
-Changing the name starts a fresh memory folder; `id` changes between runs and is not used as the key.
 
 ## Inspect memory in code
 
@@ -96,16 +111,18 @@ matches = agent.short_memory.search_keyword_in_conversation("latency")
 
 ## Export and reload
 
-Snapshot memory to JSON or YAML and reload it later:
+Snapshot the conversation to JSON and reload it later:
 
 ```python
-agent.short_memory.export(force=True)
-agent.short_memory.save_as_json(force=True)
-agent.short_memory.save_as_yaml(force=True)
+# Writes ./conversations/conversation_<conversation name>.json
+agent.short_memory.export()
+snapshot = agent.short_memory.save_filepath
 
-# Restore from a prior snapshot
-agent.short_memory.load("conversation_agent-123.json")
+# Replace the history with the snapshot
+agent.short_memory.load(snapshot)
 ```
+
+Snapshots go to `./conversations/` under the current working directory, not to the workspace. The folder is created only when you save.
 
 ## Disable disk-backed memory
 
@@ -114,7 +131,7 @@ For privacy-sensitive or one-off agents, set `persistent_memory=False`. In-proce
 ```python
 from swarms import Agent
 
-# Ephemeral agent — no MEMORY.md, no archive, fresh state every run.
+# No MEMORY.md and no archive.
 ephemeral_agent = Agent(
     agent_name="EphemeralAgent",
     model_name="gpt-5.4",
@@ -133,6 +150,6 @@ ephemeral_agent.run("This task is not written to MEMORY.md.")
 
 ## See also
 
-- [Agent Memory Reference](/agents/agent-memory) — Full memory stack, lifecycle, and disk layout.
+- [Agent Memory Reference](/agents/agent-memory) — Full memory stack, lifecycle, disk layout, and where every file is written.
 - [Context Compression](/examples/agents/context-compression) — Keep persistent memory within the context window.
 - [Conversation API](/api/conversation) — Underlying class for export, load, and search.

@@ -90,17 +90,20 @@ pip install -r requirements.txt
 After installation, verify that Swarms is correctly installed:
 
 ```python
-from importlib.metadata import version
+import swarms
 
-print(f"Swarms version: {version('swarms')}")
-print("Swarms is ready!")
+print(f"Swarms version: {swarms.__version__}")
 ```
 
 You can also run this as a one-liner:
 
 ```bash
-python -c "import swarms; print('Swarms is ready!')"
+python -c "import swarms; print(swarms.__version__)"
 ```
+
+<Note>
+  `swarms.__version__` is read from the installed package metadata, so it always matches the version pip installed. In a source checkout that was never installed, it returns `"unknown"` instead of raising.
+</Note>
 
 ## Installing Specific Versions
 
@@ -110,7 +113,7 @@ If you need a specific version of Swarms:
 
 ```bash pip
 # Install a specific version
-pip3 install swarms==1.0.0
+pip3 install swarms==15.0.3
 
 # Install the latest pre-release
 pip3 install --pre swarms
@@ -118,12 +121,12 @@ pip3 install --pre swarms
 
 ```bash uv
 # Install a specific version
-uv pip install swarms==1.0.0
+uv pip install swarms==15.0.3
 ```
 
 ```bash poetry
 # Add a specific version
-poetry add swarms@1.0.0
+poetry add swarms@15.0.3
 ```
 
 </CodeGroup>
@@ -158,7 +161,7 @@ If you're planning to contribute to Swarms or need the latest development featur
 
   <Step title="Verify the installation">
     ```bash
-    python -c "import swarms; print('Development installation successful!')"
+    python -c "import swarms; print(swarms.__version__)"
     ```
   </Step>
 </Steps>

@@ -376,7 +376,7 @@ The workflow runs once end to end (`max_loops=1`); wrap the `workflow.run(...)` 
 You can customize this example by modifying the `SequentialWorkflow` parameters or the agents' prompts:
 
 *   **`name` and `description`**: Customize the workflow's identity.
-*   **`team_awareness`**: Whether each agent sees the prior agents' outputs as shared context.
+*   **`team_awareness`**: Adds a map of the whole flow (each step and the steps it follows and leads to) to the shared conversation at the start of every run. Every agent sees the earlier agents' outputs either way.
 *   **`max_loops`**: Control the number of internal reasoning iterations each agent performs (set during agent initialization), as well as how many end-to-end passes the workflow makes.
 *   **`system_prompt`**: Modify the `REQUIREMENTS_ANALYZER_PROMPT`, `SEARCH_EXECUTOR_PROMPT`, and `RESULTS_CURATOR_PROMPT` to refine agent behavior and output.
 
@@ -384,7 +384,7 @@ You can customize this example by modifying the `SequentialWorkflow` parameters 
 
 To get the most out of the AI Job Finding Swarm:
 
-*   **Provide Clear Requirements**: Start with a detailed and unambiguous `initial_user_input` to help the Requirements Analyzer generate effective queries.
+*   **Provide Clear Requirements**: Start with a detailed and unambiguous `user_requirements` string to help the Requirements Analyzer generate effective queries.
 *   **Iterate and Refine**: In a live application, leverage the user feedback loop to continuously refine search criteria and improve result relevance.
 *   **Monitor Agent Outputs**: Regularly review the outputs from each agent to ensure they are performing as expected and to identify areas for prompt improvement.
 *   **Manage API Usage**: Be mindful of your RapidAPI (JSearch) usage, especially when experimenting with `max_loops` or a large number of search queries.

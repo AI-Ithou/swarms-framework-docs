@@ -8,24 +8,26 @@ A job that runs every thirty seconds for a week will fail sometimes. A rate limi
 
 ## The model
 
-A task that raises is **logged and retried**. It does not take the schedule down. Under the hood, `CronJob` polls the underlying `schedule` library roughly once a second, and `schedule` only advances a job's `next_run` on success — a raised exception leaves the job due immediately, so it gets retried on the *next ~1-second poll tick*, not paced by the configured `interval`. That is the only sensible default for something meant to run unattended, but it does mean a failing job can be retried far more often than its `interval` suggests.
+A task that raises is **logged and retried at the next interval**. It does not take the schedule down. `CronJob` catches the exception inside the job, records it as a failed execution, and returns normally, so the `schedule` library moves the job to its next run exactly as it does after a success. A failing job runs no more often than a healthy one: with `interval="2seconds"`, a task that always fails is attempted once every two seconds.
 
 ```
 ~1s poll ──> due? ──> agent.run(task) ──> raised?
                                             │
                                             ├── no  ──> execution_count += 1
                                             │           consecutive_errors = 0
+                                            │           callback runs, if set
                                             │           next_run advances by `interval`
                                             │
                                             └── yes ──> log with traceback
                                                         error_count += 1
                                                         consecutive_errors += 1
-                                                        next_run does NOT advance
-                                                        ... still due, retried on the next ~1s poll
+                                                        last_error = the exception
+                                                        callback is skipped
+                                                        next_run advances by `interval`
 ```
 
 <Note>
-Earlier versions did the opposite: one exception set `is_running = False` and killed the scheduler thread, while `run()` returned a job object as though nothing had happened. A single transient failure permanently stopped the job, and the caller was handed a plausible return value and a dead schedule.
+Earlier versions got this wrong twice. First, one exception set `is_running = False` and killed the scheduler thread, while `run()` returned a job object as though nothing had happened. Later, a raised exception left the job due, so a failing task was retried on every one-second poll instead of waiting out its `interval`. Both are fixed: failures are recorded and the job waits for its next interval.
 </Note>
 
 ## Error budgets
@@ -40,7 +42,7 @@ job = CronJob(
 )
 ```
 
-- **`None`** (default): never give up. Every failure is logged, every tick retried.
+- **`None`** (default): never give up. Every failure is logged, and the task runs again at the next interval.
 - **An integer**: after that many failures *in a row*, the job stops and `run()` raises `CronJobExecutionError` naming the count and the last error.
 
 The counter resets on any success, so a job that fails occasionally never trips the budget. Only a job failing consistently does.
@@ -65,8 +67,7 @@ That distinction is the important part: a clean `stop()` returns, a job that gav
 import threading, time
 
 def monitor(job, every=5.0):
-    # This thread starts before run(), so wait for the job to come up first:
-    # looping on is_running immediately would exit before it ever started.
+    # Started before run(), so wait for the job to come up or the loop below exits at once.
     while not job.is_running:
         time.sleep(0.1)
 
@@ -145,7 +146,7 @@ else:
     print(f"Stopped cleanly: {s['execution_count']} ok, {s['error_count']} failed.")
 ```
 
-A representative run: **19 successful executions and 21 failures over sixty seconds**, never stopping, because the failures never stacked ten deep in a row. That total (40 runs) is higher than a naive "one tick every 2 seconds" model would predict — failures are retried on CronJob's ~1-second poll loop rather than waiting out the full `interval`, so a flaky job burns through attempts faster than its configured interval implies.
+Over sixty seconds the job makes about thirty attempts, one every two seconds whether the last one failed or not. About half succeed and half fail, and it never stops, because the failures almost never stack ten deep in a row.
 
 ## Budgets across a fleet
 

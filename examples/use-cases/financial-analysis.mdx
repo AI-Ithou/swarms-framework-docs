@@ -156,6 +156,15 @@ aggregator_agent = Agent(
     - Assign conviction levels (High/Medium/Low)
     
     Make final investment decisions based on collective intelligence.
+
+    Structure your output as:
+    1. Executive Summary
+    2. Analyst Consensus & Disagreements
+    3. Investment Thesis
+    4. Risk Assessment
+    5. Recommendation (Buy/Hold/Sell with conviction level)
+    6. Price Targets and Timeline
+    7. Key Risks and Mitigants
     """,
     model_name="claude-sonnet-4-6",
     max_loops=1,
@@ -173,19 +182,8 @@ financial_analysis_system = MixtureOfAgents(
         quant_analyst,
         sentiment_analyst,
     ],
+    # aggregator_system_prompt only applies to the default aggregator, so the output format lives in aggregator_agent's prompt.
     aggregator_agent=aggregator_agent,
-    aggregator_system_prompt="""
-    Synthesize all analyst perspectives into a comprehensive investment recommendation.
-    
-    Structure your output as:
-    1. Executive Summary
-    2. Analyst Consensus & Disagreements
-    3. Investment Thesis
-    4. Risk Assessment
-    5. Recommendation (Buy/Hold/Sell with conviction level)
-    6. Price Targets and Timeline
-    7. Key Risks and Mitigants
-    """,
     layers=2,  # Two rounds of analysis for deeper insights
 )
 
@@ -350,7 +348,14 @@ quick_screen = MixtureOfAgents(
 
 # For deep due diligence
 deep_analysis = MixtureOfAgents(
-    agents=[all_analysts],
+    agents=[
+        fundamental_analyst,
+        technical_analyst,
+        risk_analyst,
+        macro_analyst,
+        quant_analyst,
+        sentiment_analyst,
+    ],
     aggregator_agent=aggregator_agent,
     layers=3,  # Three layers for thorough analysis
 )
@@ -443,7 +448,7 @@ market_monitor = Agent(
     
     Alert on material changes requiring re-analysis.
     """,
-    max_loops="auto",
+    max_loops=20,  # stopping_condition is checked after each loop; max_loops="auto" ignores it
     stopping_condition=lambda response: "market_close" in response.lower(),
 )
 ```

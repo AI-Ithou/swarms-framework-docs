@@ -8,6 +8,8 @@ icon: "gavel"
 
 The `CouncilAsAJudge` implements a parallel evaluation system where multiple specialized judge agents evaluate different aspects of a task response simultaneously. Their findings are aggregated into a comprehensive technical report.
 
+You do not pass agents to the council. It builds one judge per dimension and one aggregator itself. Pass the text to evaluate as the `task` argument of `run`, including both the original question and the response, because each judge receives that single string as both the task and the response to grade.
+
 ## Installation
 
 ```bash
@@ -27,8 +29,8 @@ The council evaluates responses across six key dimensions:
 
 ## Attributes
 
-<ParamField path="id" type="str" default="auto-generated">
-  Unique identifier for the council
+<ParamField path="id" type="Optional[str]" default="None">
+  Unique identifier for the council. When omitted, one is generated as `council-as-judge-<32 hex characters>`.
 </ParamField>
 
 <ParamField path="name" type="str" default="CouncilAsAJudge">
@@ -40,31 +42,31 @@ The council evaluates responses across six key dimensions:
 </ParamField>
 
 <ParamField path="model_name" type="str" default="gpt-5.4">
-  Currently has no effect on judge selection. Judge agents are always built with `judge_agent_model_name` (see below); `reliability_check()` only ever overwrites this attribute with a random model string when `random_model_name=True`, and nothing reads it back afterward.
+  Model for the six judge agents when `judge_agent_model_name` is not set. Setting it to `None` raises `ValueError`.
 </ParamField>
 
 <ParamField path="output_type" type="str" default="final">
-  Type of output to return ("final", "dict", "list", etc.)
+  Type of output to return (`"final"`, `"dict"`, `"list"`, `"json"`, and so on). `"final"` returns only the aggregator's report. Setting it to `None` raises `ValueError`.
 </ParamField>
 
 <ParamField path="cache_size" type="int" default="128">
   Size of the LRU cache for prompts
 </ParamField>
 
-<ParamField path="random_model_name" type="bool" default="True">
-  Currently has no effect on judge selection. When `True`, `reliability_check()` assigns a random model string to `self.model_name`, but `_create_judges()` never reads `self.model_name` -- judge models are controlled solely by `judge_agent_model_name`.
+<ParamField path="random_model_name" type="bool" default="False">
+  When `True`, `model_name` is replaced at construction with a model picked at random from a built-in list. Judges then run on that model unless `judge_agent_model_name` is set. The list mixes providers, so you need API keys for each of them.
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of loops for agents
+  Stored on the instance but not used. Judges and the aggregator always run with `max_loops=1`.
 </ParamField>
 
 <ParamField path="aggregation_model_name" type="str" default="gpt-5.4">
-  Model name for the aggregator agent. This one does correctly control the aggregator.
+  Model name for the aggregator agent that writes the final report.
 </ParamField>
 
 <ParamField path="judge_agent_model_name" type="Optional[str]" default="None">
-  The model used to build every judge agent (`_create_judges()` passes it as `model_name` for each dimension judge). This is the only parameter that controls judge models. Since it defaults to `None`, judges are built with `model_name=None` unless you set this explicitly.
+  Model for every judge agent. When `None`, judges run on `model_name`.
 </ParamField>
 
 ## Methods
@@ -80,7 +82,15 @@ def run(self, task: str)
 **Parameters:**
 - `task` (str): Task containing the response to evaluate
 
-**Returns:** Formatted evaluation report based on output_type
+**Returns:** The conversation formatted according to `output_type`. With the default `"final"`, this is the aggregator's report as a string.
+
+**Raises:** `EvaluationError` if any step fails, including a single dimension's judge. The error message names the failing dimension.
+
+**Process flow:**
+1. Clears the conversation and records the task as a `User` message, so each run starts fresh
+2. Runs the six judges in parallel. Each judge's analysis is recorded under its own name as it finishes
+3. Sends the aggregator the task and every judge's analysis as separate chat turns, each labelled with the judge's name
+4. Records the aggregator's report and returns the formatted conversation
 
 ## Usage Examples
 
@@ -113,13 +123,10 @@ print(evaluation)
 ### Custom Model Configuration
 
 ```python
-# Use specific models for evaluation.
-# NOTE: model_name has no effect on judge agents -- use judge_agent_model_name
-# to control the model judges run on (random_model_name also has no effect).
 council = CouncilAsAJudge(
-    judge_agent_model_name="claude-sonnet-4-6",  # For judge agents
-    aggregation_model_name="claude-sonnet-4-6",  # For final synthesis
-    output_type="dict"
+    model_name="gpt-5.4-mini",  # judges
+    aggregation_model_name="claude-sonnet-4-6",  # final report
+    output_type="dict",
 )
 
 evaluation = council.run(task_response)
@@ -143,11 +150,12 @@ for message in full_evaluation:
 
 ### Specific Judge Model
 
+`judge_agent_model_name` takes precedence over `model_name` for the judges.
+
 ```python
-# Use Claude for all judge agents
 council = CouncilAsAJudge(
-    judge_agent_model_name="anthropic/claude-sonnet-4-5",
-    aggregation_model_name="claude-sonnet-4-6",
+    judge_agent_model_name="claude-sonnet-4-6",
+    aggregation_model_name="gpt-5.4",
 )
 
 evaluation = council.run(task_response)
@@ -187,7 +195,7 @@ The council uses `ThreadPoolExecutor` to evaluate all dimensions simultaneously:
 
 - **Workers**: Automatically configured based on CPU count (75% of cores)
 - **Concurrency**: All 6 dimensions evaluated in parallel
-- **Error Handling**: Individual dimension failures don't stop other evaluations
+- **Error Handling**: If any dimension fails, `run` raises `EvaluationError` and no report is produced
 - **Performance**: Significantly faster than sequential evaluation
 
 ## Example Output
@@ -195,7 +203,7 @@ The council uses `ThreadPoolExecutor` to evaluate all dimensions simultaneously:
 ```python
 evaluation = council.run(task_response)
 
-# Output structure (when output_type="dict"):
+# Output structure (when output_type="dict"). Judge entries appear in the order the judges finished.
 [
     {"role": "User", "content": "Task response..."},
     {"role": "accuracy_judge", "content": "Accuracy analysis..."},
@@ -217,7 +225,7 @@ evaluation = council.run(task_response)
 - **Technical Analysis**: Detailed, actionable feedback for improvement
 - **Flexible Models**: Support for any LLM model via LiteLLM
 - **Caching**: LRU cache for frequently used prompts
-- **Error Handling**: Robust exception handling for each dimension
+- **Error Handling**: Failures surface as `EvaluationError` that names the failing dimension
 - **Multiple Output Formats**: Choose from various output types
 
 ## Use Cases
@@ -237,9 +245,9 @@ evaluation = council.run(task_response)
    - Use `"json"` for integration with other systems
 
 2. **Model Selection**:
-   - Set `judge_agent_model_name` to control which model judges run on -- `model_name` and `random_model_name` currently have no effect on judge selection
-   - Use stronger models (GPT-4, Claude) for critical evaluations
-   - Use faster models (GPT-4o-mini) for development/testing
+   - Set `model_name` or `judge_agent_model_name` to choose the judges' model, and `aggregation_model_name` for the final report
+   - Use stronger models (`gpt-5.4`, `claude-sonnet-4-6`) for critical evaluations
+   - Use faster models (`gpt-5.4-mini`) for development and testing
 
 3. **Performance**:
    - Council auto-configures workers based on CPU count

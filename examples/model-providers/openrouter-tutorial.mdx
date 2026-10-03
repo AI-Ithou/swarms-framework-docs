@@ -46,7 +46,7 @@ Browse the [full catalog](https://openrouter.ai/models) for hundreds more. Any m
 
 ## 1. Single Agent
 
-The smallest useful program: one `Agent` on one OpenRouter model. Note the OpenRouter-friendly defaults — set `top_p=None` so `temperature` is sent alone (some providers reject both), and use `reasoning_effort`/`thinking_tokens` on models that support extended reasoning.
+The smallest useful program: one `Agent` on one OpenRouter model. Note the OpenRouter-friendly defaults: `top_p` defaults to `None`, so only `temperature` is sent (some providers reject both), and `reasoning_effort` is forwarded on models that support extended reasoning. (`thinking_tokens` only takes effect together with `reasoning_enabled=True`.)
 
 ```python
 from swarms import Agent
@@ -60,10 +60,8 @@ agent = Agent(
     ),
     model_name="openrouter/z-ai/glm-5.2",
     max_loops=1,
-    top_p=None,             # send temperature alone
-    temperature=1.0,
+    temperature=1.0,        # top_p stays None, so temperature is sent alone
     reasoning_effort="high",
-    thinking_tokens=1024,
     persistent_memory=False,
 )
 
@@ -133,7 +131,7 @@ realist = Agent(
 chat = GroupChat(
     agents=[optimist, skeptic, realist],
     max_loops=9,       # stop after 9 total messages
-    threshold=0.5,     # only publish replies scoring above 0.5
+    threshold=0.5,     # a reply must score above 0.5 to take the floor
 )
 
 result = chat.run(
@@ -192,11 +190,11 @@ results = workflow.run(
     "microservice architectures?"
 )
 
-for name, response in results.items():
-    print(f"\n=== {name} ===\n{response}")
+for entry in results:
+    print(f"\n=== {entry['role']} ===\n{entry['content']}")
 ```
 
-Each agent hits a different model concurrently; `results` maps agent name → response so you can compare answers directly. Add or remove models by editing the `candidates` list — no other code changes needed.
+Each agent hits a different model concurrently; `results` is a list of role/content messages, one per agent in the order of `candidates`, so you can compare answers directly. Add or remove models by editing the `candidates` list — no other code changes needed.
 
 ---
 

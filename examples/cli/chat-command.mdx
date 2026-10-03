@@ -42,6 +42,13 @@ swarms chat --name "MyAssistant" --task "Let's discuss Python programming"
 swarms chat --system-prompt "You are an expert Python developer" --task "Help me debug this code"
 ```
 
+### Choose a Model
+```bash
+swarms chat --model-name claude-sonnet-4-6 --task "Summarize the trade-offs of async Python"
+```
+
+Without `--model-name`, `swarms chat` uses `gpt-5.1`.
+
 ### Full Customization
 ```bash
 swarms chat \
@@ -65,13 +72,14 @@ python3.12 -m swarms.cli.main chat --task "Hello"
    - `max_loops="auto"` - Autonomous loop execution
    - `dynamic_context_window=True` - Adaptive context management
    - `dynamic_temperature_enabled=True` - Adaptive response generation
+   - `temperature=1.0` - Starting temperature
 
    The CLI itself supplies the continuous-conversation behavior: after each task the agent runs, it prompts you for the next one and loops until you type an exit command — the agent is not created with `interactive=True` or an explicit `context_length`.
 
 2. If you provide a `--task`, the agent processes it first
 3. After processing, the agent continues to prompt for input
 4. You can continue the conversation interactively
-5. Exit by typing 'exit', 'quit', or pressing Ctrl+C
+5. Exit by typing `exit`, `quit`, `bye`, or `q` (or pressing Enter on an empty prompt)
 
 ## Examples
 
@@ -99,7 +107,7 @@ swarms chat \
 - Use `--system-prompt` to customize the agent's behavior and expertise
 - Provide a `--task` to start with context before interactive mode
 - The agent remembers conversation history within the session
-- All standard agent parameters are available for customization
+- `chat` reads only `--name`, `--description`, `--system-prompt`, `--model-name`, and `--task`; other agent flags are ignored
 
 ## Troubleshooting
 

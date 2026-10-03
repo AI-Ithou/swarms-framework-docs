@@ -168,7 +168,7 @@ print(response)
 
 ## Vision with Multiple Images
 
-Process multiple images in a single request:
+Pass several images in one call with `imgs=[...]`, or loop over them to get one analysis per image:
 
 ```python
 from swarms import Agent
@@ -423,11 +423,12 @@ class ImageAnalysis(BaseModel):
 agent = Agent(
     model_name="claude-sonnet-4-6",
     multi_modal=True,
-    output_type="json",
+    max_loops=1,
+    output_type="final",
 )
 
 response = agent.run(
-    task=f"""Analyze this image and return a JSON response matching this schema:
+    task=f"""Analyze this image and return only a JSON object matching this schema:
     {ImageAnalysis.model_json_schema()}""",
     img="scene.jpg",
 )
@@ -435,6 +436,8 @@ response = agent.run(
 result = ImageAnalysis.model_validate_json(response)
 print(result)
 ```
+
+`output_type="final"` returns just the model's reply. `output_type="json"` would return the whole conversation serialized as JSON, which does not match the schema.
 
 ### 4. Error Handling
 

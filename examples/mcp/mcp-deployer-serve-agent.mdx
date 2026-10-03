@@ -114,6 +114,8 @@ export ANTHROPIC_API_KEY="sk-ant-..."
     ```
 
     The portfolio manager discovers `market_analyst`, calls it with the question as `task`, and summarises what the analyst returned. The server terminal logs each request.
+
+    The client lists the server's tools while it is being constructed, so start the server first. A server that is down, or a wrong key, makes the `Agent(...)` call itself raise `AgentMCPConnectionError`.
   </Step>
 </Steps>
 
@@ -122,6 +124,61 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 1. `MCPDeployer` wrapped `analyst` as one MCP tool with the schema `task: str`, `img: str | None`.
 2. Every request to `/mcp` went through the auth layer first. The key can arrive as `x-api-key` or as `Authorization: Bearer`, which is what `MCPConnection` sends.
 3. The tool call ran `analyst.run(task)` on a worker thread and returned its answer as the tool result.
+
+## Other ways to connect a client
+
+`MCPConnection(url=..., api_key=...)` sends `Authorization: Bearer <key>`, which the deployer accepts. These forms work too. The examples read the key from the environment, so export it first with `export ANALYST_MCP_KEY="sk-local-dev"`.
+
+**A URL string plus an agent-level key.** `mcp_api_key` applies to every server that has no key of its own, and `env:` reads the key from the environment when the connection is made:
+
+```python
+from swarms import Agent
+
+manager = Agent(
+    agent_name="Portfolio-Manager",
+    model_name="gpt-5.4",
+    mcp_url="http://127.0.0.1:8000/mcp",
+    mcp_api_key="env:ANALYST_MCP_KEY",
+    max_loops=2,
+)
+```
+
+**The `x-api-key` header, with a longer tool timeout.** `mcp_config` takes a full `MCPConnection`. A swarms client waits `tool_timeout` seconds for one tool call, 120 by default, so raise it when the served agent or swarm is slow:
+
+```python
+from swarms import Agent
+from swarms.schemas.mcp_schemas import MCPConnection
+
+manager = Agent(
+    agent_name="Portfolio-Manager",
+    model_name="gpt-5.4",
+    mcp_config=MCPConnection(
+        url="http://127.0.0.1:8000/mcp",
+        name="market-analyst",
+        api_key="env:ANALYST_MCP_KEY",
+        api_key_header="x-api-key",
+        api_key_prefix=None,
+        tool_timeout=300,
+    ),
+    max_loops=2,
+)
+```
+
+**Extra headers for custom auth.** When the server uses an `auth` callable that reads other headers, such as a tenant id, send them with `headers`:
+
+```python
+MCPConnection(
+    url="http://127.0.0.1:8000/mcp",
+    api_key="env:ACME_MCP_KEY",
+    headers={"x-tenant": "acme"},
+)
+```
+
+**An SSE server.** A deployer built with `transport="sse"` serves `http://127.0.0.1:8000/sse`. Clients default to streamable HTTP, so set the transport on the client too:
+
+```python
+MCPConnection(url="http://127.0.0.1:8000/sse", api_key="sk-local-dev", transport="sse")
+```
 
 ## Variations
 
@@ -144,11 +201,43 @@ with MCPDeployer(analyst, api_keys=["sk-local-dev"], port=8000) as server:
 MCPDeployer(analyst, api_keys=["sk-prod-..."], host="0.0.0.0", port=8000).run()
 ```
 
-**Launched by an MCP host.** Claude Desktop and similar hosts start servers as subprocesses over stdio. There are no HTTP headers on stdio, so the host itself is the security boundary:
+**Launched by an MCP host.** Claude Desktop and similar hosts start servers as subprocesses over stdio. There are no HTTP headers on stdio, so the host itself is the security boundary. Stdout carries the protocol, so turn the banner off:
 
 ```python
-MCPDeployer(analyst, transport="stdio", allow_anonymous=True).run()
+MCPDeployer(analyst, transport="stdio", allow_anonymous=True, show_banner=False).run()
 ```
+
+**A fresh agent per call.** One served `Agent` handles every call and keeps its conversation between them. To give each call a clean history, serve a function that builds the agent. The function's name and docstring become the tool's name and description:
+
+```python
+def market_analyst(task: str) -> str:
+    """Answers questions about markets and companies in three sentences or fewer."""
+    analyst = Agent(
+        agent_name="Market-Analyst",
+        system_prompt="You are a concise market analyst. Answer in three sentences or fewer.",
+        model_name="gpt-5.4",
+        max_loops=1,
+        print_on=False,
+    )
+    return analyst.run(task)
+
+
+MCPDeployer(market_analyst, api_keys=["sk-local-dev"], port=8000).run()
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The client agent fails to build with AgentMCPConnectionError">
+    The client could not list the server's tools. Check that the server is running and the key matches. With `mcp` 2.x the client reports a rejected key as `Server returned an error response` rather than `401`; the server log shows `MCPDeployer rejected request to /mcp` for each refused request.
+  </Accordion>
+  <Accordion title="The tool call fails after two minutes">
+    That is the client's `tool_timeout`, 120 seconds by default. Raise it on the `MCPConnection`, and set the server's `timeout` to match if you use one.
+  </Accordion>
+  <Accordion title="A remote client cannot connect">
+    The default `host="127.0.0.1"` only accepts local connections. Bind with `host="0.0.0.0"` and give clients the machine's address, not `0.0.0.0`.
+  </Accordion>
+</AccordionGroup>
 
 ## Next
 

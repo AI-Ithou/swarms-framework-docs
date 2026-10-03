@@ -6,28 +6,38 @@ icon: 'code'
 
 Structured outputs enable agents to return responses in a specific format, such as JSON objects, lists, or Pydantic models. This is essential for integrating agents into applications and workflows.
 
+There are two separate controls:
+
+- `output_type` decides how `agent.run()` formats the conversation it returns.
+- A function-calling schema in `tools_list_dictionary` makes the model answer with arguments that match your schema.
+
 ## Output Types
 
 Swarms supports multiple output formats through the `output_type` parameter. `output_type` controls how the **conversation transcript** (`agent.short_memory`) is formatted when `agent.run()` returns — it is not a schema parser. In particular:
 
-- `"str"` / `"string"` — the full conversation as one string
-- `"str-all-except-first"` (default) — the conversation, excluding the first (system prompt) message, joined into one string
-- `"final"` / `"last"` — just the content of the last message (a plain string) — this is usually what you want when you also configure a `list_base_models`/`tool_schema`, since the model's final response text is where schema-shaped JSON ends up
-- `"json"` — the full conversation history serialized as a JSON string (an array of `{"role", "content", ...}` message dicts, **not** a single schema-shaped object)
-- `"dict"` / `"dictionary"` — the full conversation history as a Python `list` of message dicts (despite the name, this is a list, not a single dict)
-- `"list"` — the conversation as a list of message dicts
+- `"str-all-except-first"` (default) — every message after the system prompt and the first input, contents joined into one string without role labels. In a plain run the first input is your task, so you get the agent's answer
+- `"final"` / `"last"` — just the content of the last message. This is a string for a text answer, and a list of tool-call dicts when the model answered with a function call
+- `"str"` / `"string"` / `"all"` — the full conversation as one string, with a timestamp and role label on each message
+- `"list"` — the conversation as a list of `{"role", "content"}` dicts
+- `"dict"` / `"dictionary"` — the full conversation history as a Python `list` of message dicts, including each message's `timestamp` and `message_id` (despite the name, this is a list, not a single dict)
+- `"json"` — the full conversation history serialized as a JSON string (an array of message dicts, **not** a single schema-shaped object)
 - `"yaml"` — the conversation history as a YAML string
-- `"xml"` — the conversation history as an XML string
-- `"all"` — the conversation as a string (same as `"string"`)
-- `"dict-all-except-first"` — all messages except the first, as a list of message dicts. This is the default `output_type` used internally by several multi-agent harnesses (`HeavySwarm`, `HierarchicalSwarm`, `SwarmRouter`, `LLMCouncil`, `PlannerWorkerSwarm`, and others)
+- `"dict-all-except-first"` — every message after the system prompt and the first input, as a list of message dicts. This is the default `output_type` of several multi-agent harnesses (`HeavySwarm`, `HierarchicalSwarm`, `ConcurrentWorkflow`, `LLMCouncil`, `PlannerWorkerSwarm`, and others)
 - `"list-final"` — the content of the last message, wrapped in a single-item list
 - `"dict-final"` — the content of the last message, as a `(content, content)` tuple
+
+<Warning>
+  The `"xml"` output type was removed. `"basemodel"` is still accepted by the type hint, but the formatter does not handle it: a run with `output_type="basemodel"` raises `ValueError` after the model has answered. Use `"final"` and validate with Pydantic yourself, as shown below.
+</Warning>
 
 ```python
 from swarms import Agent
 
-# String output (default is "str-all-except-first")
-agent = Agent(output_type="str")
+# The agent's answer as a string (the default)
+agent = Agent(output_type="str-all-except-first")
+
+# Just the last message
+agent = Agent(output_type="final")
 
 # Full conversation history as JSON
 agent = Agent(output_type="json")
@@ -40,27 +50,43 @@ agent = Agent(output_type="list")
 
 # YAML output
 agent = Agent(output_type="yaml")
-
-# XML output
-agent = Agent(output_type="xml")
-
-# Just the agent's final response as a plain string — pair this with
-# list_base_models / tool_schema to get back schema-shaped JSON text
-agent = Agent(output_type="final")
 ```
 
-## JSON Schema Output
+## Function-Calling Schemas
+
+The reliable way to get schema-shaped data is to give the agent a function schema in `tools_list_dictionary` and no Python callable to run. The model answers with a function call whose arguments follow your schema, and the agent returns that call to you instead of executing anything.
+
+With `output_type="final"`, `run()` returns a list of tool-call dicts:
+
+```python
+[
+    {
+        "id": "call_abc123",
+        "type": "function",
+        "function": {
+            "name": "CompanyAnalysis",
+            "arguments": '{"company_name": "Tesla", ...}',  # a JSON string
+        },
+    }
+]
+```
 
 ### Basic JSON Schema
 
-Use Pydantic models to define structured output schemas:
+Define the shape with a Pydantic model and convert it with `BaseTool().base_model_to_dict()`, which returns an OpenAI tool schema:
 
 ```python
-from swarms import Agent
-from pydantic import BaseModel, Field
+import json
 from typing import List
 
+from pydantic import BaseModel, Field
+
+from swarms import Agent, BaseTool
+
+
 class CompanyAnalysis(BaseModel):
+    """Record an investment analysis of one company."""
+
     company_name: str = Field(description="Name of the company")
     industry: str = Field(description="Primary industry")
     revenue: float = Field(description="Annual revenue in millions")
@@ -69,70 +95,142 @@ class CompanyAnalysis(BaseModel):
     risks: List[str] = Field(description="Main risk factors")
     recommendation: str = Field(description="Investment recommendation")
 
+
 agent = Agent(
     agent_name="Financial-Analyst",
-    model_name="claude-sonnet-4-6",
+    model_name="gpt-5.4",
     max_loops=1,
-    list_base_models=[CompanyAnalysis],  # Adds the schema to the agent's memory as guidance
-    output_type="final",                # Return just the model's final text response
+    tools_list_dictionary=[BaseTool().base_model_to_dict(CompanyAnalysis)],
+    output_type="final",
 )
 
 result = agent.run(
-    "Analyze Tesla as an investment opportunity"
+    "Analyze Tesla as an investment opportunity. "
+    "Record your analysis with the CompanyAnalysis function."
 )
 
-# `list_base_models` only tells the LLM what shape to respond in — it does not
-# parse or validate the response for you. `result` is a plain string; if the
-# model complied with the schema, it will be JSON text you can parse yourself.
-import json
-data = json.loads(result)
-analysis = CompanyAnalysis(**data)
-print(analysis.company_name)
+if isinstance(result, list):
+    data = json.loads(result[0]["function"]["arguments"])
+    analysis = CompanyAnalysis(**data)
+    print(analysis.company_name, analysis.recommendation)
+else:
+    print("The model answered in text:", result)
 ```
+
+<Note>
+  The request is sent with `tool_choice="auto"`, so the model may still answer in plain text. Name the function in your task or system prompt, and check whether the result is a list before parsing it. Keep `max_loops=1`. No callable runs the function, so a later loop only sees a `(no result recorded ...)` placeholder for the call.
+</Note>
 
 ### Multiple Output Schemas
 
-Define multiple possible output formats:
+Give the agent several schemas and branch on the function the model chose:
 
 ```python
-from pydantic import BaseModel, Field
+import json
 from typing import List
 
+from pydantic import BaseModel, Field
+
+from swarms import Agent, BaseTool
+
+
 class ProductReview(BaseModel):
+    """Review a single product."""
+
     product_name: str
     rating: float = Field(ge=0, le=5)
     pros: List[str]
     cons: List[str]
     verdict: str
 
+
 class ComparisonReport(BaseModel):
+    """Compare two or more products."""
+
     products: List[str]
     winner: str
     reasoning: str
-    price_comparison: dict
 
+
+tool = BaseTool()
 agent = Agent(
     agent_name="Product-Reviewer",
-    model_name="claude-sonnet-4-6",
-    list_base_models=[ProductReview, ComparisonReport],
+    model_name="gpt-5.4",
+    max_loops=1,
+    tools_list_dictionary=[
+        tool.base_model_to_dict(ProductReview),
+        tool.base_model_to_dict(ComparisonReport),
+    ],
     output_type="final",
 )
 
-# Both schemas are described in the agent's memory; the model picks
-# whichever shape fits the task when it writes its final text response.
-# Parse the result yourself against whichever schema you expect.
-review = agent.run("Review the iPhone 15 Pro")
-comparison = agent.run("Compare iPhone 15 Pro vs Samsung S24 Ultra")
+result = agent.run("Compare the iPhone 15 Pro and the Samsung S24 Ultra.")
+
+if isinstance(result, list):
+    call = result[0]["function"]
+    data = json.loads(call["arguments"])
+    if call["name"] == "ComparisonReport":
+        print(ComparisonReport(**data).winner)
+    else:
+        print(ProductReview(**data).verdict)
+```
+
+### Hand-Written JSON Schemas
+
+You can also pass an OpenAI tool schema as a plain dict:
+
+```python
+from swarms import Agent
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_stock_price",
+            "description": "Retrieve the current stock price for a company.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Stock ticker symbol, e.g. AAPL.",
+                    },
+                    "include_history": {
+                        "type": "boolean",
+                        "description": "Whether to include historical prices.",
+                    },
+                },
+                "required": ["ticker", "include_history"],
+            },
+        },
+    }
+]
+
+agent = Agent(
+    agent_name="Financial-Analysis-Agent",
+    model_name="gpt-5.4",
+    max_loops=1,
+    tools_list_dictionary=tools,
+    output_type="final",
+)
+
+out = agent.run("What is the current stock price for Apple? Include history.")
+print(out)
 ```
 
 ## Tool Schema
 
 ### Using tool_schema Parameter
 
-Define output structure using `tool_schema`:
+`tool_schema` takes a single Pydantic model and writes its schema into the agent's memory as guidance. It does not send a function to the model and does not parse the reply, so you get the model's text back and parse it yourself:
 
 ```python
+import json
+
 from pydantic import BaseModel, Field
+
+from swarms import Agent
+
 
 class EmailDraft(BaseModel):
     subject: str = Field(description="Email subject line")
@@ -141,34 +239,46 @@ class EmailDraft(BaseModel):
     cc: list[str] = Field(default=[], description="CC recipients")
     priority: str = Field(default="normal", description="Email priority: low, normal, high")
 
+
 agent = Agent(
     agent_name="Email-Assistant",
     model_name="claude-sonnet-4-6",
-    tool_schema=EmailDraft,   # Adds the schema to the agent's memory as guidance
-    output_type="final",      # Return the model's raw final text (expected to be JSON)
+    tool_schema=EmailDraft,
+    output_type="final",
+    system_prompt="Reply with a single JSON object that matches the schema. No prose, no code fences.",
 )
 
 result = agent.run(
     "Draft an email to the engineering team about the new feature release"
 )
 
-# `tool_schema` guides the model to respond in this shape; it does not parse
-# the response for you. Parse the JSON text yourself:
-import json
-email = json.loads(result)
-print(f"Subject: {email['subject']}")
-print(f"To: {', '.join(email['recipients'])}")
-print(f"Body: {email['body']}")
+email = EmailDraft(**json.loads(result))
+print(f"Subject: {email.subject}")
+print(f"To: {', '.join(email.recipients)}")
 ```
+
+<Warning>
+  Use `output_type="final"` with `tool_schema`. The schema is stored as the first message after the system prompt, so the default `"str-all-except-first"` returns your task followed by the answer. If the model wraps its JSON in prose or code fences, `json.loads` fails; prefer `tools_list_dictionary` when you need guaranteed structure.
+</Warning>
+
+<Warning>
+  `list_base_models` raises `TypeError` when the agent is constructed in swarms 15.0.3, so you cannot use it to pass several Pydantic models. Pass several schemas through `tools_list_dictionary` instead, as in [Multiple Output Schemas](#multiple-output-schemas).
+</Warning>
 
 ## Complex Output Structures
 
 ### Nested Models
 
+Nested models and enums become `$defs` references in the generated schema:
+
 ```python
-from pydantic import BaseModel, Field
+import json
 from typing import List, Optional
-from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+from swarms import Agent, BaseTool
+
 
 class Task(BaseModel):
     title: str
@@ -177,13 +287,17 @@ class Task(BaseModel):
     estimated_hours: float
     assigned_to: Optional[str] = None
 
+
 class Milestone(BaseModel):
     name: str
     deadline: str
     tasks: List[Task]
     status: str = Field(pattern="^(planning|in_progress|completed)$")
 
+
 class ProjectPlan(BaseModel):
+    """Record a project plan."""
+
     project_name: str
     description: str
     start_date: str
@@ -192,11 +306,12 @@ class ProjectPlan(BaseModel):
     budget: float
     team_size: int
 
+
 agent = Agent(
     agent_name="Project-Manager",
-    model_name="claude-sonnet-4-6",
-    list_base_models=[ProjectPlan],
+    model_name="gpt-5.4",
     max_loops=1,
+    tools_list_dictionary=[BaseTool().base_model_to_dict(ProjectPlan)],
     output_type="final",
 )
 
@@ -207,25 +322,28 @@ result = agent.run(
     - Real-time chat
     - Push notifications
     - Payment integration
+    Record it with the ProjectPlan function.
     """
 )
 
-# Parse the model's JSON text response yourself
-import json
-project = json.loads(result)
+project = ProjectPlan(**json.loads(result[0]["function"]["arguments"]))
 
-# Access nested structure
-for milestone in project['milestones']:
-    print(f"\nMilestone: {milestone['name']}")
-    for task in milestone['tasks']:
-        print(f"  - {task['title']} ({task['priority']} priority)")
+for milestone in project.milestones:
+    print(f"\nMilestone: {milestone.name}")
+    for task in milestone.tasks:
+        print(f"  - {task.title} ({task.priority} priority)")
 ```
 
 ### Lists and Arrays
 
 ```python
-from pydantic import BaseModel, Field
+import json
 from typing import List
+
+from pydantic import BaseModel, Field
+
+from swarms import Agent, BaseTool
+
 
 class StockRecommendation(BaseModel):
     ticker: str = Field(description="Stock ticker symbol")
@@ -236,68 +354,100 @@ class StockRecommendation(BaseModel):
     confidence: float = Field(ge=0, le=100)
     reasoning: str
 
+
 class PortfolioRecommendations(BaseModel):
+    """Record stock recommendations for a portfolio."""
+
     recommendations: List[StockRecommendation]
     overall_strategy: str
     risk_level: str = Field(pattern="^(conservative|moderate|aggressive)$")
 
+
 agent = Agent(
     agent_name="Portfolio-Advisor",
-    model_name="claude-sonnet-4-6",
-    list_base_models=[PortfolioRecommendations],
+    model_name="gpt-5.4",
+    max_loops=1,
+    tools_list_dictionary=[BaseTool().base_model_to_dict(PortfolioRecommendations)],
     output_type="final",
 )
 
 result = agent.run(
-    "Provide 5 stock recommendations for a moderate-risk portfolio"
+    "Provide 5 stock recommendations for a moderate-risk portfolio. "
+    "Record them with the PortfolioRecommendations function."
 )
 
-import json
-portfolio = json.loads(result)
+portfolio = PortfolioRecommendations(
+    **json.loads(result[0]["function"]["arguments"])
+)
 
-for rec in portfolio['recommendations']:
-    print(f"{rec['ticker']}: {rec['action']} - {rec['reasoning']}")
+for rec in portfolio.recommendations:
+    print(f"{rec.ticker}: {rec.action} - {rec.reasoning}")
 ```
 
 ## Validation and Constraints
 
+The schema tells the model what to produce, but nothing checks the reply for you. Validate the parsed arguments with your Pydantic model and handle `ValidationError`.
+
 ### Field Validation
 
 ```python
-from pydantic import BaseModel, Field, validator
+import json
 from typing import List
 
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+from swarms import Agent, BaseTool
+
+
 class FinancialReport(BaseModel):
+    """Record a quarterly financial report."""
+
     quarter: str = Field(pattern="^Q[1-4] 20[0-9]{2}$")
     revenue: float = Field(gt=0, description="Revenue in millions")
     expenses: float = Field(gt=0, description="Total expenses in millions")
     profit_margin: float = Field(ge=0, le=100, description="Profit margin percentage")
-    key_metrics: dict
-    recommendations: List[str] = Field(min_items=1, max_items=10)
-    
-    @validator('expenses')
-    def expenses_less_than_revenue(cls, v, values):
-        if 'revenue' in values and v >= values['revenue']:
-            raise ValueError('Expenses should be less than revenue for profitable quarter')
+    recommendations: List[str] = Field(min_length=1, max_length=10)
+
+    @field_validator("expenses")
+    @classmethod
+    def expenses_less_than_revenue(cls, v, info):
+        revenue = info.data.get("revenue")
+        if revenue is not None and v >= revenue:
+            raise ValueError("Expenses should be less than revenue for a profitable quarter")
         return v
+
 
 agent = Agent(
     agent_name="Financial-Reporter",
-    model_name="claude-sonnet-4-6",
-    list_base_models=[FinancialReport],
+    model_name="gpt-5.4",
+    max_loops=1,
+    tools_list_dictionary=[BaseTool().base_model_to_dict(FinancialReport)],
+    output_type="final",
 )
 
-report = agent.run(
-    "Create a financial report for Q4 2024 based on revenue of $100M"
+result = agent.run(
+    "Create a financial report for Q4 2024 based on revenue of $100M. "
+    "Record it with the FinancialReport function."
 )
+
+try:
+    report = FinancialReport(**json.loads(result[0]["function"]["arguments"]))
+    print(report)
+except ValidationError as error:
+    print("The model's report failed validation:", error)
 ```
 
 ### Enums and Choices
 
 ```python
-from pydantic import BaseModel, Field
+import json
 from enum import Enum
 from typing import List
+
+from pydantic import BaseModel
+
+from swarms import Agent, BaseTool
+
 
 class Priority(str, Enum):
     LOW = "low"
@@ -305,13 +455,17 @@ class Priority(str, Enum):
     HIGH = "high"
     CRITICAL = "critical"
 
+
 class Status(str, Enum):
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     REVIEW = "review"
     DONE = "done"
 
+
 class Bug(BaseModel):
+    """File a bug report."""
+
     title: str
     description: str
     priority: Priority
@@ -321,10 +475,12 @@ class Bug(BaseModel):
     expected_behavior: str
     actual_behavior: str
 
+
 agent = Agent(
     agent_name="Bug-Tracker",
-    model_name="claude-sonnet-4-6",
-    list_base_models=[Bug],
+    model_name="gpt-5.4",
+    max_loops=1,
+    tools_list_dictionary=[BaseTool().base_model_to_dict(Bug)],
     output_type="final",
 )
 
@@ -332,14 +488,14 @@ result = agent.run(
     """
     Create a bug report: Users can't login after the latest update.
     Login button is unresponsive on mobile devices.
+    File it with the Bug function.
     """
 )
 
-import json
-bug = json.loads(result)
+bug = Bug(**json.loads(result[0]["function"]["arguments"]))
 
-print(f"Priority: {bug['priority']}")
-print(f"Status: {bug['status']}")
+print(f"Priority: {bug.priority.value}")
+print(f"Status: {bug.status.value}")
 ```
 
 ## Output Processing
@@ -347,29 +503,26 @@ print(f"Status: {bug['status']}")
 ### JSON Output
 
 <Warning>
-  `output_type="json"` serializes the **entire conversation history** (a list of `{"role", "content", ...}` message dicts) to a JSON string — it does not extract a single task-specific object with your own keys. For a task-specific structured payload, combine `list_base_models`/`tool_schema` with `output_type="final"` and parse the model's final text yourself, as shown below.
+  `output_type="json"` serializes the **entire conversation history** (a list of `{"role", "content", ...}` message dicts) to a JSON string — it does not extract a single task-specific object with your own keys. For a task-specific structured payload, use a schema in `tools_list_dictionary` with `output_type="final"`, as shown above.
 </Warning>
 
 ```python
 import json
-from pydantic import BaseModel
-from typing import List
 
-class LanguageList(BaseModel):
-    languages: List[str]
+from swarms import Agent
 
 agent = Agent(
     agent_name="Data-Agent",
-    model_name="claude-sonnet-4-6",
-    list_base_models=[LanguageList],
-    output_type="final",  # Return just the model's final text response
+    model_name="gpt-5.4",
+    max_loops=1,
+    output_type="json",
 )
 
 result = agent.run("List the top 5 programming languages in 2024")
-data = json.loads(result)
+history = json.loads(result)
 
-for lang in data['languages']:
-    print(f"- {lang}")
+for message in history:
+    print(message["role"], "->", str(message["content"])[:80])
 ```
 
 ### Dictionary Output
@@ -379,9 +532,12 @@ for lang in data['languages']:
 </Warning>
 
 ```python
+from swarms import Agent
+
 agent = Agent(
     agent_name="Analyzer",
     model_name="claude-sonnet-4-6",
+    max_loops=1,
     output_type="dict",
 )
 
@@ -394,47 +550,25 @@ print(last_message)
 
 ## Working with Responses
 
-### Pydantic Model Response
-
-```python
-from pydantic import BaseModel
-from typing import List
-
-class Article(BaseModel):
-    title: str
-    summary: str
-    key_points: List[str]
-    word_count: int
-
-agent = Agent(
-    agent_name="Content-Creator",
-    model_name="claude-sonnet-4-6",
-    list_base_models=[Article],
-    output_type="final",
-)
-
-response = agent.run("Write an article about renewable energy")
-
-# `response` is a plain string (the model's final text). If the model
-# complied with the Article schema, parse it and validate with Pydantic:
-import json
-data = json.loads(response)
-article = Article(**data)
-print(f"Title: {article.title}")
-print(f"Summary: {article.summary}")
-print(f"Key points: {', '.join(article.key_points)}")
-```
-
 ### Function Calling Response
 
-When tools are used, responses include function calls:
+When you pass Python callables in `tools`, the agent runs the tool calls itself and records their results, so the return value is the conversation formatted by `output_type`, not raw tool calls:
 
 ```python
 from swarms import Agent
 
+
 def calculate(expression: str) -> float:
-    """Calculate a mathematical expression"""
+    """Calculate a mathematical expression.
+
+    Args:
+        expression: An arithmetic expression such as "25 * 4 + 10".
+
+    Returns:
+        The numeric result.
+    """
     return eval(expression)
+
 
 agent = Agent(
     agent_name="Calculator",
@@ -444,9 +578,10 @@ agent = Agent(
 )
 
 response = agent.run("What is 25 * 4 + 10?")
-# Agent calls the tool and returns the result
 print(response)
 ```
+
+See [Agent Tools](/agents/agent-tools) for callable tools and how their output is summarized.
 
 ## Best Practices
 
@@ -493,6 +628,10 @@ class Address(BaseModel):
     zip_code: str = Field(pattern=r"^\d{5}(-\d{4})?$", description="ZIP code, e.g., '94102' or '94102-1234'")
 ```
 
+### 5. Give Each Schema a Docstring
+
+A Pydantic model's docstring becomes the function description the LLM sees, and the class name becomes the function name. Say what the function records, and name the function in your task.
+
 ## Next Steps
 
 <CardGroup cols={2}>
@@ -506,6 +645,7 @@ class Address(BaseModel):
 
 ## Reference
 
-- Output type formatting: `swarms/utils/history_output_formatter.py`
-- Pydantic integration: `swarms/tools/pydantic_to_json.py`
-- Tool/list-base-model schema handling: `swarms/structs/agent.py:3059-3087` (`handle_tool_schema_ops`)
+- Output type formatting: `swarms/utils/history_output_formatter.py`; the accepted values are in `swarms/utils/output_types.py`
+- Pydantic to tool schema: `BaseTool.base_model_to_dict` in `swarms/tools/base_tool.py`, built on `swarms/tools/pydantic_to_json.py`
+- Tool-call parsing: `ToolManager.parse_response` in `swarms/agents/tool_manager.py`
+- `tool_schema` and `list_base_models` handling: `ToolManager.handle_tool_schema_ops` in `swarms/agents/tool_manager.py`

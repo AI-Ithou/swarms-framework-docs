@@ -48,7 +48,7 @@ You end up either maintaining a routing table that maps ticket types to agent se
 from swarms import AutoAgentBuilder, ConcurrentWorkflow
 
 
-def triage(ticket: str, num_specialists: int = 3) -> str:
+def triage(ticket: str, num_specialists: int = 3):
     """Design specialists for this specific ticket, then run them in parallel."""
     agents = AutoAgentBuilder(
         model_name="gpt-5.4",
@@ -82,7 +82,7 @@ SEVERITY_TO_TEAM_SIZE = {
 }
 
 
-def triage_by_severity(ticket: str, severity: str) -> str:
+def triage_by_severity(ticket: str, severity: str):
     return triage(ticket, num_specialists=SEVERITY_TO_TEAM_SIZE[severity])
 ```
 
@@ -117,7 +117,7 @@ TICKETS = [
 SEVERITY_TO_TEAM_SIZE = {"low": 1, "medium": 3, "high": 5}
 
 
-def triage(ticket: str, num_specialists: int) -> str:
+def triage(ticket: str, num_specialists: int):
     agents = AutoAgentBuilder(
         model_name="gpt-5.4",
         num_agents=num_specialists,

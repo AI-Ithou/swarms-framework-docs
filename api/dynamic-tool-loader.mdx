@@ -36,7 +36,7 @@ from swarms.tools.dynamic_tool_loader import (
 `DynamicToolLoader` is **not** re-exported from `swarms` or `swarms.tools`. Use the full module path shown above — `from swarms.tools import DynamicToolLoader` raises `ImportError`.
 </Warning>
 
-Most users never construct one directly. `Agent(dynamic_tools=True)` builds it and exposes it as `agent.tool_loader`. See [Dynamic Tool Loading](/agents/dynamic-tools) for the agent-level guide.
+Most users never construct one directly. `Agent(dynamic_tools=True)` builds one through its [`ToolManager`](/api/tool-manager) and exposes it as `agent.tool_loader`. `dynamic_tools` is off by default. See [Dynamic Tool Loading](/agents/dynamic-tools) for the agent-level guide.
 
 ## Constructor
 
@@ -379,7 +379,8 @@ Forgetting to re-read `schemas()` is the most common integration bug. The tool l
 
 - [Dynamic Tool Loading](/agents/dynamic-tools) — the agent-level guide
 - [Dynamic Tool Usage examples](/examples/tools/dynamic-tool-usage) — runnable end-to-end scripts
-- [Agent API reference](/api/agent) — `dynamic_tools`, `setup_dynamic_tools`, `defer_tool_schemas`, `defer_mcp_tools`
+- [Agent API reference](/api/agent) — the `dynamic_tools` parameter
+- [ToolManager reference](/api/tool-manager) — `setup_dynamic_tools`, `defer_tool_schemas`, `defer_mcp_tools`, `tool_search_tool`
 - [Tools API reference](/api/tools) — schema conversion and execution
 
 ## Source

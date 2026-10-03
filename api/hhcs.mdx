@@ -18,14 +18,14 @@ pip install -U swarms
 
 HHCS addresses the challenge of efficiently solving diverse and complex tasks by:
 
-- Intelligently routing tasks to the most appropriate specialized swarms
-- Enabling parallel processing of multifaceted problems
+- Intelligently routing each task to the most appropriate specialized swarm
+- Letting the selected swarm run its agents sequentially or in parallel, depending on its `swarm_type`
 - Maintaining a clear hierarchy for effective decision-making
-- Combining outputs from multiple specialized agents for comprehensive solutions
+- Processing many independent tasks concurrently with `batched_run()`
 
 ## Architecture Diagram
 
-The HHCS architecture follows a hierarchical structure with the router agent at the top level, specialized swarms at the middle level, and individual agents at the bottom level.
+The HHCS architecture follows a hierarchical structure with the router agent at the top level, specialized swarms at the middle level, and individual agents at the bottom level. Each `run()` sends the task to exactly one swarm.
 
 ```mermaid
 flowchart TD
@@ -35,9 +35,9 @@ flowchart TD
     Analysis -->|Analyze Requirements| Selection[Swarm Selection]
     Selection -->|Select Best Swarm| Route[Route Task]
 
-    Route --> Swarm1[Swarm 1]
-    Route --> Swarm2[Swarm 2]
-    Route --> SwarmN[Swarm N...]
+    Route -->|one of| Swarm1[Swarm 1]
+    Route -->|one of| Swarm2[Swarm 2]
+    Route -->|one of| SwarmN[Swarm N...]
 
     Swarm1 -->|Process Task| Result1[Swarm 1 Output]
     Swarm2 -->|Process Task| Result2[Swarm 2 Output]
@@ -54,7 +54,7 @@ flowchart TD
         Selection
     end
 
-    subgraph Parallel Task Processing
+    subgraph Candidate Swarms
         Swarm1
         Swarm2
         SwarmN
@@ -79,26 +79,26 @@ flowchart TD
 </ParamField>
 
 <ParamField path="swarms" type="List[Union[SwarmRouter, Callable]]" default="[]">
-  List of available swarm routers (or callables) that the HHCS can route tasks to
+  Swarms the HHCS can route tasks to. Each one needs `name`, `description`, `agents` and `swarm_type` attributes, which the constructor reads to describe the swarms in the router's system prompt, and a `run(task)` method. `SwarmRouter` instances meet this; a bare function does not
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of processing loops
+  Stored on the instance but not used. Each `run()` routes the task once
 </ParamField>
 
 <ParamField path="output_type" type="HistoryOutputType" default="list">
-  Format for output (e.g., "list", "json")
+  Format of the conversation history returned by `run()` (e.g., "list", "dict", "str", "final", "json")
 </ParamField>
 
 <ParamField path="router_agent_model_name" type="str" default="gpt-5.4">
-  LLM model used by the router agent for task analysis and routing decisions
+  LLM model used by the router agent. The router is given a `select_swarm` function schema with `reasoning`, `swarm_name` and `task_description`, and its reply is parsed into a dict, so pick a model that supports function calling
 </ParamField>
 
 ## Methods
 
 ### run()
 
-Processes a single task through the swarm system. The router agent analyzes the task and routes it to the most appropriate specialized swarm.
+Processes a single task through the swarm system. The router agent picks a swarm and rewrites the task as a `task_description`, then the selected swarm runs that description.
 
 ```python
 def run(self, task: str, *args, **kwargs)
@@ -107,11 +107,17 @@ def run(self, task: str, *args, **kwargs)
 **Parameters:**
 - `task` (str): The task to process
 
-**Returns:** The aggregated results from the selected swarm(s), formatted according to `output_type` (a list by default)
+**Returns:** The conversation history formatted according to `output_type` (a list by default). It holds the user's task followed by the selected swarm's output, stored under the swarm's `name`. The router's reasoning is not recorded
+
+**Raises:** `ValueError` if `task` is empty, if the router's reply is not a string or lacks `swarm_name` or `task_description`, or if no swarm has the selected name
+
+<Warning>
+The conversation is created once in the constructor and never cleared. A second `run()` on the same instance returns the earlier tasks and outputs too. Create a new `HybridHierarchicalClusterSwarm` when each task needs a clean history.
+</Warning>
 
 ### batched_run()
 
-Processes multiple tasks in parallel through the swarm system.
+Calls `run()` for every task concurrently in a thread pool of `os.cpu_count() * 2` workers.
 
 ```python
 def batched_run(self, tasks: List[str]) -> List[str]
@@ -120,7 +126,13 @@ def batched_run(self, tasks: List[str]) -> List[str]
 **Parameters:**
 - `tasks` (List[str]): List of task strings to process
 
-**Returns:** List of results, one for each task
+**Returns:** List of results in task order, so `results[i]` belongs to `tasks[i]`. A task that raises yields the string `"Error processing task: <error>"` in its slot instead of stopping the batch
+
+**Raises:** `ValueError` if `tasks` is empty
+
+<Note>
+All tasks in a batch write to the same conversation, so each result can include turns from the other tasks in the batch.
+</Note>
 
 ### find_swarm_by_name()
 
@@ -133,7 +145,7 @@ def find_swarm_by_name(self, swarm_name: str) -> SwarmRouter
 **Parameters:**
 - `swarm_name` (str): Name of the swarm to find
 
-**Returns:** The matching SwarmRouter instance
+**Returns:** The first swarm whose `name` matches, or `None` if there is none
 
 ### route_task()
 
@@ -147,8 +159,12 @@ def route_task(self, swarm_name: str, task_description: str) -> None
 - `swarm_name` (str): Name of the target swarm
 - `task_description` (str): The task to route
 
+Runs the swarm and adds its output to the conversation under the swarm's `name`.
+
+**Raises:** `ValueError` if no swarm has that name
+
 <Note>
-`get_swarms_info()` is not a method on `HybridHierarchicalClusterSwarm`. It is a standalone helper (`from swarms.structs.multi_agent_exec import get_swarms_info`) that the constructor calls internally to build the router agent's system prompt from the `swarms` list.
+`get_swarms_info()` is not a method on `HybridHierarchicalClusterSwarm`. It is a standalone helper (`from swarms import get_swarms_info`) that the constructor calls internally to build the router agent's system prompt from the `swarms` list.
 </Note>
 
 ## Usage Examples
@@ -156,10 +172,7 @@ def route_task(self, swarm_name: str, task_description: str) -> None
 ### Full Legal Practice Example
 
 ```python
-from swarms import Agent, SwarmRouter
-from swarms.structs.hybrid_hiearchical_peer_swarm import (
-    HybridHierarchicalClusterSwarm,
-)
+from swarms import Agent, HybridHierarchicalClusterSwarm, SwarmRouter
 
 # Core Legal Agent Definitions
 litigation_agent = Agent(
@@ -278,21 +291,21 @@ print(result)
 
 ## Features
 
-- **Router-based task distribution**: Central router agent analyzes incoming tasks and directs them to appropriate specialized swarms
+- **Router-based task distribution**: Central router agent analyzes incoming tasks and directs each one to a single specialized swarm
 - **Hybrid architecture**: Combines hierarchical control with clustered specialization
-- **Parallel processing**: Multiple swarms can work simultaneously on different aspects of complex tasks
+- **Batch concurrency**: `batched_run()` processes many tasks in parallel, each routed independently
 - **Flexible swarm types**: Supports both sequential and concurrent workflows within swarms
-- **Comprehensive result aggregation**: Collects and combines outputs from all contributing swarms
+- **Conversation history**: Records each task and the selected swarm's output
 
 ## How It Works
 
 1. **Task Input**: A task is submitted to the HHCS
 2. **Router Analysis**: The router agent analyzes the task requirements
-3. **Swarm Selection**: The most appropriate specialized swarm is selected based on the task analysis
-4. **Task Routing**: The task is routed to the selected swarm for processing
-5. **Parallel Processing**: The selected swarm's agents process the task (sequentially or concurrently depending on swarm type)
-6. **Result Collection**: Outputs from all contributing agents are collected into the conversation history
-7. **Final Output**: The aggregated results are returned
+3. **Swarm Selection**: The router calls `select_swarm` with a swarm name and a rewritten task description
+4. **Task Routing**: The task description is routed to the selected swarm for processing
+5. **Swarm Execution**: The selected swarm's agents process the task (sequentially or concurrently depending on swarm type)
+6. **Result Collection**: The swarm's output is added to the conversation history
+7. **Final Output**: The conversation history is returned in the `output_type` format
 
 ## Source Code
 

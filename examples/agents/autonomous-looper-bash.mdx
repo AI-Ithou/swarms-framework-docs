@@ -27,7 +27,6 @@ agent = Agent(
     dynamic_context_window=True,
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -56,11 +55,22 @@ print(result)
 | `command`           | string  | The bash/shell command to run (e.g. `ls -la`, `python script.py`). |
 | `timeout_seconds`  | integer | (Optional) Max seconds to wait; default is 60. |
 
-Commands run in the agent’s workspace directory when available. Stdout and stderr are returned; long-running commands should use a higher `timeout_seconds` or be avoided.
+Commands run in the Python process's current working directory, not the agent workspace. The tool returns the exit code, stdout and stderr. Long-running commands should use a higher `timeout_seconds` or be avoided.
+
+## Limits and safety checks
+
+- **Length**: commands over 512 characters are refused. If the command is a heredoc or redirect, the refusal tells the model to write the file with `create_file` or `update_file` instead, so give the agent those tools when it needs to write files.
+- **Blocklist**: commands matching dangerous patterns are refused, including recursive `rm`, piping into a shell or interpreter, `sudo`, shutdown and reboot, `printenv`, `curl -d`, redirects into `/etc` or `/usr`, and redirects to disk devices or `/dev/null`.
+- **Output cap**: the result is capped at a quarter of the agent's `context_length` in tokens, with a marker saying how much was cut. Set `context_length` lower for a tighter cap.
+- **Searches**: for finding files or matching text, the `glob` and `grep` tools are preferred over `find` and `grep` through bash.
+
+<Warning>
+  The blocklist is a guard, not a sandbox. The command runs with your process's permissions. Run untrusted tasks in a container or a throwaway working directory.
+</Warning>
 
 ## Example file
 
-A full runnable example is in the repo:
+A starting-point script is in the repo. It builds this agent and prints the available tool names; uncomment the `agent.run(...)` call to run a task:
 
 ```
 examples/single_agent/capabilities/autonomy/autonomous_agents/example_autonomous_looper_run_bash.py
@@ -69,4 +79,5 @@ examples/single_agent/capabilities/autonomy/autonomous_agents/example_autonomous
 ## See also
 
 - [Autonomous Looper Tools](/examples/agents/autonomous-looper-tools) – Configuring `selected_tools`
+- [Autonomous Mode](/agents/autonomous-mode) – How the loop plans, runs tools and stays bounded
 - [Agent Reference](/api/agent) – `selected_tools` and autonomous loop

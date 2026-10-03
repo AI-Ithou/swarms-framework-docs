@@ -16,13 +16,11 @@ The `SocialAlgorithms` framework provides complete flexibility for defining cust
 ## Key Features
 
 - Accept any callable as social algorithm
-- Communication history tracking (optional)
+- Automatic recording of every agent message into a `Conversation`
 - Execution timeout management
 - Multiple output formats
-- Agent lifecycle management
-- Async execution support
-- Parallel execution options
-- Detailed logging and monitoring
+- Add and remove agents between runs
+- Verbose logging and OpenTelemetry tracing of each run
 
 ## Basic Example
 
@@ -194,7 +192,7 @@ def consensus_algorithm(agents, task, threshold=0.7, **kwargs):
 </ParamField>
 
 <ParamField path="agents" type="List[Agent]" required>
-  List of agents that will participate
+  List of agents that will participate. Every element must be an `Agent` instance; an empty list raises `ValueError`.
 </ParamField>
 
 <ParamField path="social_algorithm" type="Callable" default="None">
@@ -210,7 +208,7 @@ def consensus_algorithm(agents, task, threshold=0.7, **kwargs):
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict">
-  Format for output (dict, list, str)
+  Shape of `final_outputs`: `"dict"` wraps a non-dict result as `{"result": ...}`, `"list"` wraps a non-list result in a list, and `"str"` converts with `str()`.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -228,19 +226,20 @@ def consensus_algorithm(agents, task, threshold=0.7, **kwargs):
 
 ### run()
 
-Execute the social algorithm.
+Execute the social algorithm. The task is recorded as a `User` message, every agent call is recorded under the agent's name, and the algorithm's return value is recorded under the algorithm's `name`. Each call is traced as a `SocialAlgorithms.run` span when [telemetry](/deployment/telemetry) is on.
 
 ```python
 result = social_alg.run(
     task="Analyze market trends",
-    algorithm_args={"rounds": 3, "threshold": 0.8},  # Custom args
+    algorithm_args={"rounds": 3, "threshold": 0.8},
 )
 
-# Result is SocialAlgorithmResult object
 print(result.final_outputs)
 print(result.execution_time)
 print(result.successful_steps)
 ```
+
+`algorithm_args` and any extra keyword arguments to `run` are passed to your algorithm as keyword arguments. Extra keyword arguments win on a name conflict.
 
 ### add_agent() / remove_agent()
 
@@ -273,7 +272,7 @@ result = social_alg.run("Task")
 history = social_alg.get_communication_history()
 
 # Each entry is a conversation message dict:
-#   {"role": "<agent_name>", "content": "<the agent's answer>", ...}
+#   {"role": "<agent_name>", "content": "<whatever agent.run returned>", ...}
 ```
 
 The same messages are reachable through the standard Conversation API, which is
@@ -298,7 +297,7 @@ so call this if you are reusing one instance for unrelated tasks.
 
 ## SocialAlgorithmResult
 
-Detailed execution results:
+Detailed execution results. `total_steps` and `successful_steps` both count the agent messages recorded during the run. `failed_steps` is always `0` in a returned result, because a failing algorithm raises instead. `metadata` is currently always empty.
 
 ```python
 class SocialAlgorithmResult:
@@ -484,7 +483,7 @@ Your social algorithm must:
 
 1. **Accept agents and task**: `def algorithm(agents, task, **kwargs)`
 2. **Return results**: Any structure (dict, list, str, object)
-3. **Handle errors**: Exceptions will be caught and logged
+3. **Handle errors**: Exceptions are logged and re-raised from `run`, so catch agent failures inside the algorithm if the run should continue
 
 ```python
 def valid_algorithm(agents, task, **kwargs):
@@ -505,8 +504,8 @@ def invalid_algorithm(wrong_params):
 
 1. **Clear Signatures**: Always accept (agents, task, **kwargs)
 2. **Error Handling**: Handle agent failures gracefully
-3. **Timeout Awareness**: Set appropriate max_execution_time
-4. **Communication Logging**: Enable for debugging and analysis
+3. **Timeout Awareness**: Set appropriate max_execution_time. The timeout uses `signal.SIGALRM`, so call `run` from the main thread, and not on Windows
+4. **Fresh History**: Call `clear_communication_history()` between unrelated tasks, because the conversation accumulates across runs
 5. **Documentation**: Document your algorithm's communication pattern
 
 <Warning>
@@ -516,10 +515,12 @@ def invalid_algorithm(wrong_params):
 ## Error Handling
 
 ```python
+from swarms.structs.social_algorithms import InvalidAlgorithmError
+
 try:
     result = social_alg.run("Task")
 except InvalidAlgorithmError:
-    print("Social algorithm is not callable")
+    print("No social algorithm was provided")
 except TimeoutError:
     print("Execution exceeded max_execution_time")
 except Exception as e:

@@ -18,8 +18,8 @@ The agent consists of three specialized sub-agents:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `agent_name` | `str` | `"reflexion-agent"` | Name of the agent |
-| `system_prompt` | `str` | `REFLEXION_PROMPT` | System prompt for the agent |
+| `agent_name` | `str` | `"reflexion-agent"` | Name of the agent. The sub-agents are named `<agent_name>-actor`, `<agent_name>-evaluator` and `<agent_name>-reflector` |
+| `system_prompt` | `str` | `REFLEXION_PROMPT` | System prompt for the actor. The evaluator and reflector use their own built-in prompts |
 | `model_name` | `str` | `"openai/o1"` | Model name for generating responses |
 | `max_loops` | `int` | `3` | Maximum number of reflection iterations per task |
 | `memory_capacity` | `int` | `100` | Maximum capacity of long-term memory |
@@ -36,7 +36,7 @@ response = agent.act(task: str, relevant_memories: List[Dict[str, Any]] = None) 
 
 ### evaluate
 
-Evaluates the quality of a response to a task. Returns an evaluation string and a score between 0 and 1.
+Evaluates the quality of a response to a task. Returns an evaluation string and a score between 0 and 1. The score is the last number after "final score" or "overall score" in the evaluation, divided by 10. If no such number is found, the score is 0.5.
 
 ```python
 evaluation, score = agent.evaluate(task: str, response: str) -> Tuple[str, float]
@@ -60,7 +60,7 @@ refined_response = agent.refine(task: str, original_response: str, evaluation: s
 
 ### step
 
-Processes a single task through one iteration of the Reflexion process. Returns a dictionary containing task, response, evaluation, reflection, score, and iteration number.
+Processes a single task through one iteration of the Reflexion process: it acts (or uses `previous_response` when given), evaluates, reflects, and stores the result in memory. Returns a dictionary with the keys `task`, `response`, `evaluation`, `reflection`, `score` and `iteration`.
 
 ```python
 result = agent.step(task: str, iteration: int = 0, previous_response: str = None) -> Dict[str, Any]
@@ -68,11 +68,19 @@ result = agent.step(task: str, iteration: int = 0, previous_response: str = None
 
 ### run
 
-Executes the full Reflexion process for a list of tasks.
+Executes the full Reflexion process for a list of tasks, one task at a time.
 
 ```python
 results = agent.run(tasks: List[str], include_intermediates: bool = False) -> List[Any]
 ```
+
+For each task, the first iteration acts, evaluates and reflects. Each later iteration refines the previous response with its evaluation and reflection, then evaluates and reflects again. The loop stops after `max_loops` iterations, or early once a score exceeds 0.9.
+
+`run()` returns one item per task. By default that item is the response with the highest score. With `include_intermediates=True` it is the list of `step()` dictionaries for every iteration. Each task and its best response are also added to `agent.conversation`.
+
+<Note>
+`run()` takes a list of tasks, not a single string. Wrap a single task in a list.
+</Note>
 
 ## Example
 
@@ -81,7 +89,7 @@ from swarms import ReflexionAgent
 
 agent = ReflexionAgent(
     agent_name="reflexion-agent",
-    model_name="openai/o1",
+    model_name="gpt-5.4",
     max_loops=3
 )
 
@@ -101,11 +109,12 @@ for i, result in enumerate(results):
 
 The agent includes a `ReflexionMemory` system that maintains both short-term and long-term memories of past experiences, reflections, and feedback.
 
-- Short-term memory for recent interactions
-- Long-term memory for important reflections and patterns
-- Automatic memory management with capacity limits
-- Relevance-based memory retrieval
-- Similarity-based deduplication
+- **Short-term memory** keeps the 10 most recent `step()` results.
+- **Long-term memory** receives a step's result when its score is above 0.8 or it is the last iteration. It holds up to `memory_capacity` entries and drops the oldest first.
+- **Deduplication** skips a long-term entry when the words of its task and reflection have a Jaccard similarity above 0.8 with an existing entry.
+- **Retrieval** with `agent.memory.get_relevant_memories(task, limit=5)` ranks short-term and long-term entries by the words they share with the task.
+
+`act()` adds the reflections from `relevant_memories` to the actor's prompt. Inside `run()`, refinement works from the previous iteration's evaluation and reflection rather than from retrieved memories.
 
 ## Best Practices
 

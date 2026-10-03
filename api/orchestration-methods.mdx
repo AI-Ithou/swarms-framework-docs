@@ -8,7 +8,7 @@ icon: "users-between-lines"
 
 `swarms.structs.multi_agent_debates` provides structured conversation orchestrators for coordinating multiple agents in turn-based discussions. Each orchestrator takes a list of `Agent` instances, drives them through a scripted exchange, and returns the resulting conversation history.
 
-Both classes live in `swarms.structs.multi_agent_debates` and are imported from that module directly — they are not re-exported from the top-level `swarms` package.
+Both classes live in `swarms.structs.multi_agent_debates` and are imported from that module directly — they are not re-exported from the top-level `swarms` package. A function form of the two-agent debate, `one_on_one_debate`, lives in `swarms.structs.deep_discussion`.
 
 ## Installation
 
@@ -21,11 +21,18 @@ pip install -U swarms
 | Method | Description | Use Case |
 |---|---|---|
 | `OneOnOneDebate` | Turn-based debate between exactly two agents | Philosophical discussions, adversarial arguments |
+| `one_on_one_debate` | Function form of the two-agent debate, without the introductions | Quick two-agent exchanges |
 | `ExpertPanelDiscussion` | Expert panel with a moderator guiding rounds | Professional discussions, expert opinions |
+
+<Note>
+  None of these orchestrators records the task itself, so the first recorded message is the first agent's reply. The default `output_type="str-all-except-first"` leaves that reply out and joins the rest without speaker names. Pass `output_type="str"` for a labelled transcript of every turn, or `"list"` to iterate messages.
+</Note>
 
 ## OneOnOneDebate
 
-Simulates a turn-based debate between two agents for a specified number of loops. Both agents are first given a short introduction naming their opponent, then they alternate: each agent's response becomes the next agent's prompt.
+Simulates a turn-based debate between two agents for a specified number of loops. Both agents are first given a short introduction naming their opponent, then they alternate: each agent's response becomes the next agent's prompt. A run makes `2 + max_loops` agent calls.
+
+Each turn records, and passes on, whatever the speaker's `run()` returns. With the `Agent` default `output_type`, that is the agent's conversation rather than just its reply, so it grows every turn. Give both agents `output_type="final"` to exchange only replies, or use the `one_on_one_debate` function below, which does this for you.
 
 ### Attributes
 
@@ -71,23 +78,76 @@ def run(self, task: str)
 from swarms import Agent
 from swarms.structs.multi_agent_debates import OneOnOneDebate
 
-# Create debating agents
-agent1 = Agent(agent_name="Philosopher1", model_name="gpt-5.4")
-agent2 = Agent(agent_name="Philosopher2", model_name="gpt-5.4")
+agent1 = Agent(agent_name="Philosopher1", model_name="gpt-5.4", output_type="final")
+agent2 = Agent(agent_name="Philosopher2", model_name="gpt-5.4", output_type="final")
 
-# Initialize debate
 debate = OneOnOneDebate(
     max_loops=3,
     agents=[agent1, agent2],
+    output_type="str",
 )
 
-# Run debate
 result = debate.run("Is artificial intelligence consciousness possible?")
+print(result)
+```
+
+## one_on_one_debate
+
+The function form of the two-agent debate. It skips the introductions, and on each turn it records the speaker's final answer and passes only that answer to the other agent, so the context does not grow with each agent's transcript.
+
+```python
+def one_on_one_debate(
+    max_loops: int = 1,
+    task: str = None,
+    agents: list[Union[Agent, Callable]] = None,
+    img: str = None,
+    output_type: str = "str-all-except-first",
+) -> list
+```
+
+<ParamField path="max_loops" type="int" default="1">
+  Number of turns. One agent speaks per turn, alternating, starting with `agents[0]`.
+</ParamField>
+
+<ParamField path="task" type="str" required>
+  The opening message sent to the first agent.
+</ParamField>
+
+<ParamField path="agents" type="list[Agent]" required>
+  Exactly two agents. Any other number raises `ValueError`.
+</ParamField>
+
+<ParamField path="img" type="str" default="None">
+  Optional image passed to each agent's `run()` call.
+</ParamField>
+
+<ParamField path="output_type" type="str" default="str-all-except-first">
+  Format for the returned conversation history.
+</ParamField>
+
+```python
+from swarms import Agent
+from swarms.structs.deep_discussion import one_on_one_debate
+
+optimist = Agent(agent_name="Optimist", model_name="gpt-5.4")
+skeptic = Agent(agent_name="Skeptic", model_name="gpt-5.4")
+
+transcript = one_on_one_debate(
+    max_loops=4,
+    task="Will open-weight models match frontier models within two years?",
+    agents=[optimist, skeptic],
+    output_type="str",
+)
+print(transcript)
 ```
 
 ## ExpertPanelDiscussion
 
-Simulates an expert panel discussion with a moderator guiding the conversation. Each round, the moderator introduces the topic, every expert responds in turn, and the moderator then synthesises the responses into a follow-up question that becomes the next round's topic.
+Simulates an expert panel discussion with a moderator guiding the conversation. Before the first round, the moderator and each expert are briefed on the panel's participants. Each round, the moderator introduces the topic, every expert responds in turn to the moderator's message, and the moderator then synthesises the responses into a follow-up question that becomes the next round's topic.
+
+The moderator receives the round's expert replies as a labelled transcript, one `Expert_Name: reply` block per expert. A run makes `1 + N + max_rounds * (N + 2)` agent calls for `N` experts.
+
+Like `OneOnOneDebate`, the panel records whatever each agent's `run()` returns. Give the moderator and experts `output_type="final"` so only their replies are recorded and passed on.
 
 ### Attributes
 
@@ -135,21 +195,20 @@ Full example: [Healthcare Panel Discussion](https://github.com/kyegomez/swarms/b
 from swarms import Agent
 from swarms.structs.multi_agent_debates import ExpertPanelDiscussion
 
-# Create expert agents
-moderator = Agent(agent_name="Moderator", model_name="gpt-5.4")
-expert1 = Agent(agent_name="AI_Expert", model_name="gpt-5.4")
-expert2 = Agent(agent_name="Ethics_Expert", model_name="claude-sonnet-4-6")
-expert3 = Agent(agent_name="Neuroscience_Expert", model_name="gpt-5.4")
+moderator = Agent(agent_name="Moderator", model_name="gpt-5.4", output_type="final")
+expert1 = Agent(agent_name="AI_Expert", model_name="gpt-5.4", output_type="final")
+expert2 = Agent(agent_name="Ethics_Expert", model_name="claude-sonnet-4-6", output_type="final")
+expert3 = Agent(agent_name="Neuroscience_Expert", model_name="gpt-5.4", output_type="final")
 
-# Initialize panel
 panel = ExpertPanelDiscussion(
     max_rounds=2,
     agents=[expert1, expert2, expert3],
     moderator=moderator,
+    output_type="str",
 )
 
-# Run panel discussion
 result = panel.run("What are the ethical implications of AGI development?")
+print(result)
 ```
 
 ## Other Conversation Patterns

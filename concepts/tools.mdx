@@ -66,6 +66,8 @@ sequenceDiagram
 6. **Result Integration**: Tool output is added to conversation context
 7. **Response Generation**: LLM uses tool results to generate final response
 
+Inside an `Agent`, this cycle is run by [`ToolManager`](/api/tool-manager), available as `agent.tool_manager`. It builds the schemas, executes each tool call, retries failures, and records results in the conversation.
+
 ## Creating Tools
 
 ### Basic Python Functions
@@ -111,11 +113,9 @@ response = agent.run("Search for the current price of Bitcoin and calculate 5 * 
 
 <Warning>
 **Requirements for Tool Functions**:
-1. **Type hints**: All parameters and return values must have type annotations
-2. **Docstrings**: Clear documentation explaining what the tool does
-3. **Parameter descriptions**: Document each parameter in the docstring
-
-Without these, the LLM cannot reliably use your tools!
+1. **Type hints**: Every parameter without a default must be annotated, or building the agent raises `TypeError`. A missing return annotation only logs a warning.
+2. **Docstrings**: Required. A function without one raises `ValueError` when the agent builds its schemas. The whole docstring, `Args:` section included, becomes the tool description.
+3. **Parameter descriptions**: Each parameter's schema description is its `Annotated[...]` text, for example `Annotated[str, "City name"]`, or else just the parameter name.
 </Warning>
 
 ### Tool Best Practices
@@ -184,18 +184,21 @@ def calculate(expr: str) -> float:
     """Calculate mathematical expressions."""
     return eval(expr)
 
-# Create tool manager
-tool_manager = BaseTool(
+base_tool = BaseTool(
     tools=[search, calculate],
     verbose=True,
 )
 
 # Convert tools to OpenAI schema
-schema = tool_manager.convert_tool_into_openai_schema()
+schema = base_tool.convert_tool_into_openai_schema()
 
-# Execute tools from LLM response
-result = tool_manager.execute_tool(llm_response)
+# Execute a tool call given as JSON text
+result = base_tool.execute_tool('{"name": "search", "parameters": {"query": "Python"}}')
 ```
+
+<Note>
+`BaseTool` is the standalone schema converter and executor. Every agent builds one as `agent.tool_struct`. The agent's [`ToolManager`](/api/tool-manager) is a different class: it drives the whole tool cycle for one agent and uses `BaseTool` to run local calls.
+</Note>
 
 The `BaseTool` class provides:
 - **Automatic schema conversion**: Convert Python functions to OpenAI format
@@ -206,11 +209,12 @@ The `BaseTool` class provides:
 
 ### Pattern 3: Pydantic Models as Tools
 
-Use Pydantic models for structured data:
+Use Pydantic models for structured data. Convert each model to a function schema with `BaseTool().base_model_to_dict` and pass the schemas through `tools_list_dictionary`. The model then answers with tool calls whose arguments match your fields:
 
 ```python
 from pydantic import BaseModel, Field
 from swarms import Agent
+from swarms.tools import BaseTool
 
 class SearchQuery(BaseModel):
     """A web search query."""
@@ -222,11 +226,24 @@ class CalculationRequest(BaseModel):
     expression: str = Field(..., description="Mathematical expression to evaluate")
     precision: int = Field(2, description="Decimal places for the result")
 
+base_tool = BaseTool()
+
 agent = Agent(
     model_name="gpt-5.4",
-    list_base_models=[SearchQuery, CalculationRequest],
+    tools_list_dictionary=[
+        base_tool.base_model_to_dict(SearchQuery),
+        base_tool.base_model_to_dict(CalculationRequest),
+    ],
 )
 ```
+
+No callable sits behind these schemas, so nothing executes: the tool calls themselves are the agent's answer. See [Structured Outputs](/agents/structured-outputs) for choosing an `output_type`.
+
+A field without a `Field(description=...)` takes its description from the model docstring's `Args:` section. Wrapped lines in that section are joined into one description.
+
+<Warning>
+`Agent(list_base_models=[...])` currently raises `TypeError` at construction, and `tool_schema` only adds the schema to the conversation as text; neither registers a callable tool. Use `tools_list_dictionary` as shown above.
+</Warning>
 
 ### Pattern 4: MCP (Model Context Protocol)
 
@@ -475,18 +492,18 @@ Control how tools are executed:
 agent = Agent(
     model_name="gpt-5.4",
     tools=[tool1, tool2, tool3],
-    
-    # Tool execution settings
-    tool_retry_attempts=3,  # Retry failed tool executions
-    show_tool_execution_output=True,  # Display tool outputs
-    tool_call_summary=True,  # Summarize tool calls
-    dynamic_tools=True,  # Defer schemas behind tool_search (default)
+    tool_retry_attempts=3,  # Runs of the whole tool batch before giving up
+    show_tool_execution_output=True,  # Print the full tool output panel
+    tool_call_summary=True,  # Summarize each tool result with an extra model call
+    dynamic_tools=False,  # Default; True defers schemas behind tool_search
 )
 ```
 
 <Note>
-`dynamic_tools` defaults to `True`. Rather than sending every tool schema on every request, the agent exposes a single `tool_search` tool and loads the rest on demand — cutting prompt cost and improving selection accuracy on larger tool sets. See [Dynamic Tool Loading](/agents/dynamic-tools).
+`dynamic_tools` defaults to `False`, so every tool schema ships with every request. Set it to `True` to expose a single `tool_search` tool and load the rest on demand, which cuts prompt cost and improves selection on larger tool sets. See [Dynamic Tool Loading](/agents/dynamic-tools).
 </Note>
+
+When every retry fails, the agent records the failure in the conversation and keeps running, so the model can read the error and try something else. The [ToolManager reference](/api/tool-manager#retries-and-failures) covers the exact behavior.
 
 ## BaseTool API Reference
 
@@ -497,32 +514,35 @@ Key methods from `swarms/tools/base_tool.py`:
 ```python
 from swarms.tools import BaseTool
 
-tool_manager = BaseTool(tools=[my_function])
+base_tool = BaseTool(tools=[my_function])
 
 # Convert function to OpenAI schema
-schema = tool_manager.func_to_dict(my_function)
+schema = base_tool.func_to_dict(my_function)
 
 # Convert multiple functions
-schemas = tool_manager.multiple_functions_to_dict([func1, func2])
+schemas = base_tool.multiple_functions_to_dict([func1, func2])
 
 # Convert Pydantic model
-model_schema = tool_manager.base_model_to_dict(MyModel)
+model_schema = base_tool.base_model_to_dict(MyModel)
 ```
 
 ### Tool Execution
 
 ```python
 # Execute tool from LLM response
-result = tool_manager.execute_tool(llm_response)
+result = base_tool.execute_tool(llm_response)
+
+# Function map for the by-name and from-text helpers
+base_tool.convert_funcs_into_tools()
 
 # Execute specific tool by name
-result = tool_manager.execute_tool_by_name(
+result = base_tool.execute_tool_by_name(
     tool_name="search_web",
-    response='{"query": "Python"}'
+    response='{"name": "search_web", "parameters": {"query": "Python"}}'
 )
 
 # Execute from JSON text
-result = tool_manager.execute_tool_from_text(
+result = base_tool.execute_tool_from_text(
     '{"name": "search_web", "parameters": {"query": "Python"}}'
 )
 ```
@@ -531,13 +551,13 @@ result = tool_manager.execute_tool_from_text(
 
 ```python
 # Check if function has documentation
-has_docs = tool_manager.check_func_if_have_docs(my_function)
+has_docs = base_tool.check_func_if_have_docs(my_function)
 
 # Check if function has type hints
-has_hints = tool_manager.check_func_if_have_type_hints(my_function)
+has_hints = base_tool.check_func_if_have_type_hints(my_function)
 
 # Validate function call string
-is_valid = tool_manager.check_str_for_functions_valid(function_call_str)
+is_valid = base_tool.check_str_for_functions_valid(function_call_str)
 ```
 
 ## Best Practices
@@ -623,12 +643,11 @@ is_valid = tool_manager.check_str_for_functions_valid(function_call_str)
 Implement custom tool loading and execution:
 
 ```python
+import os
+
 from swarms.tools import BaseTool
 
-class CustomToolManager(BaseTool):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
+class DirectoryToolLoader(BaseTool):
     def load_tools_from_directory(self, directory: str):
         """Load all Python functions from a directory as tools."""
         import importlib.util
@@ -667,5 +686,8 @@ class CustomToolManager(BaseTool):
   </Card>
   <Card title="BaseTool Reference" icon="book" href="/api/tools">
     Complete API reference for BaseTool class
+  </Card>
+  <Card title="ToolManager Reference" icon="screwdriver-wrench" href="/api/tool-manager">
+    How an agent sets up, runs, and retries its tools
   </Card>
 </CardGroup>

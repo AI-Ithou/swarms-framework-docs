@@ -1,0 +1,259 @@
+---
+title: 'Check Models'
+description: "List, count and look up the model names LiteLLM knows, plus OpenRouter's live catalogue"
+icon: 'list-check'
+---
+
+## Overview
+
+The `check_models` module tells you which model names you can pass to `Agent(model_name=...)`. It merges two sources:
+
+- **LiteLLM's model list**: `litellm.model_list` from the installed `litellm` package. It is read once, when the module is imported, and needs no network.
+- **OpenRouter's live catalogue**: fetched from `https://openrouter.ai/api/v1/models`, with each id prefixed `openrouter/`. No API key is needed. The list is cached for five minutes.
+
+```python
+from swarms import get_available_models, is_model_available, model_count
+
+report = get_available_models()
+print(report["count"], report["models"][:5])
+
+print(is_model_available("gpt-5.4-mini"))  # True
+print(model_count(include_openrouter=False))
+```
+
+<Note>
+These functions are standalone utilities. `Agent` does not call them, so an agent never checks its `model_name` against this list. Do not confuse `get_available_models()` here with [`Agent.get_available_models()`](/api/llm-manager#get_available_models), which returns the agent's own fallback chain.
+</Note>
+
+## Import
+
+```python
+from swarms import get_available_models, is_model_available, model_count
+```
+
+These three are exported from `swarms` and `swarms.structs`. The async and cache helpers live only in the module:
+
+```python
+from swarms.structs.check_models import (
+    aget_available_models,
+    fetch_openrouter_models,
+    afetch_openrouter_models,
+    clear_openrouter_cache,
+)
+```
+
+## How the list is built
+
+1. Start with LiteLLM's model list, de-duplicated, in LiteLLM's order.
+2. If `include_openrouter` is `True`, append each OpenRouter model, prefixed `openrouter/`. A model is skipped when LiteLLM already lists it, either with the `openrouter/` prefix or without it.
+3. If `exclude_keywords` is set, drop every model whose name contains one of them. The match is a case-insensitive substring match, and it applies to both sources.
+
+The LiteLLM list depends on your installed `litellm` version, so counts differ between environments.
+
+## Functions
+
+### get_available_models
+
+```python
+def get_available_models(
+    include_openrouter: bool = True,
+    exclude_keywords: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]
+```
+
+List every model name LiteLLM knows, plus OpenRouter's live catalogue.
+
+<ParamField path="include_openrouter" type="bool" default="True">
+  Fetch OpenRouter's model list, or use the cached one, and include it. Set `False` to stay offline and use only LiteLLM's list.
+</ParamField>
+
+<ParamField path="exclude_keywords" type="Optional[Iterable[str]]" default="None">
+  Drop any model whose name contains one of these, case-insensitively.
+</ParamField>
+
+**Returns** a dict:
+
+<ResponseField name="status" type="str">
+  Always `"success"`. A failed OpenRouter fetch does not change it; the OpenRouter names are just missing.
+</ResponseField>
+
+<ResponseField name="count" type="int">
+  The number of names in `models`.
+</ResponseField>
+
+<ResponseField name="models" type="List[str]">
+  The model names: LiteLLM's first, then OpenRouter's.
+</ResponseField>
+
+This function never raises on a network failure. See [OpenRouter caching](#openrouter-caching).
+
+### is_model_available
+
+```python
+def is_model_available(
+    model: str,
+    include_openrouter: bool = True,
+) -> bool
+```
+
+Whether `model` appears in the list.
+
+<ParamField path="model" type="str" required>
+  A model name as you would pass to `Agent(model_name=...)`.
+</ParamField>
+
+<ParamField path="include_openrouter" type="bool" default="True">
+  Also check OpenRouter's catalogue.
+</ParamField>
+
+**Returns** `True` if the name is listed.
+
+<Warning>
+The check is an exact, case-sensitive string match. LiteLLM can route some names it does not list, such as provider-prefixed spellings like `"openai/gpt-5.4"`, so `False` does not always mean an agent cannot call the model. Check the bare name too, or look the name up in `get_available_models()["models"]`.
+</Warning>
+
+### model_count
+
+```python
+def model_count(
+    include_openrouter: bool = True,
+    exclude_keywords: Optional[Iterable[str]] = None,
+) -> int
+```
+
+How many model names `get_available_models()` would return with the same arguments. **Returns** its `count`.
+
+### aget_available_models
+
+```python
+async def aget_available_models(
+    include_openrouter: bool = True,
+    exclude_keywords: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]
+```
+
+The async form of `get_available_models()`. It takes the same arguments, returns the same dict, and shares the same OpenRouter cache. Import it from `swarms.structs.check_models`.
+
+### fetch_openrouter_models
+
+```python
+def fetch_openrouter_models() -> List[str]
+```
+
+Fetch OpenRouter's model list on its own. Each `id` in the response's `data` array becomes `openrouter/<id>`, for example `openrouter/moonshotai/kimi-k3`, and entries without an `id` are skipped. **Returns** the names, or an empty list if the request fails. The result is not merged with LiteLLM's list and ignores `exclude_keywords`.
+
+### afetch_openrouter_models
+
+```python
+async def afetch_openrouter_models() -> List[str]
+```
+
+The async form of `fetch_openrouter_models()`, sharing its cache.
+
+### clear_openrouter_cache
+
+```python
+def clear_openrouter_cache() -> None
+```
+
+Forget the cached OpenRouter list, so the next call fetches it again.
+
+## OpenRouter caching
+
+OpenRouter's list is kept in one module-level cache that the sync and async functions share.
+
+| Setting | Value | Module constant |
+|---|---|---|
+| URL | `https://openrouter.ai/api/v1/models` | `OPENROUTER_MODELS_URL` |
+| Cache lifetime | 300 seconds | `OPENROUTER_CACHE_TTL_SECONDS` |
+| Request timeout | 10 seconds | `OPENROUTER_TIMEOUT_SECONDS` |
+
+- **Within the lifetime**, every call returns the cached list without a request.
+- **On a failed fetch**, a warning is logged and an empty list is returned. The empty list is cached for the full lifetime too, so a dead endpoint is retried once every five minutes rather than on every call.
+- **To force a refresh**, call `clear_openrouter_cache()`.
+
+## Examples
+
+### Validate a model name before building an agent
+
+```python
+from swarms import Agent, is_model_available
+
+model_name = "gpt-5.4-mini"
+
+if not is_model_available(model_name, include_openrouter=False):
+    raise ValueError(f"Unknown model: {model_name}")
+
+agent = Agent(agent_name="Analyst", model_name=model_name, max_loops=1)
+```
+
+### Filter out non-chat models
+
+```python
+from swarms import get_available_models
+
+report = get_available_models(
+    include_openrouter=False,
+    exclude_keywords=["embed", "whisper", "tts", "image"],
+)
+print(f"{report['count']} models after filtering")
+```
+
+### Search a provider's models
+
+```python
+from swarms import get_available_models
+
+models = get_available_models()["models"]
+
+claude = sorted(m for m in models if m.startswith("claude-sonnet-4"))
+openrouter_anthropic = [m for m in models if m.startswith("openrouter/anthropic/")]
+
+print(claude)
+print(openrouter_anthropic[:10])
+```
+
+### Use it from async code
+
+```python
+import asyncio
+
+from swarms.structs.check_models import aget_available_models
+
+
+async def main() -> None:
+    report = await aget_available_models(exclude_keywords=[":free"])
+    print(report["count"])
+
+
+asyncio.run(main())
+```
+
+### Refresh the OpenRouter list
+
+```python
+from swarms import model_count
+from swarms.structs.check_models import clear_openrouter_cache
+
+before = model_count()
+clear_openrouter_cache()
+after = model_count()  # fetches OpenRouter again
+print(before, after)
+```
+
+## Related
+
+<CardGroup cols={2}>
+<Card title="Model providers" icon="plug" href="/integrations/model-providers">
+How to name models from each provider
+</Card>
+<Card title="OpenRouter" icon="route" href="/examples/model-providers/openrouter">
+Run agents on OpenRouter models
+</Card>
+<Card title="LLMManager" icon="microchip" href="/api/llm-manager">
+An agent's own model and fallback chain
+</Card>
+<Card title="Decision models" icon="scale-balanced" href="/api/decision-model">
+`get_decision_models()` lists TypeSafe and Cloudflare decision models
+</Card>
+</CardGroup>

@@ -1,11 +1,12 @@
 ---
 title: AutoAgentBuilder
-description: Generates a roster of agent configurations from a task using a single forced function call
+description: Generates a roster of agent configurations from a task using a single function call
+icon: "users-gear"
 ---
 
 ## Overview
 
-The `AutoAgentBuilder` class turns a plain-English task into a roster of agents. A single builder agent is forced to call one function, `build_agents`, and must answer with a list of agent configurations rather than prose.
+The `AutoAgentBuilder` class turns a plain-English task into a roster of agents. A single builder agent is given one tool, `build_agents`, and told to answer by calling it with a list of agent configurations rather than prose.
 
 Each generated agent carries exactly four fields — the minimum needed to construct an [`Agent`](/api/agent):
 
@@ -16,7 +17,7 @@ name, description, system_prompt, model_name
 The builder designs the team and stops there. It does **not** choose a multi-agent architecture and it does **not** execute anything, so you decide what runs the roster.
 
 <Note>
-Because the provider enforces the tool schema, there is no markdown fence to strip and no JSON to extract from a paragraph. This is the main behavioral difference from [`AutoSwarmBuilder`](/api/auto-swarm-builder), which uses structured output and also selects a `swarm_type` for you.
+The roster arrives as tool-call arguments, so there is no markdown fence to strip and no JSON to extract from a paragraph. The tool is offered with `tool_choice="auto"`, so the model is not strictly forced to call it; if it answers without a usable call, `build_configs()` raises `ValueError` rather than retrying. This is the main behavioral difference from [`AutoSwarmBuilder`](/api/auto-swarm-builder), which uses structured output with repair retries and also selects a `swarm_type` for you.
 </Note>
 
 ## Class Definition
@@ -160,7 +161,7 @@ Generates configurations and constructs the `Agent` objects. Ignores `return_dic
 def build_configs(self, task: str) -> List[Dict[str, str]]
 ```
 
-Generates agent configurations for a task, always as dicts. Ignores `return_dict`.
+Generates agent configurations for a task, always as dicts. Ignores `return_dict`. Every roster is generated here, so each `run()`, `build_agents()`, and `build_configs()` call is recorded as an `AutoAgentBuilder.build_configs` trace span when [telemetry](/deployment/telemetry) is enabled.
 
 **Returns:**
 
@@ -304,7 +305,7 @@ It instructs the builder to:
 | | `AutoAgentBuilder` | [`AutoSwarmBuilder`](/api/auto-swarm-builder) |
 |---|---|---|
 | Output | Agent roster only | Roster plus `swarm_type` and optional execution |
-| Structured output method | Forced function call | `response_format` |
+| Structured output method | `build_agents` tool call | `response_format` |
 | Fields per agent | 4 | 10+ (`max_tokens`, `temperature`, `role`, `goal`, …) |
 | Picks architecture | No | Yes |
 | Executes the task | No | Optionally |

@@ -83,6 +83,10 @@ export ANTHROPIC_API_KEY="sk-ant-..."
     ```
 
     Each tool's description comes from the target: `agent_description` for an agent, `description` for the workflow, and the docstring for the function. `timeout=300` fails any single call that runs longer than five minutes.
+
+    <Note>
+    The client has its own limit: a swarms client waits `tool_timeout` seconds for one call, 120 by default. For calls that may run longer, connect with `MCPConnection(url=..., api_key=..., tool_timeout=320)` so the server's `timeout` is the one that fires.
+    </Note>
   </Step>
 
   <Step title="Serve it and call each tool">
@@ -150,6 +154,23 @@ deployer.add_tool(critic, name="second_opinion", description="A second critique 
 ```
 
 Two targets that resolve to the same name raise `ValueError`. That is why several targets are passed as a dict: the keys make every name explicit.
+
+To add plain helper functions with their own arguments, pass them in `extra_tools` instead. Each keeps its signature as its schema rather than the `task` and `img` schema every target gets:
+
+```python
+def utc_now() -> str:
+    """The current UTC time as an ISO 8601 string."""
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+MCPDeployer({"research": researcher}, api_keys=["sk-local-dev"], extra_tools=[utc_now])
+```
+
+## State between calls
+
+Every call to `research` runs the same `researcher` object, and an `Agent` keeps its conversation between calls. That is fine for one client working through a task. When unrelated clients share the server, serve functions that build a fresh agent per call; see [State between calls](/api/mcp-deployer#state-between-calls).
 
 ## Checking what is served
 

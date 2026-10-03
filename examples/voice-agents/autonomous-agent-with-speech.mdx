@@ -34,10 +34,11 @@ agent = Agent(
     dynamic_context_window=True,
     selected_tools="all",
     top_p=None,
+    streaming_on=True,  # the callback only receives tokens when the agent streams
 )
 ```
 
-`max_loops="auto"` runs the agent through three phases — plan, execute, summary — looping until it decides the task is done. `selected_tools="all"` exposes every tool the autonomous looper has access to (bash, file ops, etc.).
+`max_loops="auto"` runs the agent through three phases — plan, execute, summary — looping until it decides the task is done. `selected_tools="all"` (the default) exposes every tool the autonomous looper has access to (bash, file ops, etc.). `streaming_on=True` is what makes the model stream, so the TTS callback receives tokens.
 
 ## Step 3: Wire up the streaming TTS callback
 
@@ -80,6 +81,7 @@ agent = Agent(
     dynamic_context_window=True,
     selected_tools="all",
     top_p=None,
+    streaming_on=True,
 )
 
 tts_callback = StreamingTTSCallback(voice="alloy", model="tts-1")

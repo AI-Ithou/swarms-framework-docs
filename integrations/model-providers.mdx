@@ -52,24 +52,17 @@ Use OpenAI's GPT models by specifying the model name:
 ```python
 from swarms import Agent
 
-# GPT-4
+# GPT-5.4
 agent = Agent(
-    agent_name="GPT4-Agent",
-    model_name="gpt-4",
+    agent_name="GPT5-Agent",
+    model_name="gpt-5.4",
     max_loops=1,
 )
 
-# GPT-4 Turbo
+# o3 (Reasoning)
 agent = Agent(
-    agent_name="GPT4-Turbo-Agent",
-    model_name="gpt-4-turbo",
-    max_loops=1,
-)
-
-# GPT-4o (Optimized)
-agent = Agent(
-    agent_name="GPT4o-Agent",
-    model_name="gpt-4o",
+    agent_name="O3-Agent",
+    model_name="o3",
     max_loops=1,
 )
 
@@ -193,9 +186,20 @@ agent = Agent(
 
 Swarms uses the following naming pattern for models:
 
-- **Direct provider models**: `"gpt-4"`, `"claude-opus-4-6"`
+- **Direct provider models**: `"gpt-5.4"`, `"claude-sonnet-4-6"`
 - **Provider prefix**: `"groq/llama-3.3-70b-versatile"`, `"ollama/llama3.2"`
 - **OpenRouter**: `"openrouter/provider/model-name"`
+
+Model names are passed straight to LiteLLM, so any name LiteLLM can route works. To check a name before you build an agent, use `is_model_available`:
+
+```python
+from swarms import is_model_available
+
+print(is_model_available("claude-sonnet-4-6", include_openrouter=False))  # LiteLLM's catalogue only, no network call
+print(is_model_available("openrouter/moonshotai/kimi-k3"))                # also fetches OpenRouter's live catalogue
+```
+
+See [check_models](/api/check-models) for the full API.
 
 ## Advanced Configuration
 
@@ -216,6 +220,8 @@ agent = Agent(
 )
 ```
 
+`temperature` defaults to `None`, which leaves it out of the request so the provider's own default applies. `max_tokens` defaults to the model's own output limit.
+
 ### Dynamic Model Selection
 
 Switch models dynamically based on task requirements:
@@ -234,10 +240,10 @@ def get_agent_for_task(task_type: str) -> Agent:
             max_loops=1,
         )
     elif task_type == "analysis":
-        # Use GPT-4 for analysis
+        # Use a reasoning model for analysis
         return Agent(
             agent_name="Analysis-Agent",
-            model_name="gpt-4",
+            model_name="o3",
             max_loops=1,
         )
     elif task_type == "fast":
@@ -274,10 +280,10 @@ researcher = Agent(
     system_prompt="Research the topic thoroughly.",
 )
 
-# Write with GPT-4 (good at creative writing)
+# Write with GPT-5.4
 writer = Agent(
     agent_name="Writer",
-    model_name="gpt-4",
+    model_name="gpt-5.4",
     system_prompt="Write an engaging article.",
 )
 
@@ -305,7 +311,7 @@ from swarms import Agent
 # Use cheaper models for simple tasks
 simple_agent = Agent(
     agent_name="Simple-Task-Agent",
-    model_name="gpt-5.4",  # Most cost-effective
+    model_name="gpt-5.4-mini",  # Cost-effective
     max_loops=1,
 )
 
@@ -323,14 +329,14 @@ complex_agent = Agent(
   <Card title="Choose the Right Model" icon="brain">
     Select models based on your specific use case - speed, cost, or capability
   </Card>
-  <Card title="Monitor Usage" icon="chart-line">
-    Track API usage and costs across different providers
+  <Card title="Monitor Usage" icon="chart-line" href="/agents/token-usage">
+    Track token usage per agent with `agent.usage`
   </Card>
   <Card title="Test Thoroughly" icon="flask">
     Test with multiple providers to find the best fit for your application
   </Card>
-  <Card title="Fallback Strategy" icon="shield">
-    Implement fallback to alternative providers for reliability
+  <Card title="Fallback Strategy" icon="shield" href="/deployment/production-best-practices">
+    Set `fallback_models` so an agent moves to another provider when one fails
   </Card>
 </CardGroup>
 

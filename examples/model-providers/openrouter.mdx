@@ -117,8 +117,8 @@ agents = [
 workflow = ConcurrentWorkflow(agents=agents)
 results = workflow.run("What are the most underrated trade-offs in monolithic vs. microservice architectures?")
 
-for name, response in results.items():
-    print(f"\n=== {name} ===\n{response}")
+for entry in results:
+    print(f"\n=== {entry['role']} ===\n{entry['content']}")
 ```
 
 ## Provider Routing

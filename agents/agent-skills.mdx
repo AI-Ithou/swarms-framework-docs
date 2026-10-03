@@ -114,7 +114,7 @@ Your analysis should produce:
 
 ### Dynamic Loading (Task-Based, Automatic)
 
-Setting `skills_dir` on an agent enables **dynamic, task-based** skill loading automatically. Every call to `agent.run(task)` loads only the skills whose `description` is similar enough to the current task (cosine similarity over term-frequency vectors, threshold `0.3` by default) and appends them to the system prompt for that run. There is no separate "load everything" mode triggered by `run()` — this dynamic path is what fires whenever `skills_dir` is set.
+Setting `skills_dir` on an agent enables **dynamic, task-based** skill loading automatically. Every call to `agent.run(task)` selects the skills whose `description` is similar enough to the current task: cosine similarity over word counts of the task and the description, with a threshold of `0.3` (a skill is selected when its score is at least the threshold). The selected skills are sent with every LLM call of that run as an extra system message, placed after the agent's system prompt. `agent.system_prompt` itself is never changed. A run that selects no skills sends none.
 
 ```python
 from swarms import Agent
@@ -126,16 +126,22 @@ agent = Agent(
     max_loops=1,
 )
 
-# Only relevant skills are loaded based on the task
+# Only skills whose descriptions share enough words with the task are sent
 response = agent.run(
-    "Analyze the financial statements and create a visualization of the revenue trends"
+    "Perform a financial analysis with DCF modeling and ratio analysis for Tesla"
 )
-# Loads: financial-analysis and data-visualization skills
+print([skill["name"] for skill in agent.skills_metadata])
 ```
 
-### Static Loading (Load All Skills)
+After a run, `agent.skills_metadata` lists the skills the last matching run selected.
 
-To force-load every skill in `skills_dir` regardless of task similarity, call `handle_skills()` directly with no `task` argument (e.g. right after construction, before `run()`):
+<Tip>
+  Matching compares words, not meaning, so a task that paraphrases a skill can score below the threshold. Check the scores with `DynamicSkillsLoader("./skills").get_similarity_scores(task)` from `swarms.structs.dynamic_skills_loader`, and write descriptions that use the words your tasks use.
+</Tip>
+
+### Loading Every Skill on Every Run
+
+`run()` always selects skills by similarity. To send every skill regardless of the task, set the threshold to `0` before the first run:
 
 ```python
 from swarms import Agent
@@ -147,9 +153,31 @@ agent = Agent(
     max_loops=1,
 )
 
-agent.handle_skills()  # No task -> loads and appends every skill in skills_dir
+agent.skills.similarity_threshold = 0.0  # every score is >= 0, so every skill is selected
 
 response = agent.run("Perform a DCF valuation of Tesla")
+```
+
+<Note>
+  Calling `agent.handle_skills()` with no task selects every skill, but the next `run()` selects again by similarity and replaces that selection. The skills loader is built on the first run and reused; assign `agent.skills_dir` again to pick up skill files added later.
+</Note>
+
+### Skills from Several Directories
+
+`skills_dir` also takes a list. Directories are read in order. When two directories hold a skill with the same name, the skill from the later directory is used and a warning names both paths.
+
+```python
+from swarms import Agent
+
+agent = Agent(
+    agent_name="Code-Reviewer",
+    model_name="gpt-5.4",
+    max_loops=1,
+    skills_dir=["./team_skills", "./my_skills"],
+)
+
+for skill in agent.load_skills_metadata():
+    print(skill["name"], skill["path"])
 ```
 
 ## Creating Custom Skills
@@ -381,18 +409,22 @@ def function_name(param1: type1, param2: type2) -> return_type:
 
 ### How Skills are Loaded
 
+The constructor only stores `skills_dir` on the agent's `SkillsManager` (`agent.skills`). On each `run(task)`:
+
+1. The first run builds a `DynamicSkillsLoader`, which reads the frontmatter and body of every `SKILL.md` in each directory. Later runs reuse it.
+2. Each skill's `description` is scored against the task, and the skills at or above the threshold are rendered into an `# Available Skills` section.
+3. Every LLM call in that run sends the section as a system message after the agent's system prompt. When the call has no message list, the section is put in front of the task text instead. Tool-summary calls get it too.
+
 ```python
-# skills_dir is only stored during __init__; skills are actually loaded
-# and injected into the system prompt inside agent.run(task), once per call
+from swarms import Agent
+
 agent = Agent(
-    skills_dir="./skills",  # Path to skills directory
+    skills_dir="./skills",
     model_name="claude-sonnet-4-6",
 )
 
 response = agent.run("Perform a DCF valuation of Tesla")
-# On this call: skills metadata is loaded from SKILL.md frontmatter,
-# scored against the task by similarity, and relevant skill content
-# is appended to the system prompt
+print(agent.system_prompt.count("Available Skills"))  # 0: the system prompt is untouched
 ```
 
 ### Dynamic Skills Loader
@@ -400,15 +432,17 @@ response = agent.run("Perform a DCF valuation of Tesla")
 ```python
 from swarms.structs.dynamic_skills_loader import DynamicSkillsLoader
 
-# Manual skill loading
-loader = DynamicSkillsLoader(skills_dir="./skills")
+# One directory or a list of directories
+loader = DynamicSkillsLoader(skills_dir="./skills", similarity_threshold=0.3)
 
-# Load skills relevant to a task
+# Skills relevant to a task, highest score first
 relevant_skills = loader.load_relevant_skills(
     "Perform financial analysis and create visualizations"
 )
-
 print(f"Loaded {len(relevant_skills)} relevant skills")
+
+# Every skill's score for the task
+print(loader.get_similarity_scores("Perform financial analysis"))
 ```
 
 ## Best Practices
@@ -493,7 +527,7 @@ git clone https://github.com/myorg/agent-skills-library.git skills
 
 ## Reference
 
-- Skills handling: `swarms/structs/agent.py` (`handle_skills`, a short delegate) plus `swarms/agents/skills_manager.py` (`SkillsManager._static_prompt`, `SkillsManager._dynamic_prompt`) for the tiered static/dynamic loading logic
-- Dynamic skills loader: `swarms/structs/dynamic_skills_loader.py`
-- Example skills: `examples/single_agent/agent_skill_examples/`
+- Skills handling: `swarms/structs/agent.py` (`handle_skills` stores the selected section; `call_llm` sends it with every request) plus `swarms/agents/skills_manager.py` (`SkillsManager._static_prompt`, `SkillsManager._dynamic_prompt`) for the tiered static/dynamic loading logic. See the [SkillsManager reference](/api/skills-manager)
+- Dynamic skills loader and multi-directory loading: `swarms/structs/dynamic_skills_loader.py`
+- Example skills: `examples/single_agent/capabilities/skills/`, including `multiple_skill_dirs/`
 - Anthropic Agent Skills: [Agent Skills announcement](https://www.anthropic.com/news/agent-skills)

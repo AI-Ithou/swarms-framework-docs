@@ -16,11 +16,11 @@ The `SequentialWorkflow` orchestrates multiple agents in a linear chain, where e
 
 - Automatic flow construction from agent list
 - Support for multiple execution loops
-- Shared memory between agents (optional)
 - Team awareness capabilities
-- Conversation history tracking
+- Conversation history tracking, with a fresh conversation for every run
+- Isolated batch and concurrent runs: each task gets its own copy of the flow
 - Autosave functionality
-- Optional drift detection: a judge agent scores the final output's alignment with the original task and reruns the pipeline if it falls below a threshold
+- Optional drift detection: a judge agent scores the final output's alignment with the original task and reruns the pipeline, up to `drift_max_retries` times, if it falls below a threshold
 
 ## Basic Example
 
@@ -86,7 +86,7 @@ workflow = SequentialWorkflow(
     max_loops=1,
     drift_detection=True,        # score the final output against the task
     drift_threshold=0.8,         # rerun while the score stays below this
-    drift_model="claude-sonnet-4-5",
+    drift_model="claude-sonnet-4-6",
     drift_max_retries=2,         # at most 2 reruns, then return the last output
 )
 ```
@@ -106,11 +106,11 @@ workflow = SequentialWorkflow(
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict">
-  Format for workflow output (dict, str, list, etc.)
+  Format for workflow output, for example `"dict"`, `"list"`, `"str"`, `"final"` or `"str-all-except-first"`. The default `"dict"` returns a list of `{"role", "content"}` message dicts.
 </ParamField>
 
 <ParamField path="team_awareness" type="bool" default="False">
-  Enable agents to know about team structure and flow
+  Add the step-by-step flow structure to the shared conversation. Each agent is always told which agents come before and after it.
 </ParamField>
 
 <ParamField path="multi_agent_collab_prompt" type="bool" default="False">
@@ -128,7 +128,7 @@ workflow = SequentialWorkflow(
 </ParamField>
 
 <ParamField path="drift_detection" type="bool" default="False">
-  If True, a judge agent scores the final output's semantic alignment with the original task after the pipeline completes, and reruns the pipeline while the score stays below `drift_threshold`
+  If True, a judge agent scores the final output's semantic alignment with the original task after the pipeline completes, and reruns the pipeline while the score stays below `drift_threshold`, at most `drift_max_retries` times
 </ParamField>
 
 <ParamField path="drift_threshold" type="float" default="0.75">
@@ -166,7 +166,7 @@ result = workflow.run(
 
 ### run_batched()
 
-Process multiple tasks sequentially.
+Process multiple tasks one after another. Each task runs on its own copy of the flow, so no task sees an earlier task's transcript.
 
 ```python
 tasks = [
@@ -194,7 +194,7 @@ result = asyncio.run(main())
 
 ### run_concurrent()
 
-Run multiple tasks concurrently.
+Run multiple tasks concurrently. Each task runs on its own copy of the flow, so tasks never share a conversation or agent memory. Results come back in completion order, not input order.
 
 ```python
 import asyncio
@@ -332,7 +332,7 @@ print(workflow.flow)
 
 ### Conversation Tracking
 
-Access complete conversation history:
+Access the latest run's conversation history. Each `run()` starts a fresh conversation, so this holds only the most recent task:
 
 ```python
 result = workflow.run("Task")
@@ -342,7 +342,7 @@ history = workflow.agent_rearrange.conversation.conversation_history
 ```
 
 <Warning>
-  The workflow validates that `agents` is not empty and `max_loops > 0` on initialization
+  The workflow raises `ValueError` on initialization if `agents` is empty, `max_loops` is `0`, or `drift_max_retries` is negative
 </Warning>
 
 ## Related Architectures

@@ -33,10 +33,7 @@ pip install swarms
 
 from typing import List
 
-from swarms.structs.agent import Agent
-from swarms.structs.conversation import Conversation
-from swarms.structs.ma_utils import set_random_models_for_agents
-from swarms.utils.history_output_formatter import history_output_formatter
+from swarms import Agent, Conversation, history_output_formatter
 
 # System prompts for each agent
 
@@ -172,7 +169,6 @@ class HiringSwarm:
         self.output_type = output_type
 
         self.agents = self._initialize_agents()
-        self.agents = set_random_models_for_agents(self.agents)
         self.conversation = Conversation()
         self.handle_initial_processing()
 

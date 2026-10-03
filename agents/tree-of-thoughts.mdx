@@ -35,7 +35,11 @@ print(agent.last_result.steps)
 `run` returns the answer. `last_result` keeps the best path, the whole tree, and what the search cost.
 
 <Note>
-The model must support function calling. Every model output is a function call validated against a Pydantic schema, so the search never parses free-form prose. Any LiteLLM model string works, for example `model_name="claude-sonnet-5"`.
+The model must support function calling. Every model output is a function call validated against a Pydantic schema, so the search never parses free-form prose. Any LiteLLM model string that supports function calling works, for example `model_name="claude-sonnet-4-6"`.
+</Note>
+
+<Note>
+`TreeOfThoughts` is not one of the [`ReasoningAgentRouter`](/agents/reasoning-agent-router) swarm types. Create it directly.
 </Note>
 
 ## How the search works
@@ -46,9 +50,22 @@ The model must support function calling. Every model output is a function call v
 4. **Search.** `"bfs"` keeps the best `breadth` open nodes per level. `"dfs"` follows the best child first and backtracks when a branch is pruned or runs out.
 5. **Answer.** Write the final answer from the best path.
 
-A candidate that completes the task is final. A step at `max_depth` is always final, whether or not the model flagged it. A final candidate that survives pruning is a solution. BFS stops once its best solution scores at least as high as every open partial path. DFS returns the first solution it reaches. If the search finds no solution, the answer is completed from the highest-scoring partial path and `solved` is `False`.
+A candidate that completes the task is final. A step at `max_depth` is always final, whether or not the model flagged it. A final candidate that survives pruning is a solution. Final candidates never join the BFS beam. BFS stops once its best solution scores at least as high as every open partial path, or when the beam is empty. DFS returns the first solution it reaches. If the search finds no solution, the answer is completed from the highest-scoring evaluated node, with deeper nodes winning ties, and `solved` is `False`.
 
 Each model call goes through a fresh, stateless `Agent` that carries only the schema for that call. Calls at the same level of the tree run concurrently. A call that fails or returns no valid function call is logged as a warning and costs that one candidate, not the search.
+
+### Function-calling outputs
+
+Each role calls one function. The schemas are Pydantic models in `swarms.agents.tree_of_thoughts`, and any `$ref` is inlined before they are sent, because some providers ignore `$ref` in tool schemas.
+
+| Function | Called by | Fields |
+|----------|-----------|--------|
+| `ProposeThoughts` | Generator | `thoughts`: a list of `Thought`, each with `content` (`str`) and `is_final` (`bool`, default `False`). A bare string is accepted as a thought. |
+| `EvaluateThought` | Evaluator, `"value"` mode | `reasoning` (`str`), then `score` (`float`, 0 to 1). |
+| `VoteForThought` | Evaluator, `"vote"` mode | `reasoning` (`str`) and `best_candidate` (`int`, numbered from 1). |
+| `FinalAnswer` | Answerer | `answer` (`str`). |
+
+A generator call that returns more thoughts than it asked for is trimmed, and a node never gets more than `num_thoughts` children. A vote for a candidate number that does not exist is ignored.
 
 ### When to use it instead of a single Agent
 
@@ -189,7 +206,7 @@ answer = agent.run(task)
 
 `run` takes the task as a string, searches, writes the answer, and returns the conversation formatted by `output_type`: the answer string for the default `"final"`. The conversation holds the task, the reasoning path, and the answer. Each call replaces `last_result` and `conversation`.
 
-It raises `ValueError` if `task` is empty, and `RuntimeError` if the search found no solution and the final answer call also failed, so there is no answer to return.
+It raises `ValueError` if `task` is empty, and `RuntimeError` if the search found no solution and the final answer call also failed, so there is no answer to return. If the final answer call fails after a solution was found, the answer is the solution step itself.
 
 ### last_result
 
@@ -207,7 +224,7 @@ After `run`, `agent.last_result` is a `TreeOfThoughtsResult` for that search. It
 | `llm_calls` | `int` | How many model calls the search made, including the final answer and any calls that failed. |
 | `usage` | `Dict[str, int]` | Provider token usage summed over this search's calls. |
 
-`to_dict()` serializes all of it, with the whole tree under `"tree"`:
+`to_dict()` returns a JSON-serializable dict with `task`, `answer`, `solved`, `steps`, `nodes_expanded`, `llm_calls` and `usage`, and the whole tree under `"tree"`:
 
 ```python
 import json
@@ -230,6 +247,8 @@ Every node in the tree is a `ThoughtNode`:
 | `pruned` | `bool` | Whether the score fell below `value_threshold`. |
 | `children` | `List[ThoughtNode]` | Candidate next steps generated from this node. |
 | `steps` | `List[str]` | The steps on the path from the root to this node. |
+
+`ThoughtNode.to_dict()` serializes a node and its subtree without parent links. Nodes compare by identity, not by field values.
 
 ### usage
 
@@ -260,6 +279,46 @@ The number of expanded nodes is at most `1 + b * (D - 1)` for BFS and `1 + t + t
 These are worst cases. A search usually stops sooner: BFS once a solution beats every open path, DFS at its first solution. Read `last_result.llm_calls` and `last_result.usage` to see what a search actually cost.
 
 ## Examples
+
+This BFS search keeps three partial schedules alive, so an early placement that later proves impossible does not sink the search. The expected answer is Dana 9:00, Ben 10:00, Chen 11:00, Alice 13:00, Eli 14:00.
+
+```python
+from swarms import TreeOfThoughts
+
+agent = TreeOfThoughts(
+    name="Scheduler",
+    model_name="gpt-5.4",
+    search_algorithm="bfs",
+    num_thoughts=3,
+    breadth=3,
+    max_depth=5,
+    thought_description=(
+        "One deduction or placement: fix one speaker's slot, or rule out "
+        "slots for a speaker, naming the constraints that force it."
+    ),
+    evaluation_criteria=(
+        "Does the partial schedule break any constraint, including one "
+        "the remaining free slots can no longer satisfy? A final schedule "
+        "gives every speaker a distinct slot and satisfies all six "
+        "constraints."
+    ),
+)
+
+answer = agent.run(
+    "Schedule five talks by Alice, Ben, Chen, Dana and Eli into the slots "
+    "9:00, 10:00, 11:00, 13:00 and 14:00 (lunch is at 12:00), one talk per "
+    "slot. Constraints: (1) Alice cannot speak before 11:00. (2) Ben "
+    "speaks in the slot immediately before Chen's. (3) Dana speaks in the "
+    "morning. (4) Eli speaks after Alice. (5) Chen does not take 14:00. "
+    "(6) Ben does not take 9:00. Give the full schedule."
+)
+print(answer)
+
+result = agent.last_result
+for number, step in enumerate(result.steps, 1):
+    print(f"{number}. {step}")
+print(result.solved, result.nodes_expanded, result.llm_calls, result.usage["total_tokens"])
+```
 
 <CardGroup cols={3}>
   <Card title="Number theory" icon="calculator" href="/examples/tree-of-thoughts/number-theory-counting">

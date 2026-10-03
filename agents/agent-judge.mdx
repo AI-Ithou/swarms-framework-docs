@@ -15,7 +15,7 @@ Based on the research paper: [Agent-as-a-Judge: Evaluate Agents with Agents](htt
 | **Multimodal Support** | Can evaluate text outputs alongside images |
 | **Context Building** | Maintains evaluation context across multiple iterations |
 | **Custom Evaluation Criteria** | Supports weighted evaluation criteria for domain-specific assessments |
-| **Batch Processing** | Efficiently processes multiple evaluations |
+| **Batch Processing** | Evaluates a list of outputs one after another |
 
 ## Architecture
 
@@ -43,19 +43,22 @@ graph TD
 |-----------|------|---------|-------------|
 | `id` | `str` | `generate_id("agent-judge")` | Unique identifier for the judge instance (`<prefix>-<32 hex chars>`) |
 | `agent_name` | `str` | `"Agent Judge"` | Name of the agent judge |
-| `description` | `str` | `"You're an expert AI agent judge..."` | Description of the agent's role |
-| `system_prompt` | `str` | `None` | Custom system instructions (uses default if None) |
+| `description` | `str` | `"You're an expert AI agent judge..."` | Description of the agent's role, passed to the internal agent as `agent_description` |
+| `system_prompt` | `str` | `None` | Custom system instructions (uses the built-in evaluation prompt if None) |
 | `model_name` | `str` | `"openai/o1"` | LLM model for evaluation |
-| `max_loops` | `int` | `1` | Maximum evaluation iterations |
-| `verbose` | `bool` | `False` | Enable verbose logging |
-| `evaluation_criteria` | `Optional[Dict[str, float]]` | `None` | Dictionary of evaluation criteria and weights |
-| `return_score` | `bool` | `False` | Whether to return a numerical score instead of full conversation |
+| `max_loops` | `int` | `1` | Number of evaluation iterations in `run()` |
+| `verbose` | `bool` | `False` | Stored on the instance |
+| `evaluation_criteria` | `Optional[Dict[str, float]]` | `None` | Criteria and weights, appended to the system prompt and to every evaluation request |
+| `return_score` | `bool` | `False` | Make `run()` return a 0 or 1 keyword reward instead of the conversation |
+| `*args`, `**kwargs` | | | Extra `Agent` arguments applied to the internal agent |
+
+The constructor raises `ValueError` when `max_loops` is `0` or `None`, or when `model_name` is `None`.
 
 ## Methods
 
 ### step()
 
-Processes a single task and returns the agent's evaluation.
+Processes a single task and returns the agent's evaluation. `task` is the output to evaluate. It is wrapped in an evaluation prompt that asks for strengths, weaknesses, suggestions and factual errors. `messages` are earlier chat turns sent before it.
 
 ```python
 result = judge.step(task: str = None, img: Optional[str] = None, messages: Optional[List[Dict[str, str]]] = None) -> str
@@ -63,21 +66,29 @@ result = judge.step(task: str = None, img: Optional[str] = None, messages: Optio
 
 ### run()
 
-Executes evaluation in multiple iterations with context building.
+Executes evaluation in multiple iterations with context building. Each iteration sends the judge's earlier verdicts back to it as chat turns, so later iterations refine earlier ones.
 
 ```python
 result = judge.run(task: str, img: Optional[str] = None) -> Union[str, int]
 ```
 
-Returns `str` (full conversation) if `return_score=False`, or `int` (numerical score) if `return_score=True`.
+Returns `str` (the judge's conversation as text) if `return_score=False`, or `int` if `return_score=True`.
+
+With `return_score=True`, the `int` is `1` when the conversation text contains "correct", "good", "excellent" or "perfect" (case-insensitive), and `0` otherwise. The conversation includes the task you passed in, so a task that contains one of those words always scores `1`.
 
 ### run_batched()
 
-Executes batch evaluation of multiple tasks.
+Calls `run()` on each task in order.
 
 ```python
 results = judge.run_batched(tasks: List[str]) -> List[Union[str, int]]
 ```
+
+`step()` and `run()` raise `AgentJudgeExecutionError` when evaluation fails.
+
+<Warning>
+`judge.conversation` is not cleared between calls. Each `run()` result, including each `run_batched()` result, contains every earlier task and verdict from the same judge, and later evaluations see them as context. Create a new `AgentJudge` for each independent evaluation.
+</Warning>
 
 ## Examples
 
@@ -130,7 +141,7 @@ judge = AgentJudge(
     return_score=True
 )
 
-score = judge.run(task="This is a correct and well-explained answer.")
+score = judge.run(task="The derivative of x^3 is 3x^2.")
 ```
 
 ### Batch Processing

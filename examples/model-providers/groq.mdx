@@ -75,6 +75,7 @@ def on_token(token: str) -> None:
 agent = Agent(
     agent_name="Callback-Groq",
     model_name="groq/llama-3.3-70b-versatile",
+    streaming_on=True,  # the callback only fires while streaming
     streaming_callback=on_token,
     max_loops=1,
 )
@@ -143,8 +144,8 @@ agents = [
 workflow = ConcurrentWorkflow(agents=agents)
 results = workflow.run("Analyze the impact of NVIDIA's latest earnings on the AI chip sector.")
 
-for name, response in results.items():
-    print(f"\n=== {name} ===\n{response}")
+for entry in results:
+    print(f"\n=== {entry['role']} ===\n{entry['content']}")
 ```
 
 ## Production Defaults

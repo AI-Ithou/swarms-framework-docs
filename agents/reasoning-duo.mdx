@@ -18,22 +18,33 @@ Task Input → Reasoning Agent → Structured Analysis → Main Agent → Final 
 |-----------|------|---------|-------------|
 | `id` | `str` | `generate_id("reasoning-duo")` | Unique identifier for the duo (`<prefix>-<32 hex chars>`) |
 | `agent_name` | `str` | `"reasoning-agent-01"` | Base name for the two internal agents, which are suffixed `-reasoning` and `-main` |
-| `agent_description` | `str` | `"A highly intelligent..."` | Description passed to both internal agents |
+| `agent_description` | `str` | `"A highly intelligent..."` | Stored on the instance. It is handed to both internal agents as `description`, which `Agent` does not use |
 | `model_name` | `str` | `"gpt-5.4"` | Stored on the instance; not currently used to configure either internal agent |
-| `description` | `str` | `"A highly intelligent..."` | Description of the reasoning duo's capabilities |
-| `model_names` | `list[str]` | `["gpt-5.4", "gpt-5.4"]` | Model names for `[reasoning_agent, main_agent]` (index 1 configures the main agent) |
-| `system_prompt` | `str` | `"You are a helpful..."` | System prompt for the main agent |
+| `description` | `str` | `"A highly intelligent..."` | Stored on the instance; not used by either internal agent |
+| `model_names` | `list[str]` | `["gpt-5.4", "gpt-5.4"]` | `model_names[1]` is the main agent's model. `model_names[0]` is used for the reasoning agent only when `reasoning_model_name` is `None` |
+| `system_prompt` | `str` | `"You are a helpful..."` | System prompt for the main agent. The reasoning agent always uses the built-in `REASONING_PROMPT` |
 | `output_type` | `OutputType` | `"dict-all-except-first"` | Format of the value returned by `run()` |
 | `reasoning_model_name` | `Optional[str]` | `"gpt-4o"` | Model used by the reasoning agent; if `None`, falls back to `model_names[0]` |
 | `max_loops` | `int` | `1` | Number of reasoning/main-agent loop iterations in `run()` |
+| `*args`, `**kwargs` | | | Extra `Agent` arguments applied to both internal agents |
+
+<Warning>
+`reasoning_model_name` defaults to `"gpt-4o"`, so `model_names[0]` is ignored unless you set `reasoning_model_name=None`. Set `reasoning_model_name` to choose the reasoning agent's model.
+</Warning>
 
 ### Methods
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
 | `step` | `task: str, img: Optional[str] = None` | `None` | Runs one reasoning-agent → main-agent cycle and appends to the conversation |
-| `run` | `task: str, img: Optional[str] = None` | Formatted per `output_type` | Processes a task through both agents for `max_loops` iterations |
-| `batched_run` | `tasks: List[str], imgs: Optional[List[str]] = None` | `list` | Processes multiple tasks sequentially |
+| `run` | `task: str, img: Optional[str] = None` | Formatted per `output_type` | Starts a new conversation, then processes the task through both agents for `max_loops` iterations |
+| `batched_run` | `tasks: List[str], imgs: Optional[List[str]] = None` | `list` | Processes multiple tasks sequentially. `imgs` pairs one image with each task and must be the same length as `tasks`, or `ValueError` is raised |
+
+## How a run works
+
+Each `run()` starts from an empty conversation, so one task never leaks into the next and every `batched_run` result holds only its own task. After a run, `duo.conversation` holds that run's messages.
+
+In each loop, the reasoning agent (named `<agent_name>-reasoning`) answers first, then the main agent (`<agent_name>-main`) answers with the reasoning in front of it. Both agents read the shared conversation as chat turns: an agent's own earlier answers arrive as `assistant` turns and its partner's as labelled `user` turns. The first loop sends your task. Each later loop sends "Continue reasoning and refining your analysis."
 
 ## Quick Start
 
@@ -42,7 +53,8 @@ from swarms import ReasoningDuo
 
 duo = ReasoningDuo(
     agent_name="reasoning-agent-01",
-    model_names=["claude-sonnet-4-6", "gpt-5.4"]
+    reasoning_model_name="claude-sonnet-4-6",
+    model_names=["claude-sonnet-4-6", "gpt-5.4"],
 )
 
 result = duo.run("Explain the concept of gravitational waves")
@@ -53,6 +65,8 @@ result = duo.run("Explain the concept of gravitational waves")
 ### Mathematical Analysis
 
 ```python
+from swarms import ReasoningDuo
+
 duo = ReasoningDuo()
 
 math_task = """
@@ -66,6 +80,10 @@ solution = duo.run(math_task)
 ### Financial Analysis
 
 ```python
+from swarms import ReasoningDuo
+
+duo = ReasoningDuo()
+
 finance_task = """
 Calculate the Net Present Value (NPV) of a project with:
 - Initial investment: $100,000
@@ -79,17 +97,24 @@ analysis = duo.run(finance_task)
 ### Customizing Agent Behavior
 
 ```python
+from swarms import ReasoningDuo
+
 duo = ReasoningDuo(
     agent_name="custom-reasoning-agent",
-    description="Specialized financial analysis agent",
+    reasoning_model_name="claude-sonnet-4-6",
     model_names=["claude-sonnet-4-6", "gpt-5.4"],
-    system_prompt="You are a financial expert AI assistant..."
+    system_prompt="You are a financial expert AI assistant...",
+    output_type="final",
 )
 ```
 
 ### Batch Processing
 
 ```python
+from swarms import ReasoningDuo
+
+duo = ReasoningDuo()
+
 tasks = [
     "Analyze market trends for tech stocks",
     "Calculate risk metrics for a portfolio",

@@ -10,6 +10,8 @@ Swarms ships with [OpenTelemetry](https://opentelemetry.io) tracing, **enabled b
 
 Telemetry is **fail-safe by design**: if the exporter is unreachable, the configuration is wrong, or the dependency is missing, the instance goes inert and your agents keep running. It never raises into your code.
 
+Spans are exported over OTLP/HTTP to the Swarms telemetry collector (`https://swarms-telemetry-capturer-production.up.railway.app/v1/traces`). The endpoint is fixed in the source: the standard `OTEL_EXPORTER_OTLP_*` endpoint variables do not redirect it. To also send spans to your own backend, see [Sending spans to your own backend](#sending-spans-to-your-own-backend).
+
 ## Turning it on and off
 
 Telemetry is controlled by a single environment variable, `SWARMS_TELEMETRY_ON`.
@@ -42,7 +44,7 @@ The gate is read **once per process**, at first use. Changing `SWARMS_TELEMETRY_
 </Warning>
 
 <Note>
-A `.env` file in your working directory is loaded automatically on import. If telemetry appears to be on when you expected it off, check `.env` before checking your shell — the file populates the variable before the gate is read.
+A `.env` file is loaded automatically on import. Swarms searches upward from the current working directory for the first `.env` it finds. Values already set in your shell take precedence over the file. If telemetry appears to be on when you expected it off, check both.
 </Note>
 
 ### Verifying the current state
@@ -78,7 +80,9 @@ The dominant cost when enabled is stringifying inputs and outputs for the span. 
 |---|---|---|
 | `<Component>.init` | A component is constructed | `swarms.config` — the full constructor configuration as JSON |
 | `<Component>.run` | `run()` is called | inputs, output, status, identity |
-| `<Component>.error` | An error is caught and *not* re-raised | error type, message, context |
+| `<Component>.<method>` | Other traced entry points: `SpreadSheetSwarm.run_from_config`, `AutoAgentBuilder.build_configs` | same as a run span |
+| `<Component>.error` and named error spans | An error is caught and *not* re-raised: `Agent.llm_error` (a failed LLM attempt inside the retry loop), `Agent.tool_error` (a tool batch that failed after `tool_retry_attempts`), `ConcurrentWorkflow.agent_error` (an agent failure swallowed under `on_error`) | error type, message, context such as `swarms.loop` or `swarms.agent` |
+| `swarms.state` | `autosave=True` on an `Agent` or `AgentRearrange`, at the points where state is saved | `swarms.state` — the component's `to_dict()` snapshot as JSON |
 
 Every span carries identity attributes:
 
@@ -118,22 +122,32 @@ One trace, one root, every agent attributable to the run that spawned it.
 
 ## Instrumented components
 
-Every multi-agent harness and the `Agent` class itself:
+Each of these classes emits an `init` span from its constructor and a span for every call to the entry point listed:
 
 <CardGroup cols={2}>
 <Card title="Agents" icon="robot">
-`Agent`
+`Agent` (`run`)
 </Card>
 <Card title="Workflows" icon="diagram-project">
-`SequentialWorkflow`, `ConcurrentWorkflow`, `AgentRearrange`, `GraphWorkflow`, `BatchedGridWorkflow`, `RoundRobinSwarm`
+`SequentialWorkflow`, `ConcurrentWorkflow`, `AgentRearrange`, `GraphWorkflow`, `BatchedGridWorkflow`, `RoundRobinSwarm` (`run`); `SpreadSheetSwarm` (`run` and `run_from_config`)
 </Card>
 <Card title="Orchestrators" icon="sitemap">
-`SwarmRouter`, `HierarchicalSwarm`, `MultiAgentRouter`, `PlannerWorkerSwarm`, `MixtureOfAgents`
+`SwarmRouter`, `HierarchicalSwarm`, `MultiAgentRouter`, `PlannerWorkerSwarm`, `MixtureOfAgents`, `ModelRouter`, `SocialAlgorithms` (`run`)
 </Card>
 <Card title="Deliberation" icon="scale-balanced">
-`MajorityVoting`, `CouncilAsAJudge`, `DebateWithJudge`, `GroupChat`, `LLMCouncil`, `HeavySwarm`
+`MajorityVoting`, `CouncilAsAJudge`, `DebateWithJudge`, `GroupChat`, `LLMCouncil`, `HeavySwarm`, `SelfMoASeq` (`run`)
+</Card>
+<Card title="Builders" icon="hammer">
+`AutoSwarmBuilder` (`run`); `AutoAgentBuilder` (`build_configs`, which `run` calls)
+</Card>
+<Card title="Decision models" icon="chess">
+[`DecisionModel`](/api/decision-model) (`run`, capturing the `state` input)
 </Card>
 </CardGroup>
+
+`AutoSwarmBuilder.run` is the parent of the `SwarmRouter.run` it delegates to, so the build phase and the swarm it builds share one trace. `ModelRouter` dispatches through `ContextThreadPoolExecutor`, so its agents nest under the router's span.
+
+Classes not in this list, such as `ReasoningDuo` or `TreeOfThoughts`, emit no spans of their own. Their inner `Agent.run` calls are still traced.
 
 ## Configuration reference
 
@@ -144,6 +158,28 @@ Every multi-agent harness and the `Agent` class itself:
 | `SWARMS_OTEL_TIMEOUT` | `8` | Export timeout in seconds |
 | `SWARMS_OTEL_MAX_CHARS` | `16000` | Max characters per input/output attribute |
 | `SWARMS_OTEL_MAX_CONFIG_CHARS` | `65536` | Max characters for a captured `init` config |
+
+The OTLP endpoint is not configurable through environment variables. Spans go to the Swarms collector whenever telemetry is on.
+
+## Sending spans to your own backend
+
+The tracer provider is an ordinary OpenTelemetry `TracerProvider`, so you can attach another span processor to it. Your exporter receives every span in addition to the Swarms collector:
+
+```python
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from swarms.telemetry.otel import swarm_telemetry
+
+telemetry = swarm_telemetry()
+if telemetry.ready:
+    telemetry._provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces"))
+    )
+```
+
+<Warning>
+`_provider` is a private attribute, and adding a processor does not remove the built-in exporter. If you need spans to reach only your own backend, this is not supported: set `SWARMS_TELEMETRY_ON=false` and instrument your application with your own tracer instead.
+</Warning>
 
 ## Instrumenting your own components
 
@@ -237,7 +273,7 @@ assert dict(run_span.attributes)["swarms.status"] == "completed"
 
 ## Privacy
 
-Telemetry captures task text, agent outputs, and constructor configuration — including system prompts, which may contain proprietary instructions.
+Telemetry captures task text, agent outputs, and constructor configuration — including system prompts, which may contain proprietary instructions. With `autosave=True`, it also captures `Agent` and `AgentRearrange` state snapshots. All of it is sent to the Swarms telemetry collector described in the [overview](#overview).
 
 Because it is **on by default**, opt out explicitly if any of that is sensitive in your deployment:
 

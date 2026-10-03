@@ -1,12 +1,14 @@
 ---
 title: "Conversation"
-description: "A class to manage conversation history with in-memory storage, supporting multiple export formats and automatic token management"
+description: "A class to manage conversation history with in-memory storage, JSON and YAML persistence, and token management"
 icon: "comments"
 ---
 
 ## Overview
 
-The `Conversation` class manages conversation history for agents, allowing for addition, deletion, and retrieval of messages. It supports saving and loading in JSON/YAML formats, automatic token counting, and dynamic context window management.
+The `Conversation` class manages conversation history for agents, allowing for addition, deletion, and retrieval of messages. It supports saving and loading in JSON/YAML formats, per-message token counting, and trimming the rendered history to a context window.
+
+Every `Agent` keeps its history in one, as `agent.short_memory`.
 
 ## Installation
 
@@ -14,66 +16,70 @@ The `Conversation` class manages conversation history for agents, allowing for a
 pip install -U swarms
 ```
 
+```python
+from swarms import Conversation
+```
+
 ## Parameters
 
-<ParamField path="id" type="str" default="auto-generated">
+<ParamField path="id" type="Optional[str]" default="auto-generated">
   Unique identifier for the conversation.
 </ParamField>
 
-<ParamField path="name" type="str" default="conversation-test">
-  Name of the conversation.
+<ParamField path="name" type="Optional[str]" default="None">
+  Name of the conversation. When omitted, each instance gets a unique name of the form `conversation-<8 hex characters>`. Only an explicitly named conversation resumes from its save file.
 </ParamField>
 
 <ParamField path="system_prompt" type="Optional[str]" default="None">
-  The system prompt for the conversation.
+  Added as the first message, with role `"System"`, when a new conversation starts. Not re-added when history is restored from disk.
 </ParamField>
 
 <ParamField path="time_enabled" type="bool" default="False">
-  Enable ISO timestamps on each message.
+  Add an ISO `timestamp` to each message.
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="False">
-  Enable automatic saving of conversation history.
+  Call `export()` after every `add()`, writing the history to `save_filepath`.
 </ParamField>
 
 <ParamField path="save_filepath" type="str" default="None">
-  File path for saving the conversation history.
+  File the history is saved to. Defaults to `<conversations_dir>/conversation_<name>.json` (or `.yaml`, following `export_method`). An extension that does not match `export_method` is replaced. Setting it explicitly makes the conversation resume from that file when it exists.
 </ParamField>
 
 <ParamField path="load_filepath" type="str" default="None">
-  File path to load conversation history from on initialization.
+  Marks the conversation as one that resumes from disk. The constructor still reads `save_filepath`, not this path. To load a specific file, call `load(path)` or `Conversation.load_conversation(name, load_filepath=path)`.
 </ParamField>
 
 <ParamField path="context_length" type="int" default="8192">
-  Maximum number of tokens allowed in the conversation history. Used by token-based truncation and dynamic context windowing.
+  Maximum number of tokens allowed in the conversation history. Used by `truncate_memory_with_tokenizer()` and `dynamic_context_window`.
 </ParamField>
 
 <ParamField path="rules" type="str" default="None">
-  Rules injected into the conversation to govern participant behavior.
+  Added after the system prompt as a message whose role is `user`, when a new conversation starts.
 </ParamField>
 
 <ParamField path="custom_rules_prompt" type="str" default="None">
-  Custom prompt prepended alongside `rules`.
+  Added after `rules` as a message whose role is `user`, when a new conversation starts.
 </ParamField>
 
 <ParamField path="user" type="str" default="User">
-  The user identifier used as the role for user messages.
+  Role used for the `rules` and `custom_rules_prompt` messages.
 </ParamField>
 
 <ParamField path="save_as_yaml_on" type="bool" default="False">
-  When `True`, persisted history is written as YAML.
+  Stored but not read. The save format comes from `export_method`.
 </ParamField>
 
 <ParamField path="save_as_json_bool" type="bool" default="False">
-  When `True`, persisted history is written as JSON.
+  Stored but not read. The save format comes from `export_method`.
 </ParamField>
 
 <ParamField path="token_count" type="bool" default="False">
-  Enable per-message token counting.
+  Count each message's tokens and store the result under its `token_count` key.
 </ParamField>
 
 <ParamField path="message_id_on" type="bool" default="False">
-  Attach a unique ID to every message.
+  Attach a UUID4 `message_id` to every message.
 </ParamField>
 
 <ParamField path="tokenizer_model_name" type="str" default="gpt-5.4">
@@ -81,28 +87,53 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="conversations_dir" type="Optional[str]" default="None">
-  Directory used to persist and load named conversations.
+  Directory for the default `save_filepath`, and the default directory for `load_conversation()` and `list_conversations()`. When unset, `./conversations` under the current working directory is used. The directory is created only when a file is written.
 </ParamField>
 
 <ParamField path="export_method" type="str" default="json">
-  Export format used by `export()`: `"json"` or `"yaml"`.
+  Format used by `export()` and autosave: `"json"` or `"yaml"`. Any other value raises `ValueError` at construction.
 </ParamField>
 
 <ParamField path="dynamic_context_window" type="bool" default="True">
-  Enable dynamic context window management (grow/shrink the kept history based on token usage).
+  When `True`, `return_history_as_string()` drops text from the front of the rendered history until it fits in `context_length` tokens. The stored messages are not changed.
 </ParamField>
 
 <ParamField path="cache_enabled" type="bool" default="False">
-  Enable token-count caching for repeated history reads.
+  Memoize the string returned by `return_history_as_string()` until the history changes, and record its token count for `get_cache_stats()`.
 </ParamField>
 
 <ParamField path="output_metadata" type="bool" default="False">
-  Include per-message metadata in formatted output.
+  Stored but not read by `Conversation`.
 </ParamField>
 
 <ParamField path="memory_md_path" type="Optional[str]" default="None">
-  Path to the `MEMORY.md` file used for persistent-memory reads/writes.
+  Path to a `MEMORY.md` file for persistent memory. The file is created with a header if missing. Prior interactions in it are loaded as one `"System"` message, and every later `add()` appends to it.
 </ParamField>
+
+<ParamField path="messages" type="Optional[List[Dict[str, Any]]]" default="None">
+  Chat-format messages (`{"role": ..., "content": ...}`) added after the system prompt and rules, through `add_messages()`. `Agent(messages=...)` uses this to seed `short_memory`.
+</ParamField>
+
+## Construction and resume
+
+The constructor runs these steps in order:
+
+<Steps>
+<Step title="Resume">
+If you passed `name`, `save_filepath`, or `load_filepath`, and the file at `save_filepath` exists, its history is loaded.
+</Step>
+<Step title="Seed">
+Only when nothing was restored: `system_prompt`, then `rules`, then `custom_rules_prompt` are added.
+</Step>
+<Step title="Persistent memory">
+With `memory_md_path`, prior `MEMORY.md` content is added as one `"System"` message.
+</Step>
+<Step title="Messages">
+`messages`, if given, are appended.
+</Step>
+</Steps>
+
+An unnamed conversation gets a fresh random name, so it never resumes another instance's file. Constructing a `Conversation` writes nothing to disk unless `memory_md_path` is set, or `autosave` is on and a seeded message triggers a save.
 
 ## Methods
 
@@ -117,14 +148,29 @@ def add(
     content: Union[str, dict, list, Any],
     metadata: Optional[dict] = None,
     category: Optional[str] = None,
-)
+) -> dict
 ```
 
 **Parameters:**
 - `role` (str): The role of the speaker (e.g., 'User', 'System', 'Agent')
 - `content` (Union[str, dict, list]): The content of the message
-- `metadata` (Optional[dict]): Optional metadata for the message
+- `metadata` (Optional[dict]): Optional metadata, stored under the message's `metadata` key
 - `category` (Optional[str]): Optional category for the message (e.g., 'input', 'output')
+
+**Returns:** The stored message dict. Depending on the constructor flags it also carries `timestamp`, `message_id`, `category`, `metadata`, and `token_count`. With `autosave=True`, the conversation is exported after the add.
+
+### add_messages()
+
+Add chat-format messages in order.
+
+```python
+def add_messages(self, messages: List[Dict[str, Any]]) -> list
+```
+
+**Parameters:**
+- `messages` (List[Dict[str, Any]]): Dicts with a `role` key and usually a `content` key. Any other keys, such as `name`, `tool_calls`, or `tool_call_id`, are kept under the message's `metadata`, so a tool exchange survives the round trip.
+
+**Returns:** The result of each `add()`, in order. Raises `ValueError` when an item is not a dict or has no `role`.
 
 ### return_history_as_string()
 
@@ -134,7 +180,7 @@ Return the conversation history as a formatted string.
 def return_history_as_string(self) -> str:
 ```
 
-**Returns:** String representation of the conversation history
+**Returns:** One `role: content` entry per message, separated by blank lines. Messages with a timestamp are prefixed with `[timestamp]`. With `dynamic_context_window=True`, the string is trimmed from the front to fit `context_length` tokens.
 
 ### compact()
 
@@ -161,7 +207,7 @@ conv.compact(
 
 ### export()
 
-Export the conversation to a file based on the export method.
+Save the conversation to `save_filepath` in the `export_method` format.
 
 ```python
 def export(self, force: bool = True)
@@ -170,16 +216,20 @@ def export(self, force: bool = True)
 **Parameters:**
 - `force` (bool): If True, saves regardless of autosave setting
 
+The file holds the bare list of message dicts. The parent directory is created if needed.
+
 ### load()
 
-Load conversation history from a file (auto-detects format).
+Load conversation history from a file, choosing the parser by extension.
 
 ```python
 def load(self, filename: str)
 ```
 
 **Parameters:**
-- `filename` (str): Path to the file to load from
+- `filename` (str): Path to a `.json`, `.yaml`, or `.yml` file
+
+Replaces the current history. Accepts the bare message list that `export()` writes, or a `{"metadata": ..., "conversation_history": ...}` wrapper. A missing file logs a warning and changes nothing. Any other extension raises `ValueError`.
 
 ### search()
 
@@ -196,11 +246,13 @@ def search(self, keyword: str) -> list
 
 ### truncate_memory_with_tokenizer()
 
-Truncate conversation history based on token count using tokenizer.
+Truncate the stored history to `context_length` tokens.
 
 ```python
 def truncate_memory_with_tokenizer(self)
 ```
+
+Messages are kept from the start until the budget runs out. The message that crosses the limit is cut to fit, at a sentence boundary when possible, and every later message is dropped.
 
 ### export_and_count_categories()
 
@@ -217,78 +269,130 @@ def export_and_count_categories(self) -> Dict[str, int]
 | Method | Description |
 |--------|-------------|
 | `query(index)` | Return the message dict at `index`, or `None` if out of range |
-| `delete(index)` | Remove the message at `index` |
-| `update(index, role, content)` | Replace the role/content of the message at `index` |
-| `add_multiple(roles, contents)` / `add_multiple_messages(roles, contents)` | Add several messages concurrently (thread pool) |
-| `batch_add(messages)` | Add a list of `{"role": ..., "content": ...}` dicts |
+| `delete(index)` | Remove the message at `index`; raises `IndexError` if out of range |
+| `update(index, role, content)` | Replace the role/content of the message at `index`; logs a warning if out of range |
+| `add_multiple(roles, contents)` / `add_multiple_messages(roles, contents)` | Add several messages in order through `add()`; raises `ValueError` if the lists differ in length |
+| `batch_add(messages)` | Append message dicts as-is: no timestamps, IDs, token counts, `MEMORY.md` writes, or autosave |
+| `add_tool_output_to_agent(role, tool_output)` | Add a tool result through `add()` |
 | `get_str()` | Alias for `return_history_as_string()` |
+| `dynamic_auto_chunking()` | The rendered history trimmed from the front to fit `context_length` tokens |
 | `get_cache_stats()` | Returns `{hits, misses, cached_tokens, hit_rate}` for the history-string cache (only meaningful when `cache_enabled=True`) |
-| `get_last_message_as_string()` | Returns the last message formatted as `"role: content"` |
-| `get_final_message()` / `get_final_message_content()` | Returns the last message dict / just its content |
+| `get_last_message_as_string()` / `get_final_message()` | The last message as a `"role: content"` string |
+| `get_final_message_content()` | The last message's content |
 | `return_messages_as_list()` / `return_messages_as_dictionary()` | The history as `{"role", "content"}` dicts |
 | `return_messages_as_strings()` | The history rendered as `"role: content"` strings |
-| `return_all_except_first()` / `return_all_except_first_string()` | History excluding the first (system) message |
-| `to_dict()` / `to_json()` / `to_yaml()` / `to_list()` | Serialize the conversation history only (no config/metadata) |
-| `count_messages_by_role()` | Dict of message counts keyed by role |
+| `return_json()` | The `{"role", "content"}` dicts as an indented JSON string |
+| `return_all_except_first()` | Messages after the system prompt (when the first message has role `"System"`) and the first input |
+| `return_all_except_first_string()` | The contents of those same messages, joined by newlines |
+| `return_list_final()` / `return_dict_final()` | The last message's content as `[content]` / as the tuple `(content, content)` |
+| `to_dict()` / `to_list()` | The history list itself (`to_dict()` does not return a dict) |
+| `to_json()` / `to_yaml()` | The history list as a JSON / YAML string |
+| `save_as_json(force=True)` / `save_as_yaml(force=True)` | Write the history to `save_filepath`; with `force=False` and `autosave` off, only log a warning |
+| `load_from_json(filename)` / `load_from_yaml(filename)` | Format-specific forms of `load()` |
+| `export_conversation(filename)` | For a `.json` name, calls `save_as_json()`, which writes to `save_filepath`, not `filename`; otherwise writes `role: content` lines to `filename` |
+| `import_conversation(filename)` | Alias for `load_from_json(filename)` |
+| `search_keyword_in_conversation(keyword)` | Like `search()`, for string contents only |
+| `count_messages_by_role()` | Dict of message counts keyed by role. `system`, `user`, `assistant`, and `function` are always present; roles are case-sensitive |
+| `get_visible_messages(agent, turn)` | Messages whose `turn` is below `turn` and whose `visible_to` is `"all"` or includes the agent's name; requires those keys on every message |
 | `clear()` | Empty the conversation history |
-| `Conversation.load_conversation(name, conversations_dir=None, load_filepath=None)` | Classmethod: load a previously saved conversation by name or explicit file path |
-| `Conversation.list_conversations(...)` / `Conversation.list_cached_conversations(...)` | Classmethods to enumerate saved/cached conversations |
+| `Conversation.load_conversation(name, conversations_dir=None, load_filepath=None)` | Classmethod. With `load_filepath`, loads that file. Otherwise looks for `<name>.json`, `.yaml`, `.yml`, then `<name>` in the directory, and returns a conversation built with `name` if none is found |
+| `Conversation.list_conversations(conversations_dir=None)` | Classmethod: `{id, name, created_at, filepath}` for each JSON file with a `metadata` wrapper, newest first |
+| `Conversation.list_cached_conversations(conversations_dir=None)` | Classmethod: sorted file names (without extension) of every `.json`, `.yaml`, and `.yml` file in the directory |
+
+<Warning>
+`list_conversations()` only lists files that carry a `{"metadata": {"id", "name", "created_at"}}` wrapper. `export()` writes a bare message list, so conversations saved by this class are skipped. Use `list_cached_conversations()` to find them.
+</Warning>
+
+## Output formats
+
+Agents and swarms turn a `Conversation` into their return value with `history_output_formatter`. Each `output_type` maps to one method:
+
+| `output_type` | Method | Result |
+|---|---|---|
+| `"list"` | `return_messages_as_list()` | List of `{"role", "content"}` dicts |
+| `"dict"`, `"dictionary"` | `to_dict()` | The full message list, with every stored key |
+| `"string"`, `"str"`, `"all"` | `get_str()` | The rendered history |
+| `"final"`, `"last"` | `get_final_message_content()` | The last message's content |
+| `"json"` | `to_json()` | JSON string |
+| `"yaml"` | `to_dict()`, then `yaml.safe_dump` | YAML string |
+| `"dict-all-except-first"` | `return_all_except_first()` | Messages after the system prompt and first input |
+| `"str-all-except-first"` | `return_all_except_first_string()` | Their contents as one string |
+| `"list-final"` | `return_list_final()` | `[content]` |
+| `"dict-final"` | `return_dict_final()` | `(content, content)` |
+
+Any other value raises `ValueError`. The `"xml"` output type has been removed.
 
 ## Usage Examples
 
 ### Basic Usage
 
 ```python
-from swarms.structs import Conversation
+from swarms import Conversation
 
-# Create a conversation
 conversation = Conversation(
     name="my-conversation",
     system_prompt="You are a helpful assistant.",
     time_enabled=True,
     autosave=True,
     token_count=True,
-    context_length=8192
+    context_length=8192,
 )
 
-# Add messages
 conversation.add("user", "Hello, how are you?")
 conversation.add("assistant", "I am doing well, thanks.")
 conversation.add("user", "What is the weather in Tokyo?")
 
-# Get conversation as string
 print(conversation.return_history_as_string())
+```
+
+Because it is named and autosaved, this conversation is written to `./conversations/conversation_my-conversation.json`. Running the script again resumes that history instead of starting over.
+
+### Seed from chat messages
+
+```python
+from swarms import Conversation
+
+conversation = Conversation(
+    system_prompt="You are a helpful assistant.",
+    messages=[
+        {"role": "user", "content": "What is 2 + 2?"},
+        {"role": "assistant", "content": "4."},
+    ],
+)
 ```
 
 ### Export and Load
 
 ```python
-# Export to JSON
-conversation.export_method = "json"
-conversation.export()
+from swarms import Conversation
 
-# Load from file
-conversation = Conversation.load_conversation(
-    name="my-conversation",
-    load_filepath="conversation_my-conversation.json"
-)
+conversation = Conversation(name="my-conversation", export_method="json")
+conversation.add("user", "Remember that my project is called Helios.")
+conversation.export()
+print(conversation.save_filepath)
+
+# Same name: resumes from ./conversations/conversation_my-conversation.json
+restored = Conversation(name="my-conversation")
+
+# Any file on disk: load() replaces the current history
+other = Conversation()
+other.load(conversation.save_filepath)
 ```
 
 ### Token Management
 
 ```python
-# Enable token counting and context management
+from swarms import Conversation
+
 conversation = Conversation(
     token_count=True,
     context_length=4096,
-    dynamic_context_window=True
+    dynamic_context_window=True,
 )
 
-# Add messages with categories for tracking
 conversation.add("user", "My input", category="input")
 conversation.add("assistant", "My response", category="output")
 
-# Count tokens by category
 tokens = conversation.export_and_count_categories()
 print(f"Input tokens: {tokens['input_tokens']}")
 print(f"Output tokens: {tokens['output_tokens']}")
@@ -298,22 +402,19 @@ print(f"Total tokens: {tokens['total_tokens']}")
 ### Search and Query
 
 ```python
-# Search for messages
 results = conversation.search("weather")
 
-# Get last message
 last_message = conversation.get_last_message_as_string()
 
-# Get specific message by index
 message = conversation.query(0)
 ```
 
 ## Features
 
-- **Automatic Saving**: Enable autosave to automatically persist conversation history
-- **Token Management**: Track token counts and automatically truncate based on context length
+- **Automatic Saving**: Enable autosave to persist the history after every message
+- **Resume by Name**: A named conversation picks up its saved history on construction
+- **Token Management**: Count tokens per message, trim the rendered history to the context length, or truncate the stored history on demand
 - **Multiple Export Formats**: Save as JSON or YAML
-- **Dynamic Context Window**: Automatically manage conversation length to fit context limits
 - **Message Search**: Search through conversation history by keyword
 - **Categorization**: Tag messages with categories for organized tracking
 - **Time Tracking**: Optionally track timestamps for all messages

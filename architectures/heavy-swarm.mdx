@@ -15,10 +15,12 @@ The `HeavySwarm` is a multi-agent orchestration system inspired by X.AI's Grok H
 
 ## Key Features
 
-- Intelligent question generation tailored to each agent role
+- Intelligent question generation tailored to each agent role, with its own decomposer per variant
+- Image-aware decomposition: pass `img` and the questions are written from what the image shows
 - Three preset variants — `default` (5 agents), `medium` (4 Grok-style agents), `heavy` (16 agents)
-- True parallel execution via a `ThreadPoolExecutor`
+- Parallel execution on a thread pool; each worker runs the [autonomous loop](/agents/autonomous-mode) on its question
 - Synthesis agent that integrates expert outputs into a final answer
+- Token usage summed across question generation and every agent, via `usage`
 - Optional real-time `rich` dashboard
 - Multi-loop iterative refinement (each loop builds on the previous result)
 - Tool integration through `worker_tools`
@@ -28,16 +30,18 @@ The `HeavySwarm` is a multi-agent orchestration system inspired by X.AI's Grok H
 
 ```
 1. Question Generation
-   - Director model analyzes the task
-   - Emits a JSON schema with one question per expert role
+   - The question model (question_agent_model_name) reads the task,
+     and the image when one is given
+   - Calls a function with one question per expert role
 
 2. Parallel Expert Execution (variant-dependent)
    - default : Research, Analysis, Alternatives, Verification
-   - medium  : Captain + Harper, Benjamin, Lucas
-   - heavy   : Grok captain + 15 domain specialists
+   - medium  : Harper, Benjamin, Lucas
+   - heavy   : 15 domain specialists
 
 3. Synthesis
-   - Synthesis agent integrates all expert outputs
+   - default: Synthesis-Agent; medium: Captain-Swarm; heavy: Grok
+   - Receives the conversation as chat turns: task, questions, every answer
    - Produces the final report
 
 4. Optional Multi-Loop Refinement
@@ -150,7 +154,7 @@ swarm = HeavySwarm(variant="heavy")
 </ParamField>
 
 <ParamField path="timeout" type="int" default="900">
-  Maximum execution time per agent in seconds.
+  Seconds passed to each worker future's `result()` call. Results are read as workers finish, so it does not interrupt a running worker.
 </ParamField>
 
 <ParamField path="question_agent_model_name" type="str" default="gpt-5.4">
@@ -158,7 +162,7 @@ swarm = HeavySwarm(variant="heavy")
 </ParamField>
 
 <ParamField path="worker_model_name" type="str" default="gpt-5.4">
-  Model used by every specialized worker agent.
+  Model used by every agent the variant builds, including the synthesis agent or captain.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -170,7 +174,7 @@ swarm = HeavySwarm(variant="heavy")
 </ParamField>
 
 <ParamField path="agent_prints_on" type="bool" default="False">
-  Print each agent's individual output.
+  Print each specialist worker's output. The synthesis agent or captain always prints.
 </ParamField>
 
 <ParamField path="output_type" type="str" default="dict-all-except-first">
@@ -178,7 +182,7 @@ swarm = HeavySwarm(variant="heavy")
 </ParamField>
 
 <ParamField path="worker_tools" type="Optional[tool_type]">
-  Tools made available to all worker agents.
+  Tools made available to every agent the variant builds.
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
@@ -202,6 +206,27 @@ result = swarm.run(
 )
 ```
 
+Each call clears the swarm's conversation first, so the returned transcript covers only the current task.
+
+### `usage`
+
+Provider token counts summed over question generation and every agent, including the synthesis agent or captain. The total keeps growing across loops and `run()` calls. See [Token usage](/agents/token-usage).
+
+```python
+swarm.run("Analyze cryptocurrency market trends")
+print(swarm.usage)
+# {"input_tokens": ..., "output_tokens": ..., "cached_tokens": ...,
+#  "reasoning_tokens": ..., "total_tokens": ...}
+```
+
+### `get_questions_only(task, img=None)` and `get_questions_as_list(task, img=None)`
+
+Run only the decomposer and return its questions as a dict of `*_question` keys or as an ordered list. Useful for previewing what each worker will be asked.
+
+```python
+questions = swarm.get_questions_only("Analyze market trends for EVs")
+```
+
 ### `to_dict()`
 
 Inherited from `SerializableMixin`. Returns a JSON-friendly snapshot of the swarm's config. The `agents`, `conversation`, `dashboard`, and `worker_tools` attributes are excluded via `_to_dict_exclude` to keep the snapshot lightweight.
@@ -223,6 +248,8 @@ The question agent emits a JSON object whose schema depends on the variant. For 
     "verification_question": "Question for Verification Agent"
 }
 ```
+
+The `"medium"` and `"heavy"` variants return one `<name>_question` key per specialist instead, such as `harper_question`. Each variant has its own decomposer prompt and schema, and the decomposer sends no temperature or top-p, so it also runs on Anthropic models. When you pass `img`, the decomposer is told an image accompanies the task and reads it.
 
 Example generated questions for *"Invest in NVIDIA?"*:
 
@@ -253,8 +280,10 @@ result = swarm.run("Complex strategic decision")
 Per-loop semantics:
 
 1. Loop 1: original task only
-2. Loop 2: `"Previous loop results: <output> | Original task: <task>"`
+2. Loop 2: `"Previous loop results: <output>\n\nOriginal task: <task>\n\n"` followed by an instruction to refine and build on the previous loop
 3. Loop 3: same shape — refine, fill gaps, deepen the analysis
+
+The conversation is kept across loops within one `run()`, so a later synthesis also sees the earlier loops' questions and answers.
 
 ## Dashboard Features
 
@@ -274,7 +303,7 @@ When `show_dashboard=True`, the `HeavySwarmDashboard` renders rich progress pane
 
 **Agent Execution Phase:**
 - Per-agent progress bars
-- Status (INITIALIZING, PROCESSING, GENERATING, COMPLETE)
+- Status (INITIALIZING, PROCESSING QUERY, EXECUTING, GENERATING RESPONSE, COMPLETE, or ERROR / TIMEOUT)
 - Variant-aware agent labels
 
 **Synthesis Phase:**
@@ -355,22 +384,23 @@ report = swarm.run(
 
 ### Parallel Execution
 
-All workers fan out via `concurrent.futures.ThreadPoolExecutor`. `max_workers` defaults to roughly `0.9 * os.cpu_count()`.
+All workers fan out on a thread pool that carries the tracing context into each thread. `self.max_workers` is set to `int(os.cpu_count() * 0.9)`; it is not a constructor parameter.
 
 ```python
-with concurrent.futures.ThreadPoolExecutor(
-    max_workers=max_workers,
-) as executor:
-    futures = [executor.submit(execute_agent, task) for task in agent_tasks]
+with ContextThreadPoolExecutor(max_workers=self.max_workers) as executor:
+    future_to_agent = {
+        executor.submit(execute_agent, task): task[0]
+        for task in agent_tasks
+    }
 ```
 
-### Timeout Management
+### Timeout
 
 ```python
-swarm = HeavySwarm(
-    timeout=900,   # 15 minutes per agent (default)
-)
+swarm = HeavySwarm(timeout=900)
 ```
+
+The timeout is passed to `future.result()` after `as_completed()` has already returned that future, so it does not cut a slow worker short.
 
 ### Verbose Logging
 
@@ -383,18 +413,20 @@ swarm = HeavySwarm(
 
 ## Output Structure
 
-The swarm returns the conversation history formatted by `output_type`. With the default `"dict-all-except-first"`:
+The swarm returns the conversation history formatted by `output_type`. The default `"dict-all-except-first"` returns a list of message dicts, without the initial task message:
 
 ```python
-{
-    "Question Generator Agent": "<generated questions>",
-    "Research-Agent": "<research findings>",
-    "Analysis-Agent": "<analysis insights>",
-    "Alternatives-Agent": "<alternative options>",
-    "Verification-Agent": "<verification results>",
-    "Synthesis Agent": "<comprehensive synthesis>"
-}
+[
+    {"role": "Question Generator Agent", "content": {...}},
+    {"role": "Research-Agent", "content": "<research findings>"},
+    {"role": "Analysis-Agent", "content": "<analysis insights>"},
+    {"role": "Alternatives-Agent", "content": "<alternative options>"},
+    {"role": "Verification-Agent", "content": "<verification results>"},
+    {"role": "Synthesis Agent", "content": "<comprehensive synthesis>"},
+]
 ```
+
+Worker messages appear in the order the workers finished. Each message also carries `timestamp`, `message_id` and `category` keys. Use `output_type="final"` to get only the synthesis.
 
 ## Best Practices
 
@@ -418,10 +450,7 @@ The swarm returns the conversation history formatted by `output_type`. With the 
 `reliability_check()` runs automatically during `__init__`:
 
 ```python
-# Validation:
-# - worker_model_name must be set
-# - question_agent_model_name must be set
-# - variant must be one of {default, medium, heavy}
+# Validation: worker_model_name and question_agent_model_name must be set
 
 try:
     swarm = HeavySwarm(worker_model_name=None)
@@ -430,6 +459,8 @@ except ValueError as e:
 ```
 
 When `show_dashboard=True`, the validation steps animate through the dashboard. Otherwise a single confirmation panel prints.
+
+An unknown `variant` raises `ValueError` before this check, when `__init__` builds the agents.
 
 ## Conversation History
 
@@ -447,19 +478,23 @@ history = swarm.conversation.conversation_history
 #  {"role": "Alternatives-Agent", "content": "..."},
 #  {"role": "Verification-Agent", "content": "..."},
 #  {"role": "Synthesis Agent", "content": "..."}]
+# Each entry also has timestamp, message_id and category keys.
 ```
 
 ## Error Handling
 
+`run()` does not raise when a phase fails. It logs the error and returns a message string instead of the formatted conversation:
+
 ```python
-try:
-    result = swarm.run("Task")
-except TimeoutError:
-    print("Agent execution exceeded timeout")
-except Exception as e:
-    print(f"Swarm execution failed: {e}")
-    # Individual agent errors are logged but do not abort the entire swarm
+result = swarm.run("Task")
+
+if isinstance(result, str) and result.startswith(
+    ("Error", "Failed", "Critical error")
+):
+    print(f"Swarm execution failed: {result}")
 ```
+
+If a single worker raises, the error is logged, that worker's answer is left out of the conversation, and the other workers and the synthesis still run.
 
 ## Related Architectures
 

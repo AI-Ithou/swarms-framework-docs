@@ -52,10 +52,13 @@ result = agent.run("What's the weather in San Francisco?")
 
 <Note>
 Tools must have:
-1. Type hints for all parameters
-2. A docstring describing the function
-3. Return type annotation
+1. Type hints for every parameter without a default. A missing one raises `TypeError` when the agent is built.
+2. A docstring describing the function. A missing one raises `ValueError`. The whole docstring becomes the tool description.
+
+A return type annotation is recommended; without one, a warning is logged.
 </Note>
+
+Inside the agent, tool calls are run by [`ToolManager`](/api/tool-manager) (`agent.tool_manager`). It builds the schemas, runs each call, retries failures up to `tool_retry_attempts` times, and records the results.
 
 ## BaseTool Class
 
@@ -79,17 +82,20 @@ def calculate_roi(investment: float, return_amount: float) -> float:
     """
     return ((return_amount - investment) / investment) * 100
 
-# Create tool manager
-tool_manager = BaseTool(
+base_tool = BaseTool(
     tools=[calculate_roi],
     verbose=True,
     autocheck=True,
 )
 
 # Convert function to OpenAI schema
-schema = tool_manager.func_to_dict(calculate_roi)
+schema = base_tool.func_to_dict(calculate_roi)
 print(schema)
 ```
+
+<Note>
+`BaseTool` is the standalone converter and executor; every agent keeps one as `agent.tool_struct`. It is not the same class as the agent's [`ToolManager`](/api/tool-manager), which drives the whole tool cycle and uses `BaseTool` to run local calls.
+</Note>
 
 ### Multiple Tools
 
@@ -138,17 +144,16 @@ def analyze_sentiment(text: str) -> dict:
     """
     return {"sentiment": "positive", "score": 0.95}
 
-# Create tool manager with multiple tools
-tool_manager = BaseTool(
+base_tool = BaseTool(
     tools=[search_database, send_email, analyze_sentiment],
     verbose=True,
 )
 
 # Convert all tools to OpenAI schema
-tool_manager.convert_funcs_into_tools()
+base_tool.convert_funcs_into_tools()
 
 # Access the function map
-print(tool_manager.function_map.keys())
+print(base_tool.function_map.keys())
 # Output: dict_keys(['search_database', 'send_email', 'analyze_sentiment'])
 ```
 
@@ -182,19 +187,20 @@ class SearchQuery(BaseModel):
     )
     limit: int = Field(10, ge=1, le=100, description="Result limit")
 
-# Create tool manager with Pydantic models
-tool_manager = BaseTool(
+base_tool = BaseTool(
     base_models=[UserProfile, SearchQuery],
     verbose=True,
 )
 
 # Convert to OpenAI schema
-user_schema = tool_manager.base_model_to_dict(UserProfile)
-search_schema = tool_manager.base_model_to_dict(SearchQuery)
+user_schema = base_tool.base_model_to_dict(UserProfile)
+search_schema = base_tool.base_model_to_dict(SearchQuery)
 
 print(user_schema)
 print(search_schema)
 ```
+
+Each schema is in OpenAI tool format, so you can pass it to an agent with `Agent(tools_list_dictionary=[user_schema, search_schema])`. A field without a `Field(description=...)` takes its description from the model docstring's `Args:` section, with wrapped lines joined.
 
 ### Multiple Pydantic Models
 
@@ -212,12 +218,12 @@ class Model2(BaseModel):
     field_a: str
     field_b: bool
 
-tool_manager = BaseTool(
+base_tool = BaseTool(
     base_models=[Model1, Model2],
 )
 
 # Convert all models to schemas
-schemas = tool_manager.multi_base_models_to_dict(
+schemas = base_tool.multi_base_models_to_dict(
     base_models=[Model1, Model2],
     output_str=False,
 )
@@ -328,12 +334,12 @@ def process_data(data: str, format: str = "json") -> dict:
     """
     return {"processed": data, "format": format}
 
-tool_manager = BaseTool(
+base_tool = BaseTool(
     tools=[process_data],
     verbose=True,
 )
 
-tool_manager.convert_funcs_into_tools()
+base_tool.convert_funcs_into_tools()
 
 # Execute tool with JSON response
 tool_call = json.dumps({
@@ -344,7 +350,7 @@ tool_call = json.dumps({
     }
 })
 
-result = tool_manager.execute_tool_from_text(tool_call)
+result = base_tool.execute_tool_from_text(tool_call)
 print(result)
 ```
 
@@ -353,18 +359,20 @@ print(result)
 ```python
 from swarms.tools import BaseTool
 
-tool_manager = BaseTool(
+base_tool = BaseTool(
     tools=[process_data],
 )
 
-tool_manager.convert_funcs_into_tools()
+base_tool.convert_funcs_into_tools()
 
-# Execute specific tool by name
-result = tool_manager.execute_tool_by_name(
+# The response names the tool and nests its arguments under "parameters"
+result = base_tool.execute_tool_by_name(
     tool_name="process_data",
-    response='{"data": "test", "format": "json"}',
+    response='{"name": "process_data", "parameters": {"data": "test", "format": "json"}}',
 )
 ```
+
+`execute_tool_by_name` returns a JSON string with `results` and `summary` keys.
 
 ## Advanced Patterns
 
@@ -388,52 +396,52 @@ def my_tool(x: int, y: int) -> int:
     """
     return x + y
 
-tool_manager = BaseTool(verbose=True)
+base_tool = BaseTool(verbose=True)
 
 # Check documentation
-has_docs = tool_manager.check_func_if_have_docs(my_tool)
+has_docs = base_tool.check_func_if_have_docs(my_tool)
 print(f"Has documentation: {has_docs}")
 
 # Check type hints
-has_hints = tool_manager.check_func_if_have_type_hints(my_tool)
+has_hints = base_tool.check_func_if_have_type_hints(my_tool)
 print(f"Has type hints: {has_hints}")
 ```
 
 ### Dynamic Tool Generation
 
+Generated functions need their own name and docstring. An f-string in the docstring position is not a docstring, so set `__doc__` and `__name__` explicitly:
+
 ```python
 from swarms.tools import BaseTool
 
-class DynamicToolManager:
+class ApiToolFactory:
     def __init__(self):
-        self.tool_manager = BaseTool(verbose=True)
+        self.base_tool = BaseTool(verbose=True)
         
     def create_tool_from_api(self, api_name: str) -> callable:
         """Generate a tool from API specification."""
         def api_tool(endpoint: str, params: dict) -> dict:
-            f"""
-            Call {api_name} API.
-            
-            Args:
-                endpoint: API endpoint
-                params: Request parameters
-                
-            Returns:
-                API response
-            """
             # API call logic here
             return {"api": api_name, "endpoint": endpoint}
-        
+
+        api_tool.__name__ = f"call_{api_name}_api"
+        api_tool.__doc__ = (
+            f"Call the {api_name} API.\n\n"
+            "Args:\n"
+            "    endpoint: API endpoint\n"
+            "    params: Request parameters"
+        )
         return api_tool
     
     def register_api_tools(self, apis: list[str]):
         """Register tools for multiple APIs."""
         tools = [self.create_tool_from_api(api) for api in apis]
-        self.tool_manager.tools = tools
-        self.tool_manager.convert_funcs_into_tools()
+        self.base_tool.tools = tools
+        self.base_tool.convert_funcs_into_tools()
+        return tools
         
-manager = DynamicToolManager()
-manager.register_api_tools(["stripe", "sendgrid", "twilio"])
+factory = ApiToolFactory()
+api_tools = factory.register_api_tools(["stripe", "sendgrid", "twilio"])
 ```
 
 ### Tool Composition
@@ -552,7 +560,7 @@ def query_database(
 
 ```python
 from pathlib import Path
-from typing import Union
+from typing import Optional
 
 def process_file(
     file_path: str,
@@ -620,6 +628,9 @@ def good_tool(x: int) -> int:
 ## Next Steps
 
 <CardGroup cols={2}>
+  <Card title="ToolManager" icon="screwdriver-wrench" href="/api/tool-manager">
+    How an agent sets up, runs, and retries its tools
+  </Card>
   <Card title="MCP Integration" icon="plug" href="/integrations/mcp">
     Connect to MCP servers for more tools
   </Card>

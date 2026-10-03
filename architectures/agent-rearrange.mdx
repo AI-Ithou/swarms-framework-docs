@@ -115,23 +115,23 @@ rearrange = AgentRearrange(
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of execution loops
+  Number of times the whole flow runs per `run()` call. Values below 1 are treated as 1.
 </ParamField>
 
 <ParamField path="team_awareness" type="bool" default="False">
-  Enable agents to know their position in workflow
+  Add the step-by-step flow structure to the shared conversation at the start of each run
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="all">
-  Output format (all, final, list, dict)
+  Output format, for example `"all"`, `"final"`, `"list"`, `"dict"` or `"str-all-except-first"`. An unknown value raises `ValueError` at construction.
 </ParamField>
 
 <ParamField path="memory_system" type="Any" default="None">
-  Optional memory system for persistence
+  Accepted for backwards compatibility and stored, but never read. Use `persistent_memory=True` on individual agents instead.
 </ParamField>
 
-<ParamField path="verbose" type="bool" default="True">
-  Log every flow step and agent transition. **This defaults to `True`**, so a fresh `AgentRearrange` is noisy out of the box — pass `verbose=False` for quiet runs.
+<ParamField path="verbose" type="bool" default="False">
+  Log every flow step and agent transition. Pass `verbose=True` while debugging a flow.
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="True">
@@ -150,7 +150,7 @@ rearrange = AgentRearrange(
 
 ### run()
 
-Execute the defined flow with a task.
+Execute the defined flow with a task. Each call starts a fresh shared conversation, so a reused instance does not carry the previous task's transcript.
 
 ```python
 result = rearrange.run(
@@ -161,7 +161,7 @@ result = rearrange.run(
 
 ### batch_run()
 
-Process multiple tasks in batches.
+Process multiple tasks in batches. Batches run one after another, the tasks inside a batch run concurrently, and each task runs on its own clone of the flow. Results come back in input order.
 
 ```python
 tasks = ["Task 1", "Task 2", "Task 3"]
@@ -173,7 +173,7 @@ results = rearrange.batch_run(
 
 ### concurrent_run()
 
-Run multiple tasks concurrently.
+Run multiple tasks concurrently. Each task runs on its own clone of the flow, so tasks never share a conversation. Results come back in input order.
 
 ```python
 tasks = ["Task 1", "Task 2", "Task 3"]
@@ -270,10 +270,7 @@ rearrange = AgentRearrange(
 )
 ```
 
-With team awareness, agents receive context like:
-- "Agent ahead: agent1"
-- "Agent behind: agent3"
-- Sequential flow structure information
+Every agent in a single-agent step is told its neighbours as a system turn, for example `"Sequential awareness: Agent ahead: agent1 | Agent behind: agent3"`, whether or not `team_awareness` is set. With `team_awareness=True`, the shared conversation also starts with the full sequential flow structure, so every agent sees the whole pipeline.
 
 ## Use Cases
 
@@ -339,9 +336,11 @@ result = rearrange.run("New task")
 new_agent = Agent(agent_name="new_agent", ...)
 rearrange.add_agent(new_agent)
 
-# Remove agent
+# Remove agent; raises ValueError if no agent has that name
 rearrange.remove_agent("old_agent")
 ```
+
+`agents` is a plain list. Look an agent up by `agent_name` rather than indexing it with a name, and update the flow with `set_custom_flow()` after removing an agent it references.
 
 ## Sequential Awareness
 
@@ -365,19 +364,11 @@ print(structure)
 
 ## Advanced Features
 
-### Custom Tasks for Specific Agents
+### Custom tasks for specific agents
 
-```python
-# Override task for specific agent
-custom_tasks = {
-    "researcher": "Focus on recent developments",
-}
-
-result = rearrange.run(
-    task="Main task",
-    custom_tasks=custom_tasks,
-)
-```
+<Warning>
+  `run()` accepts a `custom_tasks` dict, but the current implementation splices the custom task text into the flow as if it were an agent name. A run with `custom_tasks` raises `ValueError`: either the agent name is not found in the flow, or the spliced text is "not registered" when its step is reached. Put per-agent instructions in each agent's `system_prompt` instead.
+</Warning>
 
 ### Output Formatting
 
@@ -435,7 +426,7 @@ except ValueError as e:
     # Output: "Agent 'agent3' is not registered."
 ```
 
-`run()` will also raise a similar `ValueError` at execution time if it reaches a step referencing an unregistered agent, so validation happens automatically before any agent work is wasted — just not at construction time.
+`run()` does not validate the whole flow first. It raises a similar `ValueError` only when it reaches the step that references the unregistered agent, so every earlier step has already run. Validate up front to avoid wasting that work. `set_custom_flow()` validates the new flow immediately and keeps the old one if the new one is invalid.
 
 ## Related Architectures
 

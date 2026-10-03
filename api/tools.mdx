@@ -1,18 +1,25 @@
 ---
 title: Tools & Utilities
 description: Comprehensive reference for Swarms tools, function calling, and schema conversion utilities
+icon: "wrench"
 ---
 
 ## Overview
 
 The `swarms.tools` module provides a comprehensive toolkit for function calling, schema conversion, and tool management. It enables seamless integration with OpenAI-style function calling, MCP (Model Context Protocol) tools, and Pydantic-based schema validation.
 
+Every name in `swarms.tools.__all__` is re-exported from the top-level package, so `from swarms import BaseTool` and `from swarms.tools import BaseTool` give you the same class.
+
+<Note>
+You rarely need these classes to give an agent tools. Pass plain functions with `Agent(tools=[...])` and the agent's [ToolManager](/api/tool-manager) builds the schemas, executes calls, and retries failures for you. For large tool sets loaded on demand, see [DynamicToolLoader](/api/dynamic-tool-loader). Use `BaseTool` directly when you need schema conversion or tool execution outside an agent.
+</Note>
+
 ## BaseTool
 
 A comprehensive tool management system for function calling, schema conversion, and execution.
 
 ```python
-from swarms.tools import BaseTool
+from swarms import BaseTool
 
 tool_manager = BaseTool(
     verbose=True,
@@ -48,7 +55,7 @@ tool_manager = BaseTool(
 </ParamField>
 
 <ParamField path="function_map" type="Dict[str, Callable]" default="None">
-  Mapping of function names to callables
+  Mapping of function names to callables. `convert_funcs_into_tools()` fills it from `tools`
 </ParamField>
 
 <ParamField path="list_of_dicts" type="List[Dict[str, Any]]" default="None">
@@ -70,7 +77,7 @@ schema = tool.func_to_dict(my_function)
 </ParamField>
 
 <ResponseField name="return" type="Dict[str, Any]">
-  OpenAI function calling schema dictionary
+  OpenAI tool schema of the form `{"type": "function", "function": {"name", "description", "parameters"}}`
 </ResponseField>
 
 **Raises:**
@@ -99,18 +106,18 @@ schema = tool.base_model_to_dict(MyModel, output_str=False)
 
 #### execute_tool
 
-Execute a tool based on a response string.
+Execute one or more tool calls described by a JSON string, using the functions in `tools`.
 
 ```python
-result = tool.execute_tool('{"name": "my_function", "parameters": {...}}')
+result = tool.execute_tool('{"name": "add", "parameters": {"a": 1, "b": 2}}')
 ```
 
 <ParamField path="response" type="str" required>
-  JSON response string containing tool execution details
+  JSON describing the call. Accepted shapes are `{"name": ..., "parameters": {...}}`, `{"function": {"name": ..., "parameters": {...}}}`, and `{"functions": [...]}` for several calls
 </ParamField>
 
-<ResponseField name="return" type="Callable">
-  Result of the tool execution
+<ResponseField name="return" type="str">
+  A JSON string of the form `{"results": {"add": "3"}, "summary": "add: 3"}`. Each result is converted to a string. A call to an unknown function is reported in `results` as `"Error: Function not found"` rather than raised
 </ResponseField>
 
 **Raises:**
@@ -128,37 +135,45 @@ tool.convert_funcs_into_tools()
 
 This method processes all functions in the tools list, validates them for proper documentation and type hints, and converts them to OpenAI schemas.
 
+It also sets `function_map` from the tools list, which `execute_tool_by_name` needs.
+
 **Raises:**
-- `ToolValidationError`: If tools are not properly configured
-- `ToolDocumentationError`: If functions lack required documentation
-- `ToolTypeHintError`: If functions lack required type hints
+- `ToolValidationError`: If tools are not properly configured, or if any function fails conversion. A missing docstring or type hint surfaces here as a `ToolValidationError` whose message names the function
 
 #### execute_tool_by_name
 
-Search for a tool by name and execute it with the provided response.
+Look up a tool in `function_map` and execute it with the provided call JSON.
 
 ```python
-result = tool.execute_tool_by_name("add", '{"a": 1, "b": 2}')
+tool.convert_funcs_into_tools()
+result = tool.execute_tool_by_name(
+    "add", '{"name": "add", "parameters": {"a": 1, "b": 2}}'
+)
 ```
 
 <ParamField path="tool_name" type="str" required>
-  The name of the tool to execute
+  The name of the tool to execute. It must be a key in `function_map`
 </ParamField>
 
 <ParamField path="response" type="str" required>
-  JSON response string containing execution parameters
+  Call JSON in the same shape `execute_tool` accepts. Its `name` must match `tool_name`; a bare arguments object such as `{"a": 1, "b": 2}` is skipped and returns empty results
 </ParamField>
 
-<ResponseField name="return" type="Any">
-  The result of executing the tool
+<ResponseField name="return" type="str">
+  A JSON string of the form `{"results": {...}, "summary": "..."}`, as returned by `execute_tool`
 </ResponseField>
+
+**Raises:**
+- `ToolValidationError`: If `function_map` is not set, or `tool_name` or `response` is empty
+- `ToolNotFoundError`: If `tool_name` is not in `function_map`
+- `ToolExecutionError`: If execution fails unexpectedly
 
 ## Tool Registry
 
 `swarms.tools` exports a small registry pair: the `ToolStorage` class, which holds named tool callables, and the `tool_registry` decorator, which registers a function into a `ToolStorage` instance at import time.
 
 ```python
-from swarms.tools import ToolStorage, tool_registry
+from swarms import ToolStorage, tool_registry
 
 storage = ToolStorage(
     name="Math Tools",
@@ -226,10 +241,10 @@ There is no `tool` decorator in `swarms.tools`. To hand a plain Python function 
 
 ### get_openai_function_schema_from_func
 
-Convert a Python function to OpenAI function calling schema.
+Convert a Python function to OpenAI function calling schema. `name` and `description` are keyword-only and override the function's own name and docstring.
 
 ```python
-from swarms.tools import get_openai_function_schema_from_func
+from swarms import get_openai_function_schema_from_func
 
 def add(a: int, b: int) -> int:
     """Add two numbers together."""
@@ -244,35 +259,57 @@ schema = get_openai_function_schema_from_func(
 
 ### base_model_to_openai_function
 
-Convert a Pydantic BaseModel to OpenAI function schema.
+Convert a Pydantic BaseModel to an OpenAI function schema.
 
 ```python
-from swarms.tools import base_model_to_openai_function
 from pydantic import BaseModel
+from swarms import base_model_to_openai_function
 
-class UserInput(BaseModel):
-    name: str
-    age: int
+class WeatherQuery(BaseModel):
+    """Look up the weather for a city.
 
-schema = base_model_to_openai_function(UserInput)
+    Args:
+        city: Name of the city to look up, for example
+            Paris or New York.
+        units: Temperature units.
+    """
+
+    city: str
+    units: str = "celsius"
+
+schema = base_model_to_openai_function(WeatherQuery)
 ```
+
+<ParamField path="pydantic_type" type="type[BaseModel]" required>
+  The Pydantic model class to convert
+</ParamField>
+
+<ParamField path="output_str" type="bool" default="False">
+  Return a pretty-printed JSON string instead of a dict
+</ParamField>
+
+<ResponseField name="return" type="dict">
+  A dict of the form `{"function_call": {"name": ...}, "functions": [{"name", "description", "parameters"}]}`
+</ResponseField>
+
+The model's docstring `Args:` section fills in each property's `description` when the field does not already set one. Indented continuation lines belong to the parameter above them, so a wrapped description such as `city` above is kept whole.
 
 ### scrape_tool_func_docs
 
 Extract documentation from a tool function.
 
 ```python
-from swarms.tools import scrape_tool_func_docs
+from swarms import scrape_tool_func_docs
 
 docs = scrape_tool_func_docs(my_function)
 ```
 
 ### tool_find_by_name
 
-Find a tool by name in a list of tools.
+Find a tool by name in a list of tool objects. It compares each object's `.name` attribute and returns `None` when nothing matches, so it does not work on plain functions.
 
 ```python
-from swarms.tools import tool_find_by_name
+from swarms import tool_find_by_name
 
 tool = tool_find_by_name("calculator", tools_list)
 ```
@@ -282,7 +319,7 @@ tool = tool_find_by_name("calculator", tools_list)
 MCP integration is handled by a single class, [`MCPManager`](/api/mcp-manager). Point it at one or more servers and it manages transport, authentication, tool discovery, caching, and routing each call to the server that owns the tool.
 
 ```python
-from swarms.tools.mcp_manager import MCPManager
+from swarms import MCPManager
 
 manager = MCPManager(mcp_url="http://localhost:8000/mcp")
 
@@ -313,7 +350,7 @@ Full migration notes, including the two behavioral differences, are in the [MCPM
 
 A few other symbols are exported from `swarms.tools` for less common use cases:
 
-- **`multi_base_model_to_openai_function`** — Convert several Pydantic `BaseModel` classes to a combined OpenAI function schema.
+- **`multi_base_model_to_openai_function`** — Convert several Pydantic `BaseModel` classes to a combined schema of the form `{"function_call": "auto", "functions": [...]}`.
 - **`Function`** / **`ToolFunction`** — Pydantic models describing an OpenAI function and a tool wrapping one.
 - **`load_basemodels_if_needed`** / **`get_load_param_if_needed_function`** — Coerce raw dict arguments into the Pydantic models a tool's signature declares.
 - **`get_parameters`** / **`get_required_params`** — Extract the JSON-schema parameter block and the list of required parameter names from a callable.
@@ -322,7 +359,7 @@ A few other symbols are exported from `swarms.tools` for less common use cases:
 
 ## Exceptions
 
-`BaseTool` raises the exceptions below. They are defined in `swarms.tools.base_tool` and are **not** re-exported from `swarms.tools`, so import them from the module directly:
+`BaseTool` raises the exceptions below. They are defined in `swarms.tools.base_tool` and are **not** re-exported from `swarms.tools` or `swarms`, so import them from the module directly:
 
 ```python
 from swarms.tools.base_tool import (
@@ -337,6 +374,10 @@ from swarms.tools.base_tool import (
 ```
 
 All of them subclass `BaseToolError`.
+
+<Note>
+These are `BaseTool`'s own errors. Inside an agent, a tool call that still fails after `tool_retry_attempts` raises `AgentToolExecutionError`, which the agent catches and writes into the conversation so the model can react. It does not escape `Agent.run()`. That class and the other agent errors live in `swarms.schemas`; see [Agent error schemas](/api/schemas#agent-error-schemas).
+</Note>
 
 ### BaseToolError
 
@@ -372,14 +413,13 @@ Raised when tool type hints are missing or invalid.
 2. **Include docstrings**: Comprehensive docstrings improve tool descriptions
 3. **Validate inputs**: Use Pydantic models for complex input validation
 4. **Handle errors**: Wrap tool execution in try-catch blocks
-5. **Use caching**: BaseTool caches expensive operations for performance
-6. **Enable verbose mode**: During development, enable verbose logging to debug issues
+5. **Enable verbose mode**: During development, enable verbose logging to debug issues
 
 ## Example: Complete Tool Setup
 
 ```python
-from swarms.tools import BaseTool
 from pydantic import BaseModel
+from swarms import BaseTool
 
 # Define a Pydantic model
 class MathInput(BaseModel):
@@ -423,7 +463,7 @@ tool_manager.convert_funcs_into_tools()
 # Execute a tool
 result = tool_manager.execute_tool_by_name(
     "calculate",
-    '{"a": 10, "b": 5, "operation": "multiply"}'
+    '{"name": "calculate", "parameters": {"a": 10, "b": 5, "operation": "multiply"}}',
 )
-print(result)  # 50
+print(result)  # {"results": {"calculate": "50"}, "summary": "calculate: 50"}
 ```

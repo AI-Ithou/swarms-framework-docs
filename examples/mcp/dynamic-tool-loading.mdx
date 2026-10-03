@@ -15,7 +15,7 @@ Dynamic tool loading fixes both. The agent connects, puts every discovered tool 
 | **Model used here** | `gpt-5.4-mini` |
 
 <Note>
-  This is the **default** for MCP agents — `dynamic_tools=True` unless you say otherwise. This page shows how to see it working and when to turn it off.
+  Dynamic tool loading is **off by default**: `dynamic_tools` defaults to `False`, so every schema is sent on every request until you turn it on. This page shows how to turn it on, see it working, and when to leave it off.
 </Note>
 
 ## Build it
@@ -39,7 +39,6 @@ Dynamic tool loading fixes both. The agent connects, puts every discovered tool 
         model_name="gpt-5.4-mini",
         max_loops="auto",
         mcp_url=MCP_SERVER,
-        mcp_timeout=120,      # read_wiki_contents returns a lot; 30s is not enough
         dynamic_tools=True,   # MCP tools go into a searchable catalog
         print_on=False,
     )
@@ -48,8 +47,8 @@ Dynamic tool loading fixes both. The agent connects, puts every discovered tool 
     `max_loops="auto"` lets the agent decide when it is done — a good fit here, because searching for a tool and then using it takes an unknown number of turns.
   </Step>
 
-  <Step title="Force the connection and inspect the catalog">
-    Building the LLM is what pulls the server's tools into the catalog, so do it explicitly when you want to look:
+  <Step title="Inspect the catalog">
+    Building the LLM is what pulls the server's tools into the catalog. The agent already did that when it was constructed; rebuilding it is harmless and makes the step explicit:
 
     ```python
     import json
@@ -97,7 +96,6 @@ agent = Agent(
     model_name="gpt-5.4-mini",
     max_loops="auto",
     mcp_url=MCP_SERVER,
-    mcp_timeout=120,
     dynamic_tools=True,
     print_on=False,
 )
@@ -136,14 +134,14 @@ Two things are added when deferral is on:
 
 Loading changes the tool list, so the underlying LLM client is rebuilt at that point — otherwise the model could not call what it had just found.
 
-## When to turn it off
+## When to leave it off
 
 ```python
 agent = Agent(
     agent_name="Focused-Agent",
     model_name="gpt-5.4-mini",
     mcp_url="https://mcp.deepwiki.com/mcp",
-    dynamic_tools=False,   # send every schema, every request
+    dynamic_tools=False,   # the default: send every schema, every request
     max_loops=1,
 )
 ```
@@ -151,8 +149,8 @@ agent = Agent(
 | Situation | Setting |
 |---|---|
 | Small server, three or four tools, one-shot task | `dynamic_tools=False` — the search round-trip costs more than the schemas. |
-| Large server, or several servers at once | Leave it on. |
-| Long autonomous runs (`max_loops="auto"`) | Leave it on — the saving compounds on every call. |
+| Large server, or several servers at once | `dynamic_tools=True`. |
+| Long autonomous runs (`max_loops="auto"`) | `dynamic_tools=True` — the saving compounds on every call. |
 | A weak model that will not reliably search | `dynamic_tools=False`, or narrow the server surface instead. |
 
 ## Troubleshooting
@@ -165,10 +163,10 @@ agent = Agent(
     The server was unreachable and the agent carried on without those tools by design. Check the URL and any credential; run with `verbose=True` to see the fetch error.
   </Accordion>
   <Accordion title="`cannot import name 'streamablehttp_client'`">
-    `mcp` 2.x renamed it. Pin the 1.x line: `pip install 'mcp>=1.28.1,<2.0.0'`.
+    Your `swarms` predates `mcp` 2.x support, which renamed that function. Upgrade with `pip install -U swarms`; 15.0.1 and later work with both `mcp` 1.x and 2.x.
   </Accordion>
-  <Accordion title="Timeouts on tools that return a lot of text">
-    Raise `mcp_timeout` on the agent. The default of 30 seconds is short for tools like `read_wiki_contents`.
+  <Accordion title="Timeouts on slow tools">
+    A single tool call may run for `tool_timeout` seconds, 120 by default. Raise it with `mcp_config=MCPConnection(url=MCP_SERVER, tool_timeout=300)`. `mcp_timeout` only bounds connecting and sending requests.
   </Accordion>
 </AccordionGroup>
 

@@ -1,10 +1,10 @@
 ---
 title: "Social Swarm Patterns"
-description: "Broadcast, circular, mesh, grid, star, pyramid, one-to-one, and aggregate communication patterns"
+description: "Broadcast, circular, mesh, grid, star, pyramid, one-to-one, one-to-three, and aggregate communication patterns"
 icon: "diagram-project"
 ---
 
-Low-level **social algorithms** in `swarms.structs.swarming_architectures` and `swarms.structs.ma_blocks` compose custom multi-agent flows before you reach full workflows like `SequentialWorkflow` or `GraphWorkflow`.
+Low-level communication patterns compose custom multi-agent flows before you reach full workflows like `SequentialWorkflow` or `GraphWorkflow`. Every function and class on this page is exported from the top-level `swarms` package. For parameters and return shapes, see the [Swarming Architectures reference](/api/swarming-architectures).
 
 ```bash
 pip install -U swarms
@@ -16,12 +16,11 @@ pip install -U swarms
 
 <Tabs>
   <Tab title="Broadcast">
-    One sender broadcasts; all receivers process the shared context (`broadcast` is async):
+    One sender speaks, then each receiver replies in turn on the shared conversation, seeing the sender and the replies before its own. The `broadcast` function is async; the `Broadcast` class has a synchronous `run`:
 
     ```python
     import asyncio
-    from swarms import Agent
-    from swarms.structs.swarming_architectures import broadcast
+    from swarms import Agent, broadcast
 
     sender = Agent(agent_name="Announcer", model_name="claude-sonnet-4-6", max_loops=1)
     receivers = [
@@ -45,8 +44,7 @@ pip install -U swarms
     Agents pass work in a ring with shared conversation history:
 
     ```python
-    from swarms import Agent
-    from swarms.structs.swarming_architectures import circular_swarm
+    from swarms import Agent, circular_swarm
 
     agents = [
         Agent(agent_name="Researcher", model_name="claude-sonnet-4-6", max_loops=1),
@@ -63,8 +61,7 @@ pip install -U swarms
     Shared task queue; workers drain tasks in round-robin order:
 
     ```python
-    from swarms import Agent
-    from swarms.structs.swarming_architectures import mesh_swarm
+    from swarms import Agent, mesh_swarm
 
     agents = [
         Agent(agent_name=f"Worker-{i}", model_name="claude-sonnet-4-6", max_loops=1)
@@ -81,8 +78,7 @@ pip install -U swarms
     Agents in a square grid (list length should be a perfect square, e.g. 4 or 9):
 
     ```python
-    from swarms import Agent
-    from swarms.structs.swarming_architectures import grid_swarm
+    from swarms import Agent, grid_swarm
 
     agents = [
         Agent(agent_name=f"A-{i}", model_name="claude-sonnet-4-6", max_loops=1)
@@ -97,8 +93,7 @@ pip install -U swarms
     First agent is the hub; it processes each task before the others:
 
     ```python
-    from swarms import Agent
-    from swarms.structs.swarming_architectures import star_swarm
+    from swarms import Agent, star_swarm
 
     agents = [
         Agent(agent_name="Hub", model_name="claude-sonnet-4-6", max_loops=1),
@@ -115,8 +110,7 @@ pip install -U swarms
     Agents arranged in a pyramid; tasks flow level by level:
 
     ```python
-    from swarms import Agent
-    from swarms.structs.swarming_architectures import pyramid_swarm
+    from swarms import Agent, pyramid_swarm
 
     agents = [
         Agent(agent_name="Director", model_name="claude-sonnet-4-6", max_loops=1),
@@ -129,11 +123,10 @@ pip install -U swarms
   </Tab>
 
   <Tab title="One-to-one">
-    Sender and receiver alternate on a single task:
+    Sender and receiver alternate on a single task, `max_loops` times. `OneToOne` wraps the same logic in a reusable class:
 
     ```python
-    from swarms import Agent
-    from swarms.structs.swarming_architectures import one_to_one
+    from swarms import Agent, one_to_one
 
     sender = Agent(agent_name="Sender", model_name="claude-sonnet-4-6", max_loops=1)
     receiver = Agent(agent_name="Receiver", model_name="claude-sonnet-4-6", max_loops=1)
@@ -143,12 +136,29 @@ pip install -U swarms
     ```
   </Tab>
 
+  <Tab title="One-to-three">
+    One sender, then exactly three receivers reply in turn. Any other receiver count raises `ValueError`:
+
+    ```python
+    from swarms import Agent, OneToThree
+
+    founder = Agent(agent_name="Founder", model_name="claude-sonnet-4-6", max_loops=1)
+    investors = [
+        Agent(agent_name=name, model_name="claude-sonnet-4-6", max_loops=1)
+        for name in ["Growth-VC", "Value-Investor", "Angel"]
+    ]
+
+    panel = OneToThree(sender=founder, receivers=investors)
+    result = panel.run("Pitch a marketplace for renting professional camera gear.")
+    print(result)
+    ```
+  </Tab>
+
   <Tab title="Aggregate">
     Run workers concurrently, then synthesize with an aggregator agent:
 
     ```python
-    from swarms import Agent
-    from swarms.structs.ma_blocks import aggregate
+    from swarms import Agent, aggregate
 
     workers = [
         Agent(agent_name=f"Expert-{i}", model_name="claude-sonnet-4-6", max_loops=1)
@@ -165,17 +175,19 @@ pip install -U swarms
 
 | Pattern | Best for |
 | --- | --- |
-| Broadcast | One announcement, many parallel responses |
+| Broadcast | One announcement, then replies from many agents in turn |
 | Circular | Sequential refinement with shared history |
 | Mesh | Many independent tasks, worker pool |
-| Grid | Local neighbor collaboration |
-| Star | Central coordinator + specialists |
-| Pyramid | Layered command structure |
-| One-to-one | Single handoff between two agents |
+| Grid | One task per agent, laid out as a square |
+| Star | A lead answer on every task, plus independent answers from the rest |
+| Pyramid | One task per agent, laid out in triangular levels |
+| One-to-one | Back-and-forth between two agents |
+| One-to-three | One message reviewed by a fixed panel of three |
 | Aggregate | Fan-in synthesis of parallel outputs |
 
 ## Related
 
+- [Swarming Architectures API reference](/api/swarming-architectures)
 - [Social Algorithms architecture guide](/architectures/social-algorithms)
 - [Social Algorithms API reference](/api/social-algorithms)
 - [Custom architectures](/concepts/custom-architectures)

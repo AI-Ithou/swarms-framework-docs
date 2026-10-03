@@ -72,6 +72,23 @@ swarms llm-council --task "Evaluate investment opportunities in AI startups" --v
 
 Run comprehensive research and analysis:
 
+<Warning>
+In swarms 15.0.3, `swarms heavy-swarm` fails before any agent runs: the CLI still passes `loops_per_agent` and `random_loops_per_agent` to `HeavySwarm`, which no longer accepts them, so it prints `HeavySwarm Error: Failed to run HeavySwarm: HeavySwarm.__init__() got an unexpected keyword argument 'loops_per_agent'`. Until the CLI is fixed, run HeavySwarm from Python:
+
+```python
+from swarms import HeavySwarm
+
+swarm = HeavySwarm(
+    question_agent_model_name="gpt-5.4-mini",
+    worker_model_name="gpt-5.4-mini",
+    max_loops=1,
+)
+print(swarm.run("Research renewable energy market trends"))
+```
+
+See the [HeavySwarm reference](/api/heavy-swarm) for `max_loops`, `variant`, and the other options.
+</Warning>
+
 ```bash
 # Basic usage
 swarms heavy-swarm --task "Analyze the current state of quantum computing"
@@ -124,10 +141,10 @@ swarms heavy-swarm --task "<your task>" [options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--task` | - | **Required.** The research task |
-| `--loops-per-agent` | 1 | Number of loops per agent |
+| `--loops-per-agent` | 1 | Number of loops per agent (no longer accepted by `HeavySwarm`; see the warning above) |
 | `--question-agent-model-name` | gpt-5.4 | Model for question agent |
 | `--worker-model-name` | gpt-5.4 | Model for worker agents |
-| `--random-loops-per-agent` | False | Randomize loops per agent |
+| `--random-loops-per-agent` | False | Randomize loops per agent (no longer accepted by `HeavySwarm`; see the warning above) |
 | `--verbose` | False | Enable detailed output |
 
 **Examples:**
@@ -139,8 +156,8 @@ swarms heavy-swarm --task "Research the impact of AI on healthcare diagnostics" 
 # With custom models
 swarms heavy-swarm \
     --task "Analyze cryptocurrency regulation trends globally" \
-    --question-agent-model-name gpt-4 \
-    --worker-model-name gpt-4 \
+    --question-agent-model-name gpt-5.4 \
+    --worker-model-name gpt-5.4 \
     --loops-per-agent 3
 
 # Quick analysis
@@ -178,7 +195,7 @@ swarms agent \
 Automatically generate and run a swarm configuration:
 
 ```bash
-swarms autoswarm --task "Build a content analysis pipeline" --model gpt-4
+swarms autoswarm --task "Build a content analysis pipeline" --model gpt-5.4
 ```
 
 ### Show All Commands

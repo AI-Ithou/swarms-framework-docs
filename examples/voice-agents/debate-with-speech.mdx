@@ -27,12 +27,10 @@ tts_callback2 = StreamingTTSCallback(voice="nova", model="openai/tts-1")
 
 ## Step 3: Define the debate driver
 
-The driver alternates speakers, runs each turn with the appropriate TTS callback, flushes the buffer, and feeds the prior response as the next agent's input.
+The driver alternates speakers, runs each turn with the appropriate TTS callback, flushes the buffer, and feeds the prior response as the next agent's input. It records the opening task first, so `str-all-except-first` returns every turn of the debate.
 
 ```python
-from swarms import Agent
-from swarms.structs.conversation import Conversation
-from swarms.utils.history_output_formatter import history_output_formatter
+from swarms import Agent, Conversation, history_output_formatter
 from voice_agents import speech_to_text, record_audio, StreamingTTSCallback
 
 
@@ -59,6 +57,7 @@ def debate_with_speech(
         task = speech_to_text(audio_data=audio, sample_rate=16000)
         print(f"Transcribed: {task}\n")
 
+    conversation.add("User", task)
     message = task
     speaker, other = agent1, agent2
     current_callback, other_callback = tts_callback1, tts_callback2
@@ -83,7 +82,7 @@ def debate_with_speech(
 
 ## Step 4: Define the two debaters
 
-Use distinct system prompts so the agents argue in character. Keeping the responses short produces a more natural-sounding back-and-forth.
+Use distinct system prompts so the agents argue in character. Keeping the responses short produces a more natural-sounding back-and-forth. Each agent is reused for every turn it takes, so `output_type="final"` makes `run()` return only that turn's reply rather than the agent's growing transcript.
 
 ```python
 socratic_prompt = """
@@ -104,7 +103,7 @@ agent1 = Agent(
     max_loops=1,
     model_name="gpt-5.4",
     dynamic_temperature_enabled=True,
-    output_type="str-all-except-first",
+    output_type="final",
     streaming_on=True,
 )
 
@@ -114,7 +113,7 @@ agent2 = Agent(
     max_loops=1,
     model_name="gpt-5.4",
     dynamic_temperature_enabled=True,
-    output_type="str-all-except-first",
+    output_type="final",
     streaming_on=True,
 )
 ```

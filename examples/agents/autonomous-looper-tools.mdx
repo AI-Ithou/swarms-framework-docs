@@ -13,25 +13,37 @@ When an agent is set to `max_loops="auto"`, it enters autonomous loop mode where
 2. Execute each subtask using available tools
 3. Generate a comprehensive summary when complete
 
-The `selected_tools` parameter gives you fine-grained control over which tools the agent can use during this autonomous execution. By default, all tools are enabled (`selected_tools="all"`).
+The `selected_tools` parameter gives you fine-grained control over which built-in tools the agent can use during this autonomous execution. By default, all tools are enabled (`selected_tools="all"`). For how the loop itself works, see [Autonomous Mode](/agents/autonomous-mode).
 
 ## Available Tools
 
 | Tool Name | Description |
 |-----------|-------------|
-| `create_plan` | Create a detailed plan for completing a task |
-| `think` | Analyze current situation and decide next actions |
-| `subtask_done` | Mark a subtask as completed and move to the next task |
+| `create_plan` | Create or revise the plan for completing a task |
+| `think` | Analyze current situation and decide next actions. Only offered when `think_tool=True` |
+| `subtask_done` | Mark a subtask as completed or failed and move to the next task |
 | `complete_task` | Mark the main task as complete with comprehensive summary |
-| `respond_to_user` | Send messages or responses to the user |
-| `create_file` | Create a new file with specified content |
+| `respond_to_user` | Show a message to the user (does not wait for a reply) |
+| `create_file` | Create a new file with specified content (refuses to overwrite) |
 | `update_file` | Update an existing file (replace or append) |
-| `read_file` | Read the contents of a file |
+| `read_file` | Read the contents of a file (output capped by token budget) |
 | `list_directory` | List files and directories in a path |
 | `delete_file` | Delete a file (use with caution) |
-| `run_bash` | Execute bash/shell commands on the terminal (returns stdout/stderr) |
-| `create_sub_agent` | Create specialized sub-agents for delegation |
+| `run_bash` | Execute bash/shell commands on the terminal (returns exit code, stdout and stderr) |
+| `grep` | Search file contents for a pattern. Preferred over `run_bash` for searches |
+| `glob` | Find files by name pattern, newest first. Preferred over `run_bash` `find` |
+| `create_sub_agent` | Create specialized sub-agents that share the agent's model and tools |
 | `assign_task` | Assign tasks to sub-agents for asynchronous execution |
+| `check_sub_agent_status` | Check a sub-agent's async task status by name |
+| `cancel_sub_agent_tasks` | Cancel a sub-agent's pending or running tasks by name |
+
+Print the current list with `get_autonomous_loop_tool_names()`:
+
+```python
+from swarms.structs.autonomous_loop_utils import get_autonomous_loop_tool_names
+
+print(get_autonomous_loop_tool_names())
+```
 
 ## Usage
 
@@ -57,7 +69,6 @@ agent = Agent(
     max_loops="auto",
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -74,7 +85,6 @@ agent = Agent(
     max_loops="auto",
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -97,7 +107,6 @@ agent = Agent(
     max_loops="auto",
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -125,6 +134,25 @@ agent = Agent(
 )
 ```
 
+### With the think tool
+
+`think` is opt-in. Naming it in `selected_tools` is not enough; also set `think_tool=True`:
+
+```python
+agent = Agent(
+    agent_name="Reflective-Agent",
+    model_name="anthropic/claude-sonnet-4-6",
+    max_loops="auto",
+    think_tool=True,
+    selected_tools=[
+        "create_plan",
+        "think",
+        "subtask_done",
+        "complete_task",
+    ],
+)
+```
+
 ## Use Cases
 
 ### Research Agent (No File Operations)
@@ -136,7 +164,6 @@ research_agent = Agent(
     max_loops="auto",
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -153,7 +180,6 @@ code_agent = Agent(
     max_loops="auto",
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -174,7 +200,6 @@ analysis_agent = Agent(
     max_loops="auto",
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -193,7 +218,6 @@ terminal_agent = Agent(
     max_loops="auto",
     selected_tools=[
         "create_plan",
-        "think",
         "subtask_done",
         "complete_task",
         "respond_to_user",
@@ -215,14 +239,19 @@ See [Run Bash Tool Tutorial](/examples/agents/autonomous-looper-bash) for a step
 
 ## Notes
 
-- `selected_tools` defaults to `"all"`, which enables all tools
-- When set to a list, the agent will only have access to the tools you specify
+- `selected_tools` defaults to `"all"`, which enables all built-in tools except `think`, which also needs `think_tool=True`
+- When set to a list, the agent will only have access to the built-in tools you specify
+- The filter covers built-in tools only: your own `tools`, MCP tools and `handoff_task` are added regardless
 - Tool handlers are automatically filtered based on your configuration
 - Invalid tool names are ignored (only valid tool names from the list above are used)
+
+<Warning>
+  Keep `create_plan` and `subtask_done` in every list. Without `create_plan` the agent cannot make a plan, and without `subtask_done` each subtask runs until `max_subtask_loops` and is marked failed. Leaving out `complete_task` is safe: the agent builds the final summary itself.
+</Warning>
 
 ## See Also
 
 - [Run Bash Tool Tutorial](/examples/agents/autonomous-looper-bash) – Using `run_bash` to execute terminal commands
-- [Autonomous Loop Documentation](/examples/agents/autonomous-looper-bash)
+- [Autonomous Mode](/agents/autonomous-mode) – Phases, iteration budgets, output caps and every built-in tool
 - [Agent Configuration Guide](/agents/agent-configuration)
 - [Tool System Overview](/agents/agent-tools)

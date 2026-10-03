@@ -41,7 +41,7 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="shared_memory_system" type="callable" default="None">
-  A shared memory system for agents to query
+  Stored on the router as `shared_memory_system`. Nothing in the router reads it.
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict">
@@ -59,6 +59,8 @@ pip install -U swarms
 <ParamField path="skip_null_tasks" type="bool" default="True">
   Whether to skip executing agents when their assigned task is null or None
 </ParamField>
+
+Any extra positional or keyword arguments are forwarded to the `LiteLLM` instance that backs the boss agent (`router.function_caller`).
 
 ## Methods
 
@@ -81,7 +83,7 @@ def route_task(self, task: str) -> dict
 
 ### run()
 
-Alias for route_task().
+Alias for `route_task()`. Each call is recorded as a `MultiAgentRouter.run` trace span when telemetry is enabled. Calling the router directly, `router(task)`, does the same thing.
 
 ```python
 def run(self, task: str) -> dict
@@ -98,7 +100,7 @@ def batch_run(self, tasks: List[str] = []) -> list
 **Parameters:**
 - `tasks` (List[str]): List of tasks to route
 
-**Returns:** List of routing results
+**Returns:** Routing results for the tasks that succeeded, in input order. A task that raises is logged and left out of the list; the batch keeps going.
 
 ### concurrent_batch_run()
 
@@ -111,22 +113,11 @@ def concurrent_batch_run(self, tasks: List[str] = []) -> list
 **Parameters:**
 - `tasks` (List[str]): List of tasks to route
 
-**Returns:** List of routing results from concurrent execution
+**Returns:** Routing results for the tasks that succeeded, in input order. A task that raises is logged and left out of the list.
 
-### query_ragent()
-
-Query the router's `shared_memory_system` directly.
-
-```python
-def query_ragent(self, task: str) -> str
-```
-
-**Parameters:**
-- `task` (str): The query string to forward to `shared_memory_system`
-
-**Returns:** The response returned by the shared memory system
-
-**Raises:** `AttributeError` if no `shared_memory_system` was configured on the router
+<Warning>
+  Every task shares the router's single `Conversation`, so their histories interleave. Use `batch_run()` when each result's history matters.
+</Warning>
 
 ## Usage Examples
 
@@ -141,19 +132,19 @@ agents = [
         agent_name="ResearchAgent",
         description="Specializes in researching topics and providing detailed, factual information",
         system_prompt="You are a research specialist. Provide detailed, well-researched information.",
-        model_name="openai/gpt-5.4",
+        model_name="gpt-5.4",
     ),
     Agent(
         agent_name="CodeExpertAgent",
         description="Expert in writing, reviewing, and explaining code",
         system_prompt="You are a coding expert. Write and review code with best practices.",
-        model_name="openai/gpt-5.4",
+        model_name="gpt-5.4",
     ),
     Agent(
         agent_name="WritingAgent",
         description="Skilled in creative and technical writing",
         system_prompt="You are a writing specialist. Create and edit content.",
-        model_name="openai/gpt-5.4",
+        model_name="gpt-5.4",
     ),
 ]
 

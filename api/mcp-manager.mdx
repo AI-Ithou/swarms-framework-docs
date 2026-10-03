@@ -6,9 +6,9 @@ icon: 'plug'
 
 ## Overview
 
-`MCPManager` is the one class handling [MCP](https://modelcontextprotocol.io) in Swarms. Point it at one or more servers and it takes care of transport selection, authentication, tool discovery, schema caching, and routing each tool call to the server that owns it.
+`MCPManager` is the one class handling the client side of [MCP](https://modelcontextprotocol.io) in Swarms. Point it at one or more servers and it takes care of transport selection, authentication, tool discovery, schema caching, and routing each tool call to the server that owns it.
 
-An `Agent` builds one as `agent.mcp_manager` whenever you set `mcp_url` or `mcp_urls`. You can also use it directly, with no agent involved.
+Every `Agent` holds one as `agent.mcp_manager`. It is enabled when you set `mcp_url`, `mcp_urls`, `mcp_config`, or `mcp_configs` on the agent. You can also use it directly, with no agent involved.
 
 ```python
 from swarms.tools.mcp_manager import MCPManager
@@ -21,9 +21,15 @@ manager.call_tool("get_crypto_price", {"coin_id": "btc"})  # call one directly
 manager.execute_tool_calls(llm_response)                   # run what a model asked for
 ```
 
+For the server side, turning an agent or swarm into an MCP server, see [`MCPDeployer`](/api/mcp-deployer).
+
 <Warning>
 `swarms.tools.mcp_client_tools` and its standalone functions have been **removed**. See [Migration](#migration) for direct replacements.
 </Warning>
+
+<Note>
+`MCPManager` works with `mcp` 1.28.1 and later, including the 2.x line, from `swarms` 15.0.1 onward. On 15.0.0 with `mcp` 2.x, failed tool calls were reported as successes; upgrade `swarms`.
+</Note>
 
 ## Import
 
@@ -31,14 +37,18 @@ manager.execute_tool_calls(llm_response)                   # run what a model as
 from swarms.tools.mcp_manager import MCPManager
 ```
 
+`MCPManager` is also exported from `swarms.tools`.
+
 ## Constructor
+
+Settings passed here are defaults for every server. Credentials and OAuth only fill in servers that do not set their own; `transport` and `timeout` replace each server's own value.
 
 <ParamField path="mcp_url" type="Union[str, MCPConnection, Dict]">
   A single server — URL string, connection object, or dict.
 </ParamField>
 
 <ParamField path="mcp_urls" type="List[Union[str, MCPConnection, Dict]]">
-  Several servers. Entries may mix forms, so different servers can use different authentication.
+  Several servers. Entries may mix forms, so different servers can use different authentication. Two entries with the same URL (or the same stdio command and args) are merged into one.
 </ParamField>
 
 <ParamField path="mcp_config" type="Union[MCPConnection, Dict]">
@@ -50,27 +60,27 @@ from swarms.tools.mcp_manager import MCPManager
 </ParamField>
 
 <ParamField path="api_key" type="str">
-  API key applied to every server that does not define its own.
+  API key applied to every server that does not define its own. Sent as `Authorization: Bearer <key>` unless the connection changes `api_key_header` or `api_key_prefix`.
 </ParamField>
 
 <ParamField path="authorization_token" type="str">
-  Bearer token applied to every server that does not define its own.
+  Bearer token applied to every server that does not define its own. Sent as `Authorization: Bearer <token>` unless an API key already set the `Authorization` header.
 </ParamField>
 
 <ParamField path="oauth" type="Union[MCPOAuthConfig, Dict]">
-  OAuth 2.1 configuration.
+  OAuth 2.1 configuration applied to every server that does not define its own.
 </ParamField>
 
 <ParamField path="headers" type="Dict[str, str]">
-  Extra headers merged into every request.
+  Extra headers merged into every request. A server's own `headers` win on conflicts.
 </ParamField>
 
-<ParamField path="transport" type="str">
-  Force `streamable_http`, `sse`, or `stdio`. Auto-detected otherwise; hyphenated forms like `streamable-http` are normalized.
+<ParamField path="transport" type="str" default="None">
+  Force `streamable_http`, `sse`, `stdio`, or `auto` on every server. Hyphenated forms like `streamable-http` are normalized. When unset, each connection keeps its own `transport`, which defaults to `streamable_http`. See [Transport](#transport).
 </ParamField>
 
 <ParamField path="timeout" type="int" default="None">
-  Request timeout in seconds, applied to every configured connection. Left unset by default — a `None` value falls through to `MCPConnection.timeout`'s own default of `30` seconds.
+  HTTP timeout in seconds, applied to every configured connection and replacing its own value. Left unset by default, so each connection keeps `MCPConnection.timeout`, which defaults to `30`. It does not bound how long a tool may run; that is `MCPConnection.tool_timeout`.
 </ParamField>
 
 <ParamField path="agent_name" type="str" default="agent">
@@ -78,12 +88,48 @@ from swarms.tools.mcp_manager import MCPManager
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="false">
-  Verbose logging.
+  Log each discovery and tool call.
 </ParamField>
 
 <ParamField path="retry_attempts" type="int" default="3">
-  Retries per operation before raising.
+  Attempts at listing a server's tools before giving up, with a 1, 2, 4, ... second backoff between them. Values below 1 become 1. Tool calls are not retried. An `Agent` passes its `tool_retry_attempts` here.
 </ParamField>
+
+## MCPConnection
+
+`swarms.schemas.mcp_schemas.MCPConnection` configures one server. Pass it as `mcp_url`, `mcp_config`, or an entry in `mcp_urls` / `mcp_configs`, on the manager or on an `Agent`. A dict with the same keys works too.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `url` | `"http://localhost:8000/mcp"` | Server endpoint |
+| `name` | `None` | Label used in logs and in each result's `server` field. Falls back to `url`, then `command` |
+| `transport` | `"streamable_http"` | `streamable_http`, `sse`, `stdio`, or `auto` |
+| `api_key` | `None` | Key sent in `api_key_header` with `api_key_prefix` |
+| `api_key_header` | `"Authorization"` | Header the key is sent in, for example `"x-api-key"` |
+| `api_key_prefix` | `"Bearer"` | Prefix before the key. `None` or `""` sends the raw key |
+| `authorization_token` | `None` | Bearer token, sent as `Authorization: Bearer <token>` |
+| `auth_type` | `None` | `none`, `api_key`, `bearer`, `oauth`, or `custom`. Inferred when unset: `oauth` if `oauth` is set, then `api_key`, `bearer`, `custom` (headers only), `none` |
+| `oauth` | `None` | An `MCPOAuthConfig`. When the auth type is `oauth`, `api_key` and `authorization_token` are not sent |
+| `headers` | `None` | Extra headers for every request |
+| `timeout` | `30` | HTTP timeout in seconds |
+| `sse_read_timeout` | `300` | Seconds to wait for streamed data before giving up |
+| `tool_timeout` | `120` | Seconds one tool call may run before the client gives up |
+| `command`, `args`, `env` | `None` | Launch a local stdio server. Setting `command` selects the stdio transport |
+| `tool_configurations` | `None` | Free-form settings dict, stored with the connection |
+| `type` | `"mcp"` | Connection type label |
+
+`api_key`, `authorization_token`, the OAuth `access_token`, `client_id`, `client_secret` and `token_url`, and stdio `env` values accept `"env:NAME"` or `"${NAME}"` and are read from the environment when the connection is made. `headers` values are sent as written.
+
+### Transport
+
+Connections default to `streamable_http`, whatever the URL looks like. Set `transport="sse"` for an SSE server, or `transport="auto"` to choose from the URL: a URL ending in `/sse` uses SSE, a value with no scheme (such as `"python server.py"`) uses stdio, and anything else uses streamable HTTP. A connection with `command` always uses stdio.
+
+```python
+from swarms.schemas.mcp_schemas import MCPConnection
+
+MCPConnection(url="http://localhost:8000/sse", transport="sse")
+MCPConnection(command="python", args=["server.py"], env={"API_KEY": "env:API_KEY"})
+```
 
 ## Discovery
 
@@ -93,18 +139,20 @@ from swarms.tools.mcp_manager import MCPManager
 def get_tools(format="openai", force_refresh=False) -> List[Dict[str, Any]]
 ```
 
-Fetch tools from every configured server. Returns OpenAI function-calling schemas by default, ready to hand to an LLM. Results are cached; pass `force_refresh=True` to re-fetch.
+Fetch tools from every configured server, in parallel. Returns OpenAI function-calling schemas by default, ready to hand to an LLM. Results are cached; pass `force_refresh=True` to re-fetch.
 
 ```python
-tools = manager.get_tools()                    # OpenAI schemas
-raw = manager.get_tools(format="mcp")          # raw MCP schemas
-fresh = manager.get_tools(force_refresh=True)  # bypass cache
+tools = manager.get_tools()                    # OpenAI schemas, cached
+raw = manager.get_tools(format="mcp")          # mcp.types.Tool objects, not cached
+fresh = manager.get_tools(force_refresh=True)  # bypass the cache
 ```
+
+When two servers expose a tool with the same name, the first server's tool is kept and a warning is logged. A server that fails is logged and skipped; `AgentMCPConnectionError` is raised only when no tools could be loaded and at least one server failed.
 
 Async form: `await manager.aget_tools(...)`.
 
 <Note>
-`aget_tools` only populates `self._tools_cache` / `self._tool_routes` when `format == "openai"`. On a multi-server manager, calling `get_tools(format="mcp")` alone leaves tool routing unpopulated, and a later `call_tool()` can fail with "No configured MCP server exposes a tool named …" until `get_tools()` (the default `"openai"` format) has been called at least once.
+Only the default `"openai"` format fills the cache and the tool-to-server routing table. `call_tool` and `execute_tool_calls` fetch the OpenAI schemas themselves when that table is empty, so routing works whichever format you listed with.
 </Note>
 
 ### list_tool_names
@@ -113,7 +161,7 @@ Async form: `await manager.aget_tools(...)`.
 def list_tool_names() -> List[str]
 ```
 
-Every tool name across all configured servers — the cheapest way to see what is available.
+Every tool name across all configured servers, fetching once if needed — the cheapest way to see what is available.
 
 ## Execution
 
@@ -135,6 +183,10 @@ Call one tool directly, no LLM involved. Returns a result envelope:
 }
 ```
 
+`is_error` is `True` when the server reports the tool failed; `result` then holds the server's error text. When the call itself fails on the client side, the envelope has an `error` string instead of `result`.
+
+With several servers, an unknown name raises `AgentMCPToolError`. With one server, every name is sent to it and the server reports unknown tools. A server that cannot be reached raises `AgentMCPConnectionError`.
+
 Async form: `await manager.acall_tool(...)`.
 
 ### execute_tool_calls
@@ -143,48 +195,74 @@ Async form: `await manager.acall_tool(...)`.
 def execute_tool_calls(response, output_type="dict") -> Union[List[Dict], str]
 ```
 
-Run the tool calls contained in an LLM response. Each call is routed to the server that advertised the tool, and results come back in call order. This is the step an `Agent` performs between LLM turns.
+Run the tool calls contained in an LLM response. Each call is routed to the server that advertised the tool; calls to one server share a session, and different servers run in parallel. Results come back in call order. This is the step an `Agent` performs between LLM turns.
 
 <ParamField path="response" type="Any" required>
-  An LLM response, a single call dict, or a list of calls.
+  An LLM response: a JSON string, one tool call, a list of tool calls, or a whole assistant message with `tool_calls`, as dicts or SDK objects.
 </ParamField>
 
 <ParamField path="output_type" type='"dict" | "json" | "str"' default="dict">
-  Result format.
+  Result format: the list of envelopes, that list as a JSON string, or one `tool @ server -> result` line per call.
 </ParamField>
+
+Nothing raises per call. An unknown tool name or a failed session becomes an envelope with `is_error: True` and an `error` string, so one bad call cannot abort a batch. A response with no tool calls returns `[]` (`"[]"` for `json`). With no servers configured, it raises `AgentMCPConnectionError`.
 
 Async form: `await manager.aexecute_tool_calls(...)`. To re-render results you already hold, use the static `MCPManager.format_results(results, output_type)`.
 
-<Note>
-Under the default `output_type="dict"`, `result` is already a native Python value, not a JSON string — a `str` for text content, or a `dict` for structured content (`structuredContent` / `structured_content`, or a text+content mix). Use it directly:
+### What `result` holds
+
+`result` is a native Python value; swarms never encodes it:
+
+| The server returned | `result` is |
+|---|---|
+| Text blocks only | A `str`, joined with newlines when there are several |
+| Text plus other blocks (images, resources) | `{"text": "...", "content": [...]}` |
+| Only structured content | That `dict` |
+
+Most servers, `MCPDeployer` included, send dicts and numbers as JSON text, so a `str` result may itself be JSON. Check the type before parsing:
 
 ```python
-payload = results[0]["result"]
-```
+import json
 
-Calling `json.loads()` on it will raise `TypeError` when `result` is a dict. JSON-string framing only applies when the whole envelope is serialized via `output_type="json"` (or `MCPManager.format_results(..., output_type="json")`).
-</Note>
+payload = results[0]["result"]
+if isinstance(payload, str):
+    try:
+        payload = json.loads(payload)
+    except json.JSONDecodeError:
+        pass
+```
 
 ## Configuration management
 
 | Member | Description |
 |---|---|
-| `enabled` | Property — `True` when at least one server is configured |
-| `add_server(server)` | Register another server and invalidate the tool cache |
+| `connections` | The normalized `MCPConnection` list |
+| `enabled` | Property — `True` when at least one server is configured. `bool(manager)` and `len(manager)` follow it |
+| `add_server(server)` | Register another server (URL, dict, or `MCPConnection`) and invalidate the tool cache. A duplicate is ignored |
+| `label(connection)` | The name used in logs and result envelopes |
 | `clear_cache()` | Drop cached tool schemas and routing information |
-| `clear_auth_cache()` | Forget in-process OAuth providers and cached tokens |
+| `clear_auth_cache()` | Forget in-process OAuth providers and cached client-credentials tokens |
 | `to_dict()` | Serializable, **secret-redacted** view of the configuration |
 
 ## Authentication
 
 ```python
 from swarms.schemas.mcp_schemas import MCPConnection, MCPOAuthConfig
+from swarms.tools.mcp_manager import MCPManager
 
-# API key
+# API key, sent as Authorization: Bearer sk-...
 MCPManager(mcp_url="https://api.example.com/mcp", api_key="sk-...")
 
 # Bearer token
 MCPManager(mcp_url="https://api.example.com/mcp", authorization_token="ey...")
+
+# Raw key in a custom header
+MCPManager(mcp_config=MCPConnection(
+    url="https://api.example.com/mcp",
+    api_key="env:EXAMPLE_MCP_KEY",
+    api_key_header="x-api-key",
+    api_key_prefix=None,
+))
 
 # Headers, transport, timeouts
 MCPManager(mcp_config=MCPConnection(
@@ -192,21 +270,29 @@ MCPManager(mcp_config=MCPConnection(
     headers={"X-Tenant": "acme"},
     transport="streamable_http",
     timeout=20,
+    tool_timeout=300,
 ))
 
-# Secrets resolved from the environment at connection time
-MCPConnection(url="https://api.example.com/mcp", api_key="env:EXAMPLE_MCP_KEY")
-
 # OAuth 2.1 client credentials
-MCPConnection(url="https://api.example.com/mcp", oauth=MCPOAuthConfig(
+MCPManager(mcp_config=MCPConnection(url="https://api.example.com/mcp", oauth=MCPOAuthConfig(
     grant_type="client_credentials",
     client_id="example-client",
     client_secret="env:EXAMPLE_CLIENT_SECRET",
     token_url="https://api.example.com/oauth/token",
-))
+)))
 ```
 
-Both `env:NAME` and `${NAME}` indirection are resolved when the connection is made, so secrets stay out of source.
+### OAuth 2.1
+
+`MCPOAuthConfig` supports three modes:
+
+1. **Authorization code** (`grant_type="authorization_code"`, the default). The interactive browser flow with PKCE, run by the `mcp` SDK, which discovers the endpoints and registers the client dynamically (RFC 7591). A loopback listener on `redirect_uri` (default `http://127.0.0.1:8765/callback`) catches the redirect, and tokens are cached in `~/.swarms/mcp_auth/<server>.json` with `0600` permissions, so the browser step runs once.
+2. **Client credentials** (`grant_type="client_credentials"`). Headless. Needs `client_id`, and usually `client_secret`. The token endpoint is discovered from the server's well-known metadata unless `token_url` is set, and a new token is fetched shortly before the old one expires.
+3. **Pre-issued token** (`access_token="..."`). No flow runs; the token is sent as a bearer credential.
+
+Other fields: `scopes`, `client_name` (default `"Swarms Agent"`) and `client_uri` for registration, `token_storage_path`, `use_token_cache` (default `True`; `False` keeps tokens in memory only), `open_browser` (default `True`; `False` logs the URL instead), and `callback_timeout` (default `300` seconds).
+
+`MCPFileTokenStorage`, exported from `swarms.tools`, is the on-disk token cache. Call `.clear()` on one to force a fresh authorization.
 
 ### Mixed auth across servers
 
@@ -221,13 +307,17 @@ MCPManager(mcp_urls=[
 
 | Exception | Raised when |
 |---|---|
-| `AgentMCPConnectionError` | The server is unreachable, or authentication fails |
-| `AgentMCPToolError` | Raised at call time only when no configured server exposes the requested tool name (a routing failure) — not when the tool itself fails |
+| `AgentMCPConnectionError` | A server cannot be reached or rejects the credentials, tool discovery fails on every server, an OAuth flow fails, or a connection is misconfigured |
+| `AgentMCPToolError` | `call_tool()` names a tool that no configured server exposes, with more than one server configured |
 | `AgentMCPError` | Base class for both |
 
-An execution or session failure on the server side is never raised — it's captured and returned as an `is_error: True` result envelope (from `call_tool`/`execute_tool_calls` and their async forms) so a batch of calls can't be aborted by one failing tool.
+All live in `swarms.schemas.agent_mcp_errors`. Tool discovery retries up to `retry_attempts` times before raising.
 
-All live in `swarms.schemas.agent_mcp_errors`. Operations retry with backoff up to `retry_attempts` before raising.
+Failures during `execute_tool_calls` are never raised; they come back as `is_error: True` envelopes. `call_tool` also returns an envelope when the tool itself fails.
+
+<Note>
+With `mcp` 2.x, an HTTP error from the server, including `401`, reaches the client as `Server returned an error response`; the status code is not available. Check the server's own logs to see why a request was refused.
+</Note>
 
 ## Migration
 
@@ -255,5 +345,11 @@ Using MCP servers from an agent
 </Card>
 <Card title="Agent" icon="robot" href="/api/agent">
 Set `mcp_url` / `mcp_urls` to wire this in automatically
+</Card>
+<Card title="MCPDeployer" icon="server" href="/api/mcp-deployer">
+Serve an agent or swarm as an MCP server
+</Card>
+<Card title="Authentication patterns" icon="key" href="/examples/mcp/authentication">
+Every credential shape, with code
 </Card>
 </CardGroup>

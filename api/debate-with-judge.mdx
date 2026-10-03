@@ -18,9 +18,9 @@ pip install -U swarms
 
 ```mermaid
 graph TD
-    A[DebateWithJudge System] --> B[Initialize Pro, Con, and Judge Agents]
+    A[DebateWithJudge System] --> B[Brief Pro, Con, and Judge on Their Roles]
     B --> C[Start with Initial Topic]
-    C --> D[Round Loop: max_rounds]
+    C --> D[Round Loop: max_loops]
     D --> E[Pro Agent Presents Argument]
     E --> F[Con Agent Presents Counter-Argument]
     F --> G[Judge Agent Evaluates Both]
@@ -74,12 +74,16 @@ graph TD
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="True">
-  Whether to enable verbose logging.
+  Whether to enable verbose logging. Preset agents inherit this setting.
 </ParamField>
 
 <ParamField path="model_name" type="str" default="gpt-5.4">
   The model name to use for preset agents.
 </ParamField>
+
+<Note>
+  The constructor raises `ValueError` if `max_loops` is less than `1`, if `agents` does not contain exactly three `Agent` instances, or if no agents are supplied and `preset_agents=False`. When several options are given, `agents` wins over the individual parameters, which win over `preset_agents`.
+</Note>
 
 ## Initialization Options
 
@@ -157,13 +161,17 @@ def run(self, task: str) -> Union[str, List, dict]
 **Process Flow:**
 
 1. **Task Validation**: Validates that the task is a non-empty string
-2. **Agent Initialization**: Initializes all three agents with their respective roles and the initial task context
-3. **Multi-Round Execution**: For each round (up to `max_loops`):
-   - Pro agent presents an argument in favor
-   - Con agent presents a counter-argument
-   - Judge agent evaluates both arguments and provides synthesis
+2. **Fresh Conversation**: Clears the conversation, so each run starts empty
+3. **Agent Briefing**: Runs each of the three agents once on an introduction prompt that names its role, its opponents, and the task. These briefings are not recorded in the conversation
+4. **Multi-Round Execution**: For each round (up to `max_loops`):
+   - Pro agent presents an argument in favor. From round 2 on, it is asked to improve on the judge's previous evaluation
+   - Con agent presents a counter-argument to Pro's argument
+   - Judge agent evaluates both arguments and provides synthesis. In the last round it is told this is the final evaluation
+   - Each agent's final answer, not its whole transcript, is recorded under its name and passed on
    - Judge's synthesis becomes the topic for the next round
-4. **Result Formatting**: Returns the final result formatted according to `output_type`
+5. **Result Formatting**: Returns the conversation formatted according to `output_type`
+
+A run makes `3 + 3 * max_loops` agent calls: three briefings, then three calls per round.
 
 **Raises:**
 - `ValueError`: If task is None or empty. (Invalid agent configuration or `max_loops < 1` raise `ValueError` at construction time, in `__init__`, not in `run()`.)
@@ -179,7 +187,7 @@ def batched_run(self, tasks: List[str]) -> List[str]
 **Parameters:**
 - `tasks` (List[str]): List of topics or questions to debate
 
-**Returns:** List of final refined answers, one for each input task
+**Returns:** A list of formatted outputs, one for each input task, in input order
 
 ## Output Types
 
@@ -187,10 +195,17 @@ The `output_type` parameter controls how the conversation history is formatted:
 
 | Value | Description |
 |---|---|
-| `"str-all-except-first"` | Returns a formatted string with all messages except the first (default) |
-| `"str"` | Returns all messages as a formatted string |
-| `"dict"` | Returns messages as a dictionary |
-| `"list"` | Returns messages as a list |
+| `"str-all-except-first"` | The content of every message except the first, joined without speaker names (default) |
+| `"str"` | Every message as a `Name: message` transcript |
+| `"dict"` | The message list, one dict per message |
+| `"list"` | The message list as `{"role", "content"}` dicts |
+| `"final"` | Only the judge's last synthesis |
+
+<Note>
+  The task itself is not recorded in the conversation, so the first message is the Pro agent's opening argument. The default `"str-all-except-first"` therefore leaves that argument out. Use `"str"` or `"list"` to see the full debate, or `"final"` for just the final synthesis.
+</Note>
+
+The preset system prompts and every per-round prompt template live in `swarms.prompts.debate_with_judge_prompts`, for example `PRO_AGENT_SYSTEM_PROMPT`, `CON_AGENT_SYSTEM_PROMPT`, and `JUDGE_AGENT_SYSTEM_PROMPT`.
 
 ## Usage Examples
 
@@ -214,8 +229,7 @@ topic = (
     "Discuss the balance between innovation and safety."
 )
 
-# Run the debate -- with output_type="str-all-except-first" (default),
-# result is already the formatted conversation history as a string
+# The default output omits Pro's opening argument; use output_type="str" for the full transcript.
 result = debate_system.run(task=topic)
 print(result)
 ```
@@ -291,8 +305,6 @@ topic = (
     "regulatory capture). Provide a nuanced analysis."
 )
 
-# Run the debate -- with output_type="str-all-except-first" (default),
-# result is already the formatted conversation history as a string
 result = debate_system.run(task=topic)
 print(result)
 ```
@@ -464,9 +476,7 @@ strategy_question = (
     "Which strategy should they pursue?"
 )
 
-# Run the debate -- with output_type="dict", result is already the
-# conversation history formatted as a dictionary; the final judge synthesis
-# is the last entry
+# With output_type="dict", result is a list of message dicts; the final judge synthesis is the last entry.
 result = strategy_debate.run(task=strategy_question)
 print(result)
 ```
@@ -486,11 +496,11 @@ print(result)
 </Note>
 
 <Info>
-**Output Format**: Use `"str-all-except-first"` for readable summaries (default), `"dict"` for structured analysis, `"list"` for conversation inspection, and `"str"` for complete history.
+**Output Format**: Use `"str"` for the complete, labelled transcript, `"final"` for only the judge's last synthesis, and `"dict"` or `"list"` for structured inspection. The default `"str-all-except-first"` omits the Pro agent's opening argument.
 </Info>
 
 <Warning>
-**Performance**: Batch processing is sequential -- consider parallel execution for large batches. Each round requires 3 agent calls (Pro, Con, Judge). Memory usage scales with conversation history length.
+**Performance**: Batch processing is sequential -- consider parallel execution for large batches. Each run makes 3 briefing calls plus 3 agent calls per round (Pro, Con, Judge). Memory usage scales with conversation history length.
 </Warning>
 
 ## Troubleshooting

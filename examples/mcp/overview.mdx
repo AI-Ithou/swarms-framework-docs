@@ -80,7 +80,7 @@ Start at the top if you are new. The first three need no MCP key at all.
     Query parameter, Bearer header, URL path segment, custom header, OAuth 2.1.
   </Card>
   <Card title="Build your own server" icon="server" href="/examples/mcp/local-server">
-    Expose your own Python functions over MCP with `FastMCP`, then point an agent at them.
+    Expose your own Python functions over MCP with the `mcp` package's `MCPServer`, then point an agent at them.
     <br />**Model:** `gpt-5.4-mini`
   </Card>
 </CardGroup>
@@ -119,4 +119,5 @@ Each tutorial names the extra key it needs, if any.
 
 - [Model Context Protocol (MCP)](/integrations/mcp) — the reference: connection objects, transports, caching, `MCPManager`.
 - [MCPManager API](/api/mcp-manager) — calling MCP directly, without an agent.
+- [MCPDeployer API](/api/mcp-deployer) — serving your own agents and swarms as MCP servers.
 - [Dynamic tool usage](/examples/tools/dynamic-tool-usage) — deferred tool loading for local Python tools.

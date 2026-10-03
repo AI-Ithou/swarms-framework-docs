@@ -8,6 +8,10 @@ icon: "table"
 
 The `SpreadSheetSwarm` processes tasks concurrently across multiple agents and automatically saves execution metadata to CSV files. It supports loading agent configurations from CSV files and running tasks either from configuration or on-demand.
 
+<Note>
+`SpreadSheetSwarm` emits OpenTelemetry spans: one when it is constructed, and one for each `run()` and `run_from_config()` call. See [Telemetry](/deployment/telemetry) to turn tracing off.
+</Note>
+
 ## Installation
 
 ```bash
@@ -29,19 +33,19 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="True">
-  Whether to enable autosave of swarm metadata
+  Whether to save results. When `True`, each run appends rows to the CSV at `save_file_path` and writes a JSON metadata file to the swarm's workspace directory. When `False`, nothing is written to disk
 </ParamField>
 
 <ParamField path="save_file_path" type="str" default="None">
-  The file path to save the swarm metadata as a CSV file (auto-generated if None)
+  The CSV file path. When `None`, it defaults to `spreadsheet_swarm_run_id_<hex>.csv` inside the swarm's workspace directory (`$WORKSPACE_DIR/swarms/SpreadSheetSwarm/<name>-<timestamp>/`), falling back to `WORKSPACE_DIR` or the current directory when autosave is off. An explicit path is kept as given
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  The number of times to repeat the swarm tasks
+  The number of times to repeat the swarm tasks. Loops run one after another; within a loop every agent runs once, concurrently with the others. Each agent's conversation is reset before every loop, so loops are independent samples rather than refinements of the previous loop
 </ParamField>
 
 <ParamField path="load_path" type="str" default="None">
-  Path to a CSV file mapping `agent_name` to `task`. Call `load_from_csv()` explicitly after construction to populate per-agent tasks from it before calling `run_from_config()`
+  Path to a CSV file of agent configurations. Call `load_from_csv()` explicitly after construction to build agents and per-agent tasks from it before calling `run_from_config()`
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -59,13 +63,15 @@ def run(self, task: str = None, *args, **kwargs) -> dict
 ```
 
 **Parameters:**
-- `task` (str): The task to be executed by the swarm. If None, uses tasks from config
+- `task` (str): The task every agent runs. If `None` and tasks were loaded with `load_from_csv()`, it calls `run_from_config()` instead
 
 **Returns:** Dictionary containing run summary with outputs and metadata
 
+**Raises:** Re-raises any exception from the run after logging it
+
 ### run_from_config()
 
-Run all agents with their configured tasks concurrently.
+Run each agent that has a configured task, concurrently. Agents whose `agent_name` has no entry in the loaded tasks are skipped.
 
 ```python
 def run_from_config(self) -> dict
@@ -75,7 +81,7 @@ def run_from_config(self) -> dict
 
 ### load_from_csv()
 
-Load agent configurations from a CSV file.
+Load agent configurations from the CSV at `load_path`. For each row it builds a new `Agent`, appends it to `agents`, and records the row's `task` under its `agent_name`.
 
 ```python
 def load_from_csv(self)
@@ -85,6 +91,8 @@ Expected CSV format:
 ```
 agent_name,description,system_prompt,task,model_name,max_loops
 ```
+
+`agent_name`, `description`, `system_prompt` and `task` are required. The `description` column must be present but is not applied to the agent's `agent_description`. `model_name` defaults to `"openai/gpt-4o"` when the column is missing, and `max_loops` defaults to `1`. Optional `user_name` and `stopping_token` columns are also read. Errors while loading are logged, not raised.
 
 ### export_to_json()
 
@@ -144,7 +152,9 @@ print(result)
 ### Load from CSV Configuration
 
 <Warning>
-  `agents` must be provided at construction. The constructor runs a reliability check before any CSV loading occurs, so calling `SpreadSheetSwarm(load_path="agents_config.csv", ...)` without `agents` raises `ValueError("No agents are provided.")`. Pass real `Agent` instances in `agents`, then call `load_from_csv()` explicitly to map tasks from the CSV onto those agents by `agent_name`.
+  `agents` must be provided at construction. The constructor runs a reliability check before any CSV loading occurs, so calling `SpreadSheetSwarm(load_path="agents_config.csv", ...)` without `agents` raises `ValueError("No agents are provided.")`. Pass real `Agent` instances in `agents`, then call `load_from_csv()` explicitly.
+
+  `load_from_csv()` builds a new agent for every CSV row and appends it to `agents`. It does not reuse the agents you passed. If a passed agent shares an `agent_name` with a CSV row, `run_from_config()` runs both the passed agent and the new one on that row's task.
 </Warning>
 
 Create a CSV file (`agents_config.csv`) mapping each agent name to a task:
@@ -154,33 +164,39 @@ Research-Agent,Research specialist,You are a research agent,Research quantum com
 Analysis-Agent,Data analyst,You are an analysis agent,Analyze the research findings
 ```
 
-Then construct with agents, load the task mapping, and run:
+Then construct with a seed agent, load the CSV, and run:
 ```python
+from swarms import Agent, SpreadSheetSwarm
+
+# Satisfies the constructor check; it has no CSV task, so run_from_config() skips it
+seed = Agent(agent_name="Seed-Agent", model_name="gpt-5.4", max_loops=1)
+
 swarm = SpreadSheetSwarm(
     name="CSV-Swarm",
-    agents=agents,       # non-empty list of Agent instances, e.g. from the example above
+    agents=[seed],
     load_path="agents_config.csv",
     max_loops=1
 )
 
-# Populate self.agent_tasks from the CSV (matches rows to agents by agent_name)
+# Builds one Agent per row and records each row's task
 swarm.load_from_csv()
 
-# Run each configured agent with its mapped task
 result = swarm.run_from_config()
 ```
 
 ### Multiple Loops
 
 ```python
-# Run each agent multiple times
+# Three sequential loops, each agent starts every loop from a fresh conversation
 swarm = SpreadSheetSwarm(
     agents=agents,
-    max_loops=3  # Each agent runs 3 times
+    max_loops=3
 )
 
 result = swarm.run("Process this task multiple times")
 ```
+
+With `max_loops=3` a run takes about three times as long as a single loop, and `outputs` holds one row per agent per loop.
 
 ### Custom Save Path
 
@@ -217,8 +233,8 @@ The `run()` method returns a dictionary:
     "run_id": "spreadsheet_swarm_run_abc123",
     "name": "My-Swarm",
     "description": "A swarm that processes tasks...",
-    "start_time": "2024-01-01T12:00:00",
-    "end_time": "2024-01-01T12:05:00",
+    "start_time": "2026-10-02T12:00:00.123456",
+    "end_time": "2026-10-02T12:05:00.654321",
     "tasks_completed": 6,
     "number_of_agents": 3,
     "outputs": [
@@ -226,12 +242,18 @@ The `run()` method returns a dictionary:
             "agent_name": "Research-Agent",
             "task": "Analyze the latest AI trends",
             "result": "...",
-            "timestamp": "2024-01-01T12:01:00"
+            "timestamp": "2026-10-02T12:01:00.246810"
         },
         # ... more outputs
     ]
 }
 ```
+
+`start_time`, `end_time` and each output's `timestamp` are ISO 8601 strings recorded when the run starts, when it ends, and when each result is tracked.
+
+<Note>
+`outputs` and `tasks_completed` are not reset between `run()` calls on the same instance. A second run returns the first run's outputs too, and the CSV save writes every accumulated output again. Create a new `SpreadSheetSwarm` when you want a clean result set.
+</Note>
 
 ## CSV Output Format
 
@@ -239,16 +261,19 @@ Results are automatically saved to CSV with these columns:
 
 ```csv
 Run ID,Agent Name,Task,Result,Timestamp
-abc-123,Research-Agent,Analyze trends,...,2024-01-01T12:00:00
-abc-123,Analysis-Agent,Analyze trends,...,2024-01-01T12:00:05
+abc-123,Research-Agent,Analyze trends,...,2026-10-02T12:00:00.123456
+abc-123,Analysis-Agent,Analyze trends,...,2026-10-02T12:00:05.654321
 ```
+
+The header row is written only when the file does not exist yet. Later saves append to it.
 
 ## Features
 
-- **Concurrent Execution**: All agents run tasks in parallel for maximum performance
+- **Concurrent Execution**: All agents run in parallel within each loop, and no agent is ever run by two threads at once
 - **Automatic CSV Logging**: All executions are logged to CSV files automatically
 - **CSV Configuration**: Load agent configurations from CSV files
 - **Multiple Loops**: Run each agent multiple times with `max_loops`
 - **Workspace Integration**: Automatically uses workspace directory from environment
 - **JSON Export**: Export results to JSON format
 - **Metadata Tracking**: Tracks timestamps, run IDs, and execution metadata
+- **Telemetry**: Emits OpenTelemetry spans for construction and each run

@@ -14,13 +14,13 @@ Long-running agents accumulate transcripts that eventually exceed the model's co
 
 ## How it fires
 
-Compression runs at the top of a loop iteration when **all** of the following hold:
+Compression runs when **all** of the following hold:
 
 - `context_compression=True` on the agent
-- Token usage of the active prompt ≥ `threshold * context_length`
-- The agent is at the start of an iteration (not mid tool-call)
+- Token usage of `agent.short_memory` ≥ `threshold * context_length`
+- The agent is at a check point: the top of each subtask iteration with `max_loops="auto"`, or the top of each loop with an integer `max_loops`
 
-The default `threshold` is `0.9` — compression fires at ~90% of the context window.
+The default `threshold` is `0.9` — compression fires at ~90% of the context window. `context_length` defaults to the model's input window, so set it lower if you want compression to start sooner.
 
 ## Default behavior
 
@@ -32,34 +32,38 @@ from swarms import Agent
 agent = Agent(
     agent_name="ResearchAgent",
     model_name="claude-sonnet-4-6",
-    max_loops=5,
+    max_loops="auto",
+    context_length=32000,
     context_compression=True,  # default
 )
 
 agent.run("Research low-latency cloud data warehouses, then dive deep on GCP.")
 ```
 
-When the prompt approaches the limit, Swarms:
+When the conversation approaches the limit, Swarms:
 
-1. Summarizes the current transcript with an LLM call.
-2. Copies `MEMORY.md` to `archive/history_<timestamp>.md`.
-3. Wipes `MEMORY.md` and re-seeds it with the summary as a single `System` message.
-4. Rebuilds `conversation_history` (system prompt + rules + summary).
+1. Summarizes the conversation with an LLM call.
+2. With `persistent_memory=True`, copies `MEMORY.md` to `archive/history_<timestamp>.md`, then wipes it and re-seeds it with the summary as a single `System` message.
+3. Rebuilds `agent.short_memory` (system prompt + rules + summary).
+4. In an autonomous run, rebuilds the request as the summary plus the prompt for the subtask in progress.
 
-The agent keeps running with a small active context; the full pre-compaction transcript stays in `archive/`.
+The agent keeps running with a small active context; with persistent memory on, the full pre-compaction transcript stays in `archive/`. Compression does not run during the planning or final-summary phases of an autonomous run.
+
+<Warning>
+  With an integer `max_loops`, compression currently compacts `agent.short_memory` and `MEMORY.md` but does not shrink the request the run sends. A compaction at the start of a run can also leave that request with only the system prompt. Use `max_loops="auto"` when you rely on compression. See [Agent Memory](/agents/agent-memory#when-compression-runs).
+</Warning>
 
 ## Tune the compressor
 
 Swap the default `ContextCompressor` after construction to change the threshold, summarizer model, or summary length:
 
 ```python
-from swarms import Agent
-from swarms.agents.context_compressor import ContextCompressor
+from swarms import Agent, ContextCompressor
 
 agent = Agent(
     agent_name="ResearchAgent",
     model_name="claude-sonnet-4-6",
-    max_loops=5,
+    max_loops="auto",
     context_compression=True,
 )
 
@@ -107,7 +111,7 @@ Use this for short tasks, or when downstream tooling parses the unmodified trans
 
 ## What ends up on disk
 
-After compaction:
+After compaction, with `persistent_memory=True`:
 
 ```text
 $WORKSPACE_DIR/agents/ResearchAgent/
@@ -116,7 +120,7 @@ $WORKSPACE_DIR/agents/ResearchAgent/
     `-- history_2026-04-20_18-44-12.md         # full pre-compaction transcript
 ```
 
-On the next run, Swarms preloads the compact summary from `MEMORY.md` — the archive is preserved for forensics but does not enter the active context.
+The next time an agent with this `agent_name` is constructed, Swarms loads the compact summary from `MEMORY.md` into `agent.short_memory`. The archive is preserved for forensics but is never loaded.
 
 ## Tips
 
@@ -129,4 +133,5 @@ On the next run, Swarms preloads the compact summary from `MEMORY.md` — the ar
 
 - [Persistent Memory](/examples/agents/persistent-memory) — How `MEMORY.md` is created and reloaded.
 - [Agent Memory Reference](/agents/agent-memory) — Full lifecycle, archive layout, and design rationale.
+- [Autonomous Mode](/agents/autonomous-mode) — How compression fits into the `max_loops="auto"` loop.
 - [Conversation API](/api/conversation) — `compact`, `export`, and search helpers.

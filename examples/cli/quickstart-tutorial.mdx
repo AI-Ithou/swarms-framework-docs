@@ -282,6 +282,10 @@ swarms heavy-swarm \
 
 This costs more (3 loops × N workers × 1 question-generator) but produces noticeably deeper output than a single LLM call. Use sparingly.
 
+<Warning>
+In swarms 15.0.3 this command fails before any agent runs (`Failed to run HeavySwarm: ... unexpected keyword argument 'loops_per_agent'`): the CLI still passes `loops_per_agent` and `random_loops_per_agent`, which `HeavySwarm` no longer accepts. Until the CLI is fixed, run the same analysis from Python with `HeavySwarm(question_agent_model_name="gpt-5.4", worker_model_name="claude-opus-4-7", max_loops=1).run(task)`. See the [HeavySwarm reference](/api/heavy-swarm).
+</Warning>
+
 ---
 
 ## Step 9 — Council Debate

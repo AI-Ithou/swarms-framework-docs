@@ -15,7 +15,7 @@ Repeat Agent calls resend the same large system prompt every time. Set `prompt_c
 
 ## Basic usage
 
-Flip on `prompt_caching`. On Anthropic, Swarms adds `cache_control` breakpoints to the stable prefix; on OpenAI, caching is automatic and the flag leaves messages untouched. Caching only kicks in above the provider's token minimum (Opus 4.5+ needs ~4,096 input tokens), so the system prompt must be large — here we repeat a string to cross that bar.
+Flip on `prompt_caching`. On Anthropic, Swarms adds `cache_control` breakpoints to the stable prefix; on OpenAI, caching is automatic and the flag leaves messages untouched. Caching only kicks in above the provider's token minimum (see the [table in the guide](/agents/prompt-caching#provider-support)), so the system prompt must be large — here we repeat a string to cross that bar.
 
 ```python
 from swarms import Agent
@@ -25,10 +25,9 @@ system_prompt = "You are a senior financial analyst. " * 400
 
 agent = Agent(
     agent_name="CachedAnalyst",
-    model_name="claude-opus-4-8",
+    model_name="claude-sonnet-4-6",
     system_prompt=system_prompt,
-    temperature=None,          # Opus 4.7/4.8 reject a temperature value
-    prompt_caching=True,       # the on-switch
+    prompt_caching=True,  # the on-switch
     max_loops=1,
 )
 
@@ -52,9 +51,8 @@ from swarms import Agent
 
 agent = Agent(
     agent_name="CachedAnalyst",
-    model_name="claude-opus-4-8",
+    model_name="claude-sonnet-4-6",
     system_prompt="You are a senior financial analyst. " * 400,
-    temperature=None,
     prompt_caching=True,
     cache_config={"ttl": "1h"},   # keep the cache warm for an hour
     max_loops=1,
@@ -67,31 +65,30 @@ agent.run("Give me a market outlook for Q3.")
 
 ## Verify it worked
 
-`Agent.run()` returns a formatted string, so to see token usage read from the agent's own underlying LLM (`agent.llm`) with `return_all = True` — that returns the raw response including the usage block. Check the second call for `cache_read_input_tokens` greater than zero:
+`agent.usage` adds up the provider's token counts for every call the agent makes. Its `cached_tokens` key is the part of `input_tokens` served from the cache. Snapshot it around the second run:
 
 ```python
 from swarms import Agent
 
 agent = Agent(
     agent_name="CachedAnalyst",
-    model_name="claude-opus-4-8",
+    model_name="claude-sonnet-4-6",
     system_prompt="You are a senior financial analyst. " * 400,
-    temperature=None,
     prompt_caching=True,
     max_loops=1,
 )
 
-# Read from the agent's own llm to expose the raw usage block.
-agent.llm.return_all = True
+agent.run("First question to write the cache.")
 
-agent.llm.run("First question to write the cache.")   # writes the cache
-resp = agent.llm.run("Second question to read the cache.")  # reads it
+before = agent.usage
+agent.run("Second question to read the cache.")
+after = agent.usage
 
-usage = resp["usage"] if isinstance(resp, dict) else resp.usage
-print(usage)   # look for cache_read_input_tokens > 0
+print("input tokens:", after["input_tokens"] - before["input_tokens"])
+print("served from cache:", after["cached_tokens"] - before["cached_tokens"])
 ```
 
-A non-zero `cache_read_input_tokens` on the second call confirms the cached prefix was reused.
+A non-zero cached count on the second run confirms the cached prefix was reused. See [Token usage](/agents/token-usage) for the full set of fields.
 
 ## See also
 

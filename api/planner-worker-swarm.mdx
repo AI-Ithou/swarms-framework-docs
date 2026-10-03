@@ -33,6 +33,12 @@ The swarm follows a cycle-based workflow:
 3. **Evaluation**: A judge agent evaluates the combined results and decides: complete, fill gaps, or fresh start
 4. **Iteration**: If not complete, the planner receives judge feedback and produces new tasks for the next cycle
 
+<Note>
+`PlannerWorkerSwarm` is not exported from the top-level `swarms` package. Import it from `swarms.structs.planner_worker_swarm`.
+</Note>
+
+`PlannerWorkerSwarm` emits OpenTelemetry spans: one when it is constructed, and one for each `run()` call. Worker threads carry the tracing context, so each worker's `Agent.run` span nests under the swarm run. See [Telemetry](/deployment/telemetry) to turn tracing off.
+
 ## Installation
 
 ```bash
@@ -78,7 +84,7 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="max_workers" type="Optional[int]" default="None">
-  Max concurrent worker threads. Defaults to `min(len(agents), os.cpu_count())`.
+  Max concurrent worker threads. Defaults to `min(len(agents), os.cpu_count() or 4)`.
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict-all-except-first">
@@ -86,7 +92,7 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="False">
-  Whether to save conversation history
+  Whether to save the conversation history to the swarm's workspace directory at the end of each `run()`
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -106,17 +112,25 @@ pip install -U swarms
 Executes the planner-worker-judge cycle up to `max_loops` times or until the judge declares the goal complete.
 
 ```python
-def run(self, task: Optional[str] = None, img: Optional[str] = None) -> Any
+def run(
+    self,
+    task: Optional[str] = None,
+    img: Optional[str] = None,
+    *args,
+    **kwargs,
+) -> Any
 ```
 
 **Parameters:**
 - `task` (str): The goal to accomplish
-- `img` (str, optional): Optional image input
+- `img` (str, optional): Optional image input, passed to the planner, every worker and the judge
 
 **Returns:** Formatted conversation history per `output_type`
 
 **Raises:**
 - `ValueError`: If `task` is not provided
+
+Each call clears the shared conversation before adding the new task, so reusing one swarm instance does not carry the previous task's transcript forward. The task queue is not cleared between `run()` calls.
 
 ### get_status()
 
@@ -222,7 +236,7 @@ swarm = PlannerWorkerSwarm(
 ```
 
 - `worker_timeout`: Total wall time for the worker pool per cycle. Workers stop claiming new tasks after this deadline.
-- `task_timeout`: Per-task execution limit. If exceeded, the task fails with a `TimeoutError` and may be retried.
+- `task_timeout`: Per-task execution limit. If exceeded, the task fails with a `TimeoutError` and may be retried. The timed-out call is not interrupted: the worker records the failure once that call returns.
 
 ### Checking Swarm Status
 
@@ -297,13 +311,13 @@ Cycle 2+ (if not complete):
 
 **Planner Agent**: Created internally each cycle. Uses structured output (`PlannerTaskSpec`) to produce a plan narrative and a list of concrete tasks with title, description, priority (0-3), and dependency titles. On subsequent cycles, the planner receives the judge's feedback (gaps + follow-up instructions) appended to the original task.
 
-**Worker Execution**: Each worker runs in a `ThreadPoolExecutor` thread, independently claiming tasks from a shared `TaskQueue`. Workers never coordinate with each other. Each worker loop: claims a task, resets agent memory, builds context (`WORKER_SYSTEM_PROMPT` + task description + dependency results), executes via `agent.run()`, and marks the task complete or failed.
+**Worker Execution**: Each worker runs in a `ThreadPoolExecutor` thread, independently claiming tasks from a shared `TaskQueue`. Workers never coordinate with each other. Each worker loop: claims a task, resets agent memory, builds context (`WORKER_SYSTEM_PROMPT` + task description + dependency results), executes via `agent.run()`, and marks the task complete or failed. A completed result is added to the shared conversation under the worker's name.
 
 **Optimistic concurrency**: every task has a `version` field. State transitions check the expected version -- if another worker modified the task, the operation is rejected. This avoids lock-based coordination problems (deadlocks, forgotten releases).
 
 **Claim priority**: highest priority first, then oldest first, with dependency satisfaction required.
 
-**Judge Agent**: Created internally after workers complete. Evaluates the cycle results and produces a `CycleVerdict`:
+**Judge Agent**: Created internally after workers complete. Its task holds the original goal and a status report of every task in the queue. The shared conversation reaches it as typed chat turns, not pasted into the task: its own earlier verdicts arrive as `assistant` turns and the planner's and workers' messages as labelled `user` turns, so in later cycles it can tell its own reasoning from theirs. It produces a `CycleVerdict`:
 
 | Field | Type | Description |
 |---|---|---|
@@ -319,8 +333,8 @@ Cycle 2+ (if not complete):
 | | Gap Fill (`needs_fresh_start=False`) | Fresh Start (`needs_fresh_start=True`) |
 |---|---|---|
 | **When** | Some tasks succeeded but gaps remain | Systemic drift, contradictory results, fundamentally flawed plan |
-| **What happens** | Only non-terminal tasks are cleared; completed results are preserved as context | ALL tasks are discarded |
-| **Planner receives** | Original task + feedback + gaps | Original task + feedback (clean slate) |
+| **What happens** | Only pending, claimed and running tasks are cleared; completed, failed and cancelled tasks stay in the queue, so the next judge report still includes them | ALL tasks are discarded |
+| **Planner receives** | Original task + feedback + gaps | Original task + feedback + gaps, with an empty queue |
 
 ## Schemas
 
@@ -390,7 +404,7 @@ Represents a single task in the shared queue.
 | **Planner/Judge Overhead** | Each cycle adds 2 LLM calls (planner + judge) on top of the worker calls. Use smaller/faster models for these roles |
 | **Sub-Planner Cost** | `max_planner_depth > 1` adds one planner call per CRITICAL task. Only enable when tasks genuinely need decomposition |
 | **Memory Reset** | Worker memory is reset between tasks, which adds a small overhead but prevents context pollution |
-| **Task Timeout** | Per-task timeout spawns a nested thread -- slight overhead, but essential for detecting stuck workers |
+| **Task Timeout** | Per-task timeout spawns a nested thread -- slight overhead. The stuck call is not killed; the task is marked failed once it returns |
 | **Queue Contention** | The `TaskQueue` lock is held only during claim/transition operations (microseconds). Tested with 200 tasks across 100 threads with zero contention issues |
 
 ## Source Code

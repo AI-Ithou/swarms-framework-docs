@@ -1,11 +1,14 @@
 ---
 title: MixtureOfAgents
 description: A multi-agent system that runs agents in parallel layers and aggregates their responses
+icon: "blender"
 ---
 
 ## Overview
 
 The `MixtureOfAgents` class manages and executes multiple agents in parallel layers, aggregating their responses through a specialized aggregator agent. This architecture enables sophisticated multi-perspective analysis by running agents concurrently and synthesizing their outputs.
+
+The aggregator reads every worker answer from every layer as a separate, labelled chat turn. With more than one layer, each label carries the layer, for example `Analyst (layer 2/3)`, so the aggregator can tell a refinement from a first pass.
 
 ## Class Definition
 
@@ -28,7 +31,7 @@ from swarms import MixtureOfAgents
 </ParamField>
 
 <ParamField path="agents" type="List[Agent]" default="None">
-  A list of reference agents to be used in the mixture. These agents will be executed in parallel layers
+  A list of reference agents to be used in the mixture. These agents will be executed in parallel layers. An empty list raises `ValueError`
 </ParamField>
 
 <ParamField path="aggregator_agent" type="Agent" default="None">
@@ -44,11 +47,11 @@ from swarms import MixtureOfAgents
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of execution loops for the aggregator agent
+  Stored for compatibility with other swarm classes. It does not change how many times the workers or the aggregator run; use `layers` for more worker rounds
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="final">
-  Output format type. Options: "final", "all", "list", etc.
+  Output format type. `"final"` returns the aggregator's answer; `"all"`, `"list"`, `"dict"` and the other `OutputType` values return the whole conversation in that format
 </ParamField>
 
 <ParamField path="aggregator_model_name" type="str" default="claude-sonnet-4-20250514">
@@ -56,8 +59,8 @@ from swarms import MixtureOfAgents
 </ParamField>
 
 <ParamField path="max_workers" type="int" optional>
-  Cap on concurrent worker agents per layer. Defaults to the executor's own
-  behaviour when omitted.
+  Cap on concurrent worker agents per layer. When omitted, the pool uses 95% of
+  the available CPU cores.
 </ParamField>
 
 <ParamField path="aggegrator_args" type="Dict[str, Any]" optional>
@@ -98,7 +101,7 @@ def step(
 ) -> Dict[str, str]
 ```
 
-Executes a single step by running all agents concurrently with the given task.
+Executes a single step by running all agents concurrently with the given task. It does not write to the conversation; `run()` records the results.
 
 **Parameters:**
 
@@ -113,7 +116,7 @@ Executes a single step by running all agents concurrently with the given task.
 **Returns:**
 
 <ResponseField name="agent_outputs" type="Dict[str, str]">
-  Dictionary mapping agent names to their output responses
+  Dictionary mapping agent names to their final answers. Each value is the agent's last message, not its whole transcript
 </ResponseField>
 
 ---
@@ -151,13 +154,12 @@ Executes the complete mixture of agents workflow with multiple layers and aggreg
 </Note>
 
 **Workflow:**
-1. Adds initial task to conversation history
+1. Starts a fresh conversation, so a reused instance does not carry the previous task into the next one, and adds the task
 2. For each layer:
-   - Runs all agents concurrently. Layer 0 receives the task; later layers receive the task plus the previous layer's synthesis, not the full transcript
-   - Adds each agent's output to conversation
-   - Updates context with latest conversation history
-3. Runs aggregator agent on complete conversation
-4. Returns formatted output based on output_type
+   - Runs all agents concurrently. The first layer receives the task; later layers receive the original task plus the previous layer's answers, each prefixed with the agent's name, not the full transcript
+   - Adds each agent's answer to the conversation. When `layers > 1` the speaker is labelled with the layer, for example `Research-Agent (layer 1/3)`
+3. Runs the aggregator on the conversation, passed as chat turns: the task, then every labelled worker answer. The team roster is left out
+4. Adds the aggregator's answer to the conversation and returns the conversation formatted by `output_type`
 
 ---
 
@@ -200,8 +202,12 @@ Runs the mixture of agents for a batch of tasks concurrently using ThreadPoolExe
 **Returns:**
 
 <ResponseField name="results" type="List[str]">
-  A list of aggregated responses from the mixture of agents
+  A list of aggregated responses from the mixture of agents, in task order
 </ResponseField>
+
+<Warning>
+  `run_concurrently()` runs every task on this one instance. Each `run()` replaces `self.conversation` and reuses the same worker agents, so concurrent tasks can overwrite each other's state. Use `run_batched()`, or one `MixtureOfAgents` per task, when results must stay isolated.
+</Warning>
 
 ## Usage Example
 
@@ -248,10 +254,10 @@ print(result)
 
 The MixtureOfAgents architecture works as follows:
 
-1. **Layer Processing**: Each layer runs all agents concurrently with the full conversation context
-2. **Context Accumulation**: Agent outputs are added to the conversation history after each layer
+1. **Layer Processing**: Each layer runs all agents concurrently. The first layer sees only the task; each later layer sees the task plus the previous layer's answers
+2. **Context Accumulation**: Agent answers are added to the conversation after each layer, labelled with the agent and, when `layers > 1`, the layer
 3. **Iterative Refinement**: Subsequent layers build upon previous outputs, enabling deeper analysis
-4. **Final Aggregation**: An aggregator agent synthesizes all responses into a coherent final output
+4. **Final Aggregation**: The aggregator reads every labelled answer from every layer as chat turns and synthesizes them into one final output
 
 ## Source Code
 

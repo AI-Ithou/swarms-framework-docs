@@ -11,7 +11,7 @@ The `BatchedGridWorkflow` is a multi-agent orchestration pattern that executes t
 The BatchedGridWorkflow provides a structured approach to:
 
 - Execute multiple tasks across multiple agents in parallel
-- Manage conversation state across execution loops
+- Re-run the same task grid for a set number of loops
 - Handle error scenarios gracefully
 - Control the number of execution iterations
 
@@ -69,18 +69,18 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of execution loops to run (must be >= 1).
+  Maximum number of execution loops to run. Must be a positive integer, or `ValueError` is raised at construction.
 </ParamField>
 
 <Note>
-  `BatchedGridWorkflow` does not currently accept an `output_type` parameter — there is no earlier documented parameter in the constructor beyond the ones listed above, and it does not maintain a `Conversation` object internally.
+  `BatchedGridWorkflow` has no `output_type` parameter and keeps no `Conversation`. `run()` returns each agent's raw `run()` output.
 </Note>
 
 ## Methods
 
 ### step()
 
-Execute one step of the batched grid workflow. Pairs each agent with the task at the same index and runs all agent/task pairs concurrently via `batched_grid_agent_execution`. The number of `tasks` must match the number of `agents`.
+Execute one step of the batched grid workflow. Pairs each agent with the task at the same index and runs all agent/task pairs concurrently via `batched_grid_agent_execution`. The number of `tasks` must match the number of `agents`, or `ValueError` is raised.
 
 ```python
 def step(self, tasks: List[str])
@@ -93,7 +93,7 @@ def step(self, tasks: List[str])
 
 ### run()
 
-Run the batched grid workflow with the given tasks for `max_loops` iterations. This is the main entry point that includes error handling (logs and re-raises any exception).
+Run the batched grid workflow with the given tasks for `max_loops` iterations. Every loop re-sends the same original tasks; outputs are not fed back in as new tasks, though each agent keeps its own conversation memory between loops. This is the main entry point that includes error handling (logs and re-raises any exception).
 
 ```python
 def run(self, tasks: List[str]) -> List[List[Any]]
@@ -124,19 +124,23 @@ def run_(self, tasks: List[str]) -> List[List[Any]]
 ```python
 from swarms import Agent, BatchedGridWorkflow
 
-# Initialize the ETF-focused agent
-agent = Agent(
-    agent_name="ETF-Research-Agent",
-    agent_description="Specialized agent for researching, analyzing, and recommending Exchange-Traded Funds (ETFs) across various sectors and markets.",
-    model_name="claude-sonnet-4-20250514",
-    dynamic_temperature_enabled=True,
+# One agent per task; tasks run concurrently, so don't reuse one instance twice
+gold_agent = Agent(
+    agent_name="Gold-ETF-Agent",
+    agent_description="Researches and recommends gold ETFs.",
+    model_name="claude-sonnet-4-6",
     max_loops=1,
-    dynamic_context_window=True,
 )
 
+energy_agent = Agent(
+    agent_name="Energy-ETF-Agent",
+    agent_description="Researches and recommends US energy ETFs.",
+    model_name="claude-sonnet-4-6",
+    max_loops=1,
+)
 
 # Create workflow with default settings
-workflow = BatchedGridWorkflow(agents=[agent, agent])
+workflow = BatchedGridWorkflow(agents=[gold_agent, energy_agent])
 
 # Define simple tasks
 tasks = [
@@ -170,8 +174,9 @@ result = workflow.run(tasks)
 
 The workflow includes comprehensive error handling:
 
-- **Validation**: Ensures `max_loops` is a positive integer
-- **Execution Errors**: Catches and logs exceptions during execution
+- **Validation**: Ensures `max_loops` is a positive integer, and that each step gets one task per agent
+- **Agent Errors**: An agent that raises during a step has its exception returned in that step's results instead of stopping the other agents
+- **Execution Errors**: Catches, logs and re-raises any other exception during execution
 - **Detailed Logging**: Provides detailed error information including traceback
 
 ## Best Practices
@@ -180,7 +185,7 @@ The workflow includes comprehensive error handling:
 |--------------|-------------|
 | **Agent Selection** | Choose agents with complementary capabilities for diverse task processing |
 | **Task Distribution** | Ensure tasks are well-distributed and can be processed independently |
-| **Loop Configuration** | Use multiple loops when iterative refinement is needed |
+| **Loop Configuration** | Each loop re-sends the original tasks; an agent sees its earlier loops only through its own conversation memory |
 | **Error Monitoring** | Monitor logs for execution errors and adjust agent configurations accordingly |
 | **Resource Management** | Consider computational resources when setting up multiple agents |
 

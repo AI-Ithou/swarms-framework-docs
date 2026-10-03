@@ -1,11 +1,26 @@
 ---
 title: Changelog Overview
-description: How Swarms releases work — new versions ship every 2 weeks
+description: How Swarms releases work, and the changelog for each major version
 ---
 
-Swarms follows a regular release cadence: **new versions are released every 2 weeks**. Each release bundles the features, improvements, bug fixes, and documentation work merged during that two-week window, and every version gets a dedicated changelog page detailing what changed and how to adopt it.
+Swarms ships often. Recent major versions have landed roughly every four to seven weeks, with patch releases in between. Each major version gets a dedicated changelog page covering its patch releases: what changed and how to adopt it.
 
 > Apache 2.0 · [github.com/kyegomez/swarms](https://github.com/kyegomez/swarms)
+
+## Releases
+
+| Version | Released | Highlights |
+|---|---|---|
+| [Swarms v15](/changelog/swarms-v15) | 15.0.0 on 2026-09-01, latest 15.0.3 on 2026-09-16 | `SwarmRouter` fallback swarms, token usage tracking, `MCPDeployer`, `check_models`, AOP removed |
+| [Swarms v14](/changelog/swarms-v14) | 14.0.0 on 2026-08-01, latest 14.0.2 on 2026-08-25 | OpenTelemetry tracing, `MCPManager`, `AutoAgentBuilder`, `AuctionSwarm` |
+| [Swarms v13](/changelog/swarms-v13) | 13.0.0 on 2026-06-12 | Async self-selecting `GroupChat`, nested `GraphWorkflow`, streaming across workflows |
+| [Swarms v12](/changelog/swarms-v12) | 12.0.0 on 2026-05-05 | Persistent memory, context compression, grep tool |
+
+Changes merged to `master` after the latest release are listed under **Unreleased** on the newest version's page. Check the version you have installed with:
+
+```bash
+python -c "import swarms; print(swarms.__version__)"
+```
 
 ## Staying up to date
 

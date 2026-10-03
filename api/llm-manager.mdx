@@ -22,14 +22,16 @@ agent.llm_manager.get_available_models()   # ['gpt-5.4-mini']
 ## Import
 
 ```python
-from swarms.agents.llm_manager import LLMManager
+from swarms import LLMManager
 ```
 
 ## Design
 
 Unlike the agent's other collaborators, `LLMManager` holds a reference back to its owning agent and reads configuration **live** rather than snapshotting it.
 
-That is deliberate. Agents mutate their own LLM configuration at run time: `system_prompt` grows when skills load, `tools_list_dictionary` changes when tools are registered, `streaming_on` is toggled per call by `run_stream`. A snapshot taken at construction would silently go stale.
+That is deliberate. Agents mutate their own LLM configuration at run time: `tools_list_dictionary` changes when tools are registered, `streaming_on` is toggled per call by `run_stream`. A snapshot taken at construction would silently go stale.
+
+Agent Skills are not part of `system_prompt`. `Agent.call_llm` adds the selected skills to each request before it delegates to `call()`. See [SkillsManager](/api/skills-manager).
 
 Anything the manager writes — `model_name`, `current_model_index`, `llm` — is written back to the agent, so `agent.llm`, serialization, and `save()` / `load()` all behave exactly as before.
 
@@ -97,6 +99,14 @@ def build(*args, **kwargs) -> Optional[LiteLLM]
 ```
 
 Assemble the `LiteLLM` instance from every configuration source: the agent's core settings, `llm_args`, `tools_list_dictionary`, MCP tool schemas, and anything passed here.
+
+The core settings include:
+
+- `temperature` from the agent. It defaults to `None`, and `LiteLLM` leaves it out of the request when unset, so models that reject any temperature value, such as some Claude models, work without extra configuration.
+- `usage_hook`, set to the agent's own usage counter. Token totals live on the agent, so they survive a rebuild after a fallback switch. See [Token usage](/agents/token-usage).
+- `base_url` and `api_key`, from the agent's `llm_base_url` and `llm_api_key`.
+
+MCP tool schemas come from the agent's [ToolManager](/api/tool-manager). With dynamic tool loading on, they are deferred into the tool catalog (`agent.tool_manager.defer_mcp_tools()`). Otherwise they are fetched with `agent.tool_manager.add_mcp_tools_to_memory()` and sent with every request.
 
 <ParamField path="*args" type="Any">
   A single dict is merged directly into the configuration; anything else is stored under `additional_args`.
@@ -187,6 +197,8 @@ Direct `llm.run()` returning the complete string. Used when neither `stream` nor
 
 **Returns** the complete response string — or, when the model made tool calls mid-stream, the assembled tool-call list instead. `is_last` is stripped from `kwargs` before dispatch.
 
+Any provider error is logged and re-raised. The agent's standard loop (`Agent._run`) retries the call up to `retry_attempts` times. After the last failure it raises `AgentLLMError`, which hands the task to the fallback chain below.
+
 ### Stream plumbing
 
 ```python
@@ -207,16 +219,18 @@ def handle_fallback_execution(
 ) -> Any
 ```
 
-Re-run a failed task against the next fallback model, recursing down the chain until it succeeds or every model is exhausted — at which point the original error goes to the agent's error handler and `None` is returned.
+Re-run a failed task against the next fallback model, recursing down the chain until it succeeds or every model is exhausted. `Agent.run` calls it when a run fails and more than one model is configured.
+
+When every model is exhausted, the original error goes to the agent's error handler, which logs it (and saves state when `autosave` is on) and re-raises it to the caller.
 
 ## Agent-level wrappers
 
-Each of these delegates straight to the manager and remains the supported public API:
+Each of these delegates to the manager and remains the supported public API:
 
 | `Agent` method | Delegates to |
 |---|---|
 | `llm_handling(*args, **kwargs)` | `build()` |
-| `call_llm(task, img, imgs, current_loop, streaming_callback)` | `call()` |
+| `call_llm(task, img, imgs, current_loop, streaming_callback)` | `call()`, after adding the selected skills to the request |
 | `get_available_models()` | `get_available_models()` |
 | `get_current_model()` | `get_current_model()` |
 | `switch_to_next_model()` | `switch_to_next_model()` |

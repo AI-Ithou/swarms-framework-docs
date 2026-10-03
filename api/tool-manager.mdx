@@ -1,0 +1,526 @@
+---
+title: 'ToolManager'
+description: 'Tool setup, tool-call execution, retries, MCP, handoffs, and tool search for an agent'
+icon: 'screwdriver-wrench'
+---
+
+## Overview
+
+`ToolManager` owns everything an `Agent` does with tools. It builds the tool executor, turns your callables into schemas, registers handoffs, defers schemas behind `tool_search`, normalizes model output, runs tool calls (local callables, MCP servers, handoffs, tool search), retries a failed batch, summarizes tool output, and prints tool activity.
+
+Every `Agent` builds one automatically as `agent.tool_manager`. You rarely construct it yourself, but it is where tool behavior lives.
+
+```python
+from swarms import Agent
+
+def get_weather(city: str) -> str:
+    """Get the current weather for a city."""
+    return f"Sunny in {city}"
+
+agent = Agent(
+    agent_name="Weather-Agent",
+    model_name="gpt-5.4-mini",
+    tools=[get_weather],
+)
+
+agent.tool_manager                                      # ToolManager
+[s["function"]["name"] for s in agent.tools_list_dictionary]  # ['get_weather']
+```
+
+<Note>
+All tool handling now lives in this class instead of `swarms/structs/agent.py`. `Agent` keeps only `add_tool`, `add_tools`, `remove_tool`, `remove_tools`, and the `mcp_enabled` property. Every other tool method is called on `agent.tool_manager`. See [Agent-level API](#agent-level-api) for what moved.
+</Note>
+
+## Import
+
+```python
+from swarms.agents.tool_manager import ToolManager
+```
+
+`ToolManager` is not re-exported from `swarms` or `swarms.agents`. Use the module path above.
+
+## Design
+
+`ToolManager` holds a reference back to its owning agent and keeps no state of its own. Every value it reads or writes lives on the agent, so `agent.tools_list_dictionary`, `agent.tool_struct`, and `agent.tool_loader` stay the source of truth, and the autonomous loop and `LLMManager` see the same values.
+
+| Agent attribute | How the manager uses it |
+| --- | --- |
+| `tools` | Read. The callables you passed in. |
+| `tool_struct` | Written by `setup_tools`. The `BaseTool` executor that runs local tool calls. |
+| `tools_list_dictionary` | Read and written. The schemas sent to the model. Filled by `tool_handling` and `load_tools`, replaced by the loader's output when dynamic tools are on. |
+| `tool_loader` | Written by `setup_dynamic_tools`. A [`DynamicToolLoader`](/api/dynamic-tool-loader), or `None` when dynamic tools are off. |
+| `short_memory` | Written. Tool results are added as `"Tool Executor"` turns. Summaries are added under the agent's name. |
+| `system_prompt` | Appended to by `load_tools`: the handoff prompt and the dynamic-tools notice. |
+| `llm` | Rebuilt after `tool_search` loads new schemas. |
+| `_mcp_schemas_cache` | Written by `defer_mcp_tools`. MCP schemas fetched once and reused. |
+| `_last_tool_output` | Written by `execute_tools`. The executor's raw output for the last batch. |
+
+It also reads configuration from the agent: `tool_schema`, `list_base_models`, `handoffs`, `dynamic_tools`, `mcp_enabled`, `max_loops`, `tool_retry_attempts`, `tool_call_summary`, `show_tool_execution_output`, `print_on`, and `verbose`.
+
+<ParamField path="agent" type="Any" required>
+  The owning `Agent`. Its tool state is read and written through this reference.
+</ParamField>
+
+## Lifecycle at construction
+
+<Steps>
+  <Step title="Build the manager">
+    `Agent.__init__` creates `ToolManager(agent=self)` right after `LLMManager`, once its configuration is set.
+  </Step>
+  <Step title="setup_tools">
+    After `short_memory` exists, the agent calls `setup_tools()`. It builds `BaseTool(tools=agent.tools, verbose=agent.verbose)` as `agent.tool_struct`, then adds any `tool_schema` or `list_base_models` schemas to memory.
+  </Step>
+  <Step title="load_tools">
+    After the reasoning and ReAct prompts are appended, the agent calls `load_tools()`. Handoffs are registered first. Then the tools are either deferred behind `tool_search` or registered eagerly.
+  </Step>
+  <Step title="Build the LLM">
+    The agent builds its LLM, which reads `tools_list_dictionary`. With MCP servers configured, `LLMManager` calls `defer_mcp_tools()` when a loader exists, or `add_mcp_tools_to_memory()` otherwise. See [LLMManager](/api/llm-manager).
+  </Step>
+</Steps>
+
+## How a tool call runs
+
+Each loop of `Agent.run` with an integer `max_loops` sends one request, then hands the reply to the manager:
+
+<Steps>
+  <Step title="Parse the reply">
+    `parse_response` turns the raw reply into text or a list of tool-call dicts. The agent adds it to `short_memory` and records the assistant turn in the run transcript.
+  </Step>
+  <Step title="Run tool searches">
+    When `agent.tool_loader` is set, `tool_search` calls run first. Each result is recorded and removed from the batch. If nothing else is left, the turn ends here.
+  </Step>
+  <Step title="Run handoffs">
+    Each `handoff_task` call delegates to the named agents through `handoff_task_tool`. The combined responses are recorded as `"Handoff Result: ..."`.
+  </Step>
+  <Step title="Run local callables">
+    When `agent.tools` is non-empty, `tool_execution_retry` runs the batch through `execute_tools`. The output is mapped back to each tool-call id.
+  </Step>
+  <Step title="Run MCP calls">
+    When `agent.mcp_enabled` is true, `mcp_tool_handling` sends the reply to the agent's [MCPManager](/api/mcp-manager), which routes each call to the server that exposes it.
+  </Step>
+  <Step title="Answer every call">
+    Every tool call recorded in the transcript gets exactly one tool result. A call with no recorded result gets a `(no result recorded for <name>)` placeholder, because a gap makes the next request invalid.
+  </Step>
+</Steps>
+
+A plain-text reply flows through the same path. The executor finds no calls and returns an empty list, so nothing is recorded, printed, or summarized. The answer stays the agent's last message, which keeps `output_type="final"` and swarm structures that read each agent's answer correct.
+
+<Warning>
+When `agent.tools` is set, the whole batch goes to the local executor, which only knows `agent.tools`. In a fixed-loop agent, a call to an MCP tool or to `handoff_task` makes that batch fail on every attempt. The resulting `AgentToolExecutionError` ends the turn before MCP calls run. Keep MCP servers and handoffs on agents without local `tools`, or use `max_loops="auto"`, whose loop routes MCP calls to the MCP manager separately.
+</Warning>
+
+### Local callables
+
+`execute_tools` calls `agent.tool_struct.execute_function_calls_from_api_response(response)`. Calls in one batch run in parallel on up to four threads, and results come back in call order. Each result is formatted as `Function '<name>' result:` followed by the value.
+
+### MCP servers
+
+`mcp_tool_handling` executes the calls through `agent.mcp_manager.execute_tool_calls(response, output_type="dict")`. Non-empty results are recorded as `"MCP Tool Response: ..."`. A summary call over the whole conversation always follows, whatever `tool_call_summary` is set to. If that summary call fails, a fixed sentence is recorded instead.
+
+### Handoffs
+
+`handoff_task` calls run through `swarms.tools.handoffs_tool.handoff_task`. Each request names an agent, a task, and a reasoning string. One target runs directly; several run in parallel threads. Unknown agent names and missing fields are returned to the model as validation errors, not raised.
+
+### Tool search
+
+With `dynamic_tools=True`, `tool_search` calls run through `tool_search_tool`, which loads matching schemas from the catalog. The newly loaded tools are callable from the next request. See [Dynamic Tool Loading](/agents/dynamic-tools).
+
+## Retries and failures
+
+`tool_retry_attempts` (default `3`) sets how many times the local batch runs before the manager gives up.
+
+- Each attempt runs the whole batch once. Calls in the batch that succeeded run again with it.
+- An exception anywhere in `execute_tools` counts as a failed attempt. That includes the `tool_call_summary` model call.
+- After the last attempt, `tool_execution_retry` raises `AgentToolExecutionError`, chained from the last error.
+
+The agent catches `AgentToolExecutionError` apart from provider errors. It answers any recorded tool calls, reports the error to telemetry as `Agent.tool_error`, adds `Tool execution failed after N attempts: ...` to memory as a `"Tool Executor"` turn, and leaves the request retry loop without calling the model again. The run continues, so on the next loop the model reads the failure and can choose differently. A broken tool never consumes `retry_attempts`, which is reserved for provider failures.
+
+You can drive the retry path directly, without a model call:
+
+```python
+from swarms import Agent
+from swarms.schemas import AgentToolExecutionError
+
+
+def get_weather(city: str) -> str:
+    """Get the current weather for a city."""
+    raise TimeoutError("weather service is down")
+
+
+agent = Agent(
+    agent_name="Weather-Agent",
+    model_name="gpt-5.4-mini",
+    tools=[get_weather],
+    tool_retry_attempts=2,
+    tool_call_summary=False,
+)
+
+call = {
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+}
+
+try:
+    agent.tool_manager.tool_execution_retry([call], loop_count=1)
+except AgentToolExecutionError as error:
+    print(error)
+# Agent 'Weather-Agent' failed to execute tools in loop 1 after 2 attempt(s): ...
+```
+
+## Printing tool activity
+
+All output below is gated on `agent.print_on`. With `print_on=False`, the manager prints nothing.
+
+| Event | What is printed |
+| --- | --- |
+| Each local tool call, before it runs | A panel titled `Agent: <name> Function Call: <function>` with the call id and arguments. Each argument value is cut to 200 characters. |
+| Local batch done, `show_tool_execution_output=True` | A `Tool Execution Results` panel with the time, each tool's name, id, and type, and the formatted output. |
+| Local batch done, `show_tool_execution_output=False` | A short `Tool Execution` panel with the tool names and the time. |
+| `tool_call_summary=True` | The summary, in the agent's normal output panel. |
+| `tool_search` call | A `Tool Search` panel with the search result. |
+| `handoff_task` call | A handoff panel listing each target agent, task, and reasoning (cut to 150 characters), then a `[Handoff] Delegated tasks to N agent(s)` line. |
+| MCP results | A green `MCP Tool Response` panel with the results as JSON, then the summary. |
+| MCP tools fetched | A one-line panel with the number of MCP tools integrated. |
+| `complete_task` call | A `Task Completion Summary` panel. |
+
+## Setup
+
+### setup_tools
+
+```python
+def setup_tools() -> BaseTool
+```
+
+Build the tool executor as `agent.tool_struct` from `agent.tools`, then call `handle_tool_schema_ops` when `tool_schema` or `list_base_models` is set. Returns the executor.
+
+### handle_tool_schema_ops
+
+```python
+def handle_tool_schema_ops() -> None
+```
+
+Add the agent's Pydantic schemas to `short_memory` as JSON text under the agent's name. These schemas are context for the model. They are not added to `tools_list_dictionary`, so they are not sent as callable tools.
+
+<Warning>
+`list_base_models` currently raises `TypeError` at construction: this method calls `BaseTool.multi_base_models_to_dict` without its required `base_models` argument. Pass a single model with `tool_schema`, or send schemas built with `BaseTool().base_model_to_dict(Model)` through `tools_list_dictionary`.
+</Warning>
+
+### load_tools
+
+```python
+def load_tools() -> None
+```
+
+Register handoffs, then load the tools eagerly or behind tool search.
+
+1. When `handoffs` is set, append the `handoff_task` schema to `tools_list_dictionary` and append a prompt describing the handoff agents to `system_prompt`.
+2. When `dynamic_tools=True` and the agent has non-empty `tools`, an MCP server, or `max_loops="auto"`, append the dynamic-tools notice to `system_prompt` and call `setup_dynamic_tools()`.
+3. Otherwise, when `tools` is non-empty, call `tool_handling()`.
+
+### tool_handling
+
+```python
+def tool_handling() -> None
+```
+
+Convert each callable in `agent.tools` to an OpenAI function schema and append it to `tools_list_dictionary`, skipping names already present. The full schema list is then added to `short_memory` under the agent's name.
+
+## Dynamic tools
+
+### setup_dynamic_tools
+
+```python
+def setup_dynamic_tools(always_loaded: Optional[List[dict]] = None) -> DynamicToolLoader
+```
+
+Build a fresh [`DynamicToolLoader`](/api/dynamic-tool-loader) from `agent.tools` and store it as `agent.tool_loader`.
+
+<ParamField path="always_loaded" type="Optional[List[dict]]" default="None">
+  Schemas that are never deferred, such as the autonomous loop's control tools.
+</ParamField>
+
+Schemas already in `tools_list_dictionary`, such as the handoff tool, stay always loaded. Your own deferred tools and `tool_search` are dropped first, because the loader re-adds them. MCP schemas cached by an earlier fetch are re-registered. `tools_list_dictionary` is then set to `loader.schemas()`. A rebuilt loader starts with nothing loaded; the autonomous loop rebuilds it at the start of every run.
+
+### defer_tool_schemas
+
+```python
+def defer_tool_schemas(schemas: List[dict]) -> None
+```
+
+Add pre-built OpenAI tool schemas to the deferred catalog and refresh `tools_list_dictionary`. Does nothing when no loader is active. Use this instead of appending to `tools_list_dictionary`, which the loader overwrites.
+
+### defer_mcp_tools
+
+```python
+def defer_mcp_tools() -> int
+```
+
+Move the MCP tool schemas into the deferred catalog. The schemas are fetched once per agent and cached; a rebuilt loader is refilled from the cache without contacting the server. Returns the number of schemas added, or `0` when MCP or dynamic tools are off or nothing is new. An unreachable server is logged and treated as zero tools, so agent setup still succeeds.
+
+### tool_search_tool
+
+```python
+def tool_search_tool(
+    query: str,
+    max_results: int = 5,
+    min_score_ratio: float = 0.0,
+    **kwargs,
+) -> str
+```
+
+The handler behind the model's `tool_search` calls. Searches the catalog with `DynamicToolLoader.run_search`, loads the matches, refreshes `tools_list_dictionary`, and rebuilds `agent.llm` so the next request carries the new schemas.
+
+<ParamField path="query" type="str" required>
+  Keywords, or `select:name1,name2` for exact names.
+</ParamField>
+
+<ParamField path="max_results" type="int" default="5">
+  Most tools to load.
+</ParamField>
+
+<ParamField path="min_score_ratio" type="float" default="0.0">
+  Minimum score relative to the best match.
+</ParamField>
+
+Returns the search result shown to the model. Without a loader it returns `Tool search is unavailable: this agent was not built with dynamic_tools=True.`
+
+## MCP
+
+### add_mcp_tools_to_memory
+
+```python
+def add_mcp_tools_to_memory() -> List[Dict[str, Any]]
+```
+
+Fetch the OpenAI tool schemas exposed by every configured MCP server through `agent.mcp_manager.get_tools()`. Despite the name, nothing is written to memory; the schemas are returned. Errors are logged and re-raised, for example `AgentMCPConnectionError` when no server can be reached.
+
+### mcp_tool_handling
+
+```python
+def mcp_tool_handling(response: Any, current_loop: Optional[int] = 0) -> None
+```
+
+Execute the MCP tool calls in a reply, record the results, and record a summary. Returns early when the reply holds no MCP calls. Errors are logged and re-raised.
+
+## Handoffs
+
+### get_agent_registry
+
+```python
+def get_agent_registry() -> Dict[str, Any]
+```
+
+Map handoff names to agents. A dict in `agent.handoffs` is returned as is. A list or tuple is keyed by each target's `agent_name`. Anything else returns `{}`.
+
+### handoff_task_tool
+
+```python
+def handoff_task_tool(handoffs: List[Dict[str, str]]) -> str
+```
+
+Delegate tasks to handoff agents and return their combined responses.
+
+<ParamField path="handoffs" type="List[Dict[str, str]]" required>
+  Requests, each with `agent_name`, `task`, and `reasoning` keys.
+</ParamField>
+
+## Parsing
+
+### parse_llm_output
+
+```python
+def parse_llm_output(response: Any) -> Any
+```
+
+Normalize a model reply to text or a list of tool-call dicts:
+
+| Input | Output |
+| --- | --- |
+| Dict with `choices` | The first choice's message content |
+| Dict with `function` | `[response]`, so a single MCP-style call becomes a list |
+| Any other dict | A JSON string |
+| Pydantic model | `model_dump()` |
+| List of Pydantic models | A list of dicts |
+| Anything else | Unchanged |
+
+Raises `ValueError` if the reply cannot be normalized.
+
+### parse_response
+
+```python
+def parse_response(response: Any) -> Any
+```
+
+Normalize one main-loop reply before it is recorded. Dumps a Pydantic reply when `tools_list_dictionary` is set, then calls `parse_llm_output`.
+
+## Execution
+
+### handle_tool_calls
+
+```python
+def handle_tool_calls(
+    response: Any,
+    loop_count: int,
+    transcript: Optional[Transcript] = None,
+    turn_calls: Optional[list] = None,
+    turn_results: Optional[dict] = None,
+) -> None
+```
+
+Run every tool call in one parsed reply, in the order described in [How a tool call runs](#how-a-tool-call-runs), and answer each call in the transcript.
+
+<ParamField path="response" type="Any" required>
+  The parsed model reply.
+</ParamField>
+
+<ParamField path="loop_count" type="int" required>
+  The current loop number, used in logs and panels.
+</ParamField>
+
+<ParamField path="transcript" type="Optional[Transcript]" default="None">
+  The run's transcript. `None` when the agent uses `transforms`.
+</ParamField>
+
+<ParamField path="turn_calls" type="Optional[list]" default="None">
+  The tool calls recorded in the transcript this turn.
+</ParamField>
+
+<ParamField path="turn_results" type="Optional[dict]" default="None">
+  Results keyed by tool-call id, updated in place.
+</ParamField>
+
+Raises `AgentToolExecutionError` when the local batch fails every attempt.
+
+### execute_tools
+
+```python
+def execute_tools(response: Any, loop_count: int) -> None
+```
+
+Run the local tool calls in a reply once and record their output. A `None` reply is logged and skipped. When the executor returns nothing (a text reply), the method returns without recording, printing, or summarizing. Otherwise it records the formatted output as a `"Tool Executor"` turn, prints it, and, when `tool_call_summary=True`, records a summary from `temp_llm_instance_for_tool_summary()`. Raises whatever the executor raises.
+
+### tool_execution_retry
+
+```python
+def tool_execution_retry(response: Any, loop_count: int) -> Any
+```
+
+Call `execute_tools` up to `max(1, agent.tool_retry_attempts)` times. Returns the executor output on the first success, or `None` when `response` is `None`. Raises `AgentToolExecutionError` when every attempt fails.
+
+### temp_llm_instance_for_tool_summary
+
+```python
+def temp_llm_instance_for_tool_summary() -> LiteLLM
+```
+
+Build a fresh, tool-free, non-streaming `LiteLLM` for summarizing tool output. It uses the agent's model, `temperature`, `top_p`, `max_tokens`, system prompt (plus the selected skills), `llm_base_url`, and `llm_api_key`. Its token usage is added to the agent's running total, so summaries show up in [`agent.usage`](/agents/token-usage).
+
+## Autonomous loop
+
+These back the `complete_task` tool of the [autonomous loop](/agents/autonomous-mode).
+
+### complete_task_tool
+
+```python
+def complete_task_tool(
+    task_id: str,
+    summary: str,
+    success: bool,
+    results: Optional[str] = None,
+    lessons_learned: Optional[str] = None,
+    **kwargs,
+) -> str
+```
+
+Build a `Task Completion Summary` with the task id, status, summary, optional results and lessons, and a breakdown of every subtask in `agent.autonomous_subtasks`. The text is added to memory under the agent's name and returned. With `verbose=True`, subtasks that are not completed or failed are logged as a warning.
+
+### handle_complete_task
+
+```python
+def handle_complete_task(response: Any) -> Optional[str]
+```
+
+Run the first `complete_task` call in a final-summary reply, record its result, and return it. Returns `None` when the reply is not a list or holds no `complete_task` call.
+
+## Printing
+
+### visualize_function_call
+
+```python
+def visualize_function_call(
+    function_name: str,
+    arguments: Dict[str, Any],
+    result: Any = None,
+    call_id: Optional[str] = None,
+) -> None
+```
+
+Print a function-call panel. Argument values are cut to 200 characters and `result` to 500. Does nothing when `print_on` is off.
+
+### visualize_handoff_call
+
+```python
+def visualize_handoff_call(
+    handoffs: List[Dict[str, str]],
+    tool_call: Optional[Dict[str, Any]] = None,
+) -> None
+```
+
+Print a panel listing every delegation in a `handoff_task` call. Does nothing when `print_on` is off.
+
+## Agent-level API
+
+These stay on `Agent`:
+
+| `Agent` member | Behavior |
+| --- | --- |
+| `add_tool(tool)` | Append one callable to `agent.tools` |
+| `add_tools(tools)` | Extend `agent.tools` |
+| `remove_tool(tool)` | Remove one callable from `agent.tools` |
+| `remove_tools(tools)` | Remove each callable from `agent.tools` |
+| `mcp_enabled` | Property. `True` when at least one MCP server is configured |
+
+<Warning>
+The four tool methods only change `agent.tools`. A tool added after construction is not in the executor, the schema list, or the LLM until you rebuild them. With `dynamic_tools=False`:
+
+```python
+agent.add_tool(convert_currency)
+agent.tool_manager.setup_tools()
+agent.tool_manager.tool_handling()
+agent.llm = agent.llm_handling()
+```
+
+`tool_handling` records the schema list in memory again. When you can, pass every tool to the constructor instead.
+</Warning>
+
+These methods are no longer on `Agent`. Call the manager instead:
+
+| Removed from `Agent` | Use |
+| --- | --- |
+| `setup_tools()`, `tool_handling()`, `handle_tool_schema_ops()` | `agent.tool_manager.setup_tools()`, `.tool_handling()`, `.handle_tool_schema_ops()` |
+| `setup_dynamic_tools()`, `defer_tool_schemas()`, `defer_mcp_tools()` | `agent.tool_manager.setup_dynamic_tools()`, `.defer_tool_schemas()`, `.defer_mcp_tools()` |
+| `add_mcp_tools_to_memory()`, `mcp_tool_handling()` | `agent.tool_manager.add_mcp_tools_to_memory()`, `.mcp_tool_handling()` |
+| `parse_llm_output()` | `agent.tool_manager.parse_llm_output()` |
+| `execute_tools()`, `tool_execution_retry()` | `agent.tool_manager.execute_tools()`, `.tool_execution_retry()` |
+| `temp_llm_instance_for_tool_summary()` | `agent.tool_manager.temp_llm_instance_for_tool_summary()` |
+| `_tool_search_tool()`, `_handoff_task_tool()`, `_get_agent_registry()`, `_complete_task_tool()` | `agent.tool_manager.tool_search_tool()`, `.handoff_task_tool()`, `.get_agent_registry()`, `.complete_task_tool()` |
+| `_visualize_function_call()`, `_visualize_handoff_call()` | `agent.tool_manager.visualize_function_call()`, `.visualize_handoff_call()` |
+| `get_all_selected_tools()` | `get_autonomous_loop_tool_names()` from `swarms.structs.autonomous_loop_utils` |
+
+## Related
+
+<CardGroup cols={2}>
+<Card title="Agent Tools" icon="wrench" href="/agents/agent-tools">
+How to write tools and configure tool execution
+</Card>
+<Card title="Dynamic Tool Loading" icon="magnifying-glass-arrow-right" href="/agents/dynamic-tools">
+Defer schemas behind tool_search
+</Card>
+<Card title="LLMManager" icon="microchip" href="/api/llm-manager">
+Builds the LLM that carries the tool schemas
+</Card>
+<Card title="MCPManager" icon="plug" href="/api/mcp-manager">
+Connects MCP servers and routes their tool calls
+</Card>
+</CardGroup>

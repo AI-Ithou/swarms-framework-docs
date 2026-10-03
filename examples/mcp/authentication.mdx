@@ -15,10 +15,11 @@ MCP does not mandate one authentication scheme, so real servers take credentials
 | Optional Bearer | Hugging Face | `mcp_api_key=("env:TOKEN" if TOKEN else None)` |
 | Custom header | — | `MCPConnection(api_key_header=...)` |
 | OAuth 2.1 | — | `MCPOAuthConfig(...)` |
+| Your own `MCPDeployer` server | any agent you serve | `MCPConnection(api_key=...)` |
 
 ## The `env:` prefix
 
-Anywhere swarms takes a credential, `"env:VAR_NAME"` reads it from the environment when the connection is made, instead of embedding it in your source:
+For MCP credentials (`api_key`, `mcp_api_key`, `authorization_token`, the OAuth fields, and stdio `env` values), `"env:VAR_NAME"` reads the value from the environment when the connection is made, instead of embedding it in your source. `headers` values are sent as written:
 
 ```python
 mcp_api_key="env:SEMGREP_APP_TOKEN"
@@ -169,6 +170,27 @@ mcp_oauth = MCPOAuthConfig(
 
 And when you already hold a token from elsewhere, pass it directly with `access_token=` and no flow is run.
 
+## A server you deployed with MCPDeployer
+
+An agent or swarm served with [`MCPDeployer`](/api/mcp-deployer) accepts its key either as `Authorization: Bearer <key>`, which is what `MCPConnection` sends by default, or in an `x-api-key` header:
+
+```python
+from swarms import Agent
+from swarms.schemas.mcp_schemas import MCPConnection
+
+agent = Agent(
+    agent_name="Client",
+    model_name="gpt-5.4",
+    mcp_url=MCPConnection(
+        url="http://127.0.0.1:8000/mcp",
+        api_key="env:ANALYST_MCP_KEY",
+    ),
+    max_loops=2,
+)
+```
+
+If the server uses a custom `auth` callable that reads more headers, such as a tenant id, add them with `headers={"x-tenant": "acme"}`. See [Serve an agent over MCP](/examples/mcp/mcp-deployer-serve-agent) for the server side.
+
 ## Different credentials per server
 
 Mix plain URLs and connection objects in the same `mcp_urls` list:
@@ -199,7 +221,7 @@ agent = Agent(
 
 <AccordionGroup>
   <Accordion title="401 Unauthorized">
-    Confirm the variable is exported in the shell that runs the script (`echo $TOKEN`), and that you used the shape the server expects — a Bearer token sent as a query parameter fails exactly like a missing one. Note that servers change their requirements: Semgrep once accepted anonymous traffic and no longer does.
+    Confirm the variable is exported in the shell that runs the script (`echo $TOKEN`), and that you used the shape the server expects — a Bearer token sent as a query parameter fails exactly like a missing one. Note that servers change their requirements: Semgrep once accepted anonymous traffic and no longer does. With `mcp` 2.x the client does not see the status code: a rejected credential surfaces as `Server returned an error response`.
   </Accordion>
   <Accordion title="The key looks right but the URL is malformed">
     An unset environment variable interpolates as the string `None`. Check for the variable and exit with a clear message before constructing the URL.

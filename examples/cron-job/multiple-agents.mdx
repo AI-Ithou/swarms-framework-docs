@@ -74,7 +74,7 @@ Each entry is a mapping.
 | `max_consecutive_errors` | no | Error budget for *this* agent only |
 | `kwargs` | no | Dict forwarded to this agent's `run`, e.g. `{"img": "chart.png"}` |
 
-A missing required key raises `CronJobConfigError` naming the index and the key, before anything starts.
+A missing (or empty) required key raises `CronJobConfigError` naming the index and the key. Entries are checked as they are started, in order, so validate your list up front: jobs for the entries before the bad one have already started and keep running on their daemon threads.
 
 ## Isolation is the point
 
@@ -87,8 +87,7 @@ CronJob.run_many([
         "agent": anomaly_agent,
         "interval": "10minutes",
         "task": "Scan recent data for anomalies.",
-        # Talks to a flaky upstream. Five failures in a row and this one stops.
-        # The other two carry on regardless.
+        # Flaky upstream: five failures in a row stop this job, the others carry on.
         "max_consecutive_errors": 5,
     },
     {"agent": digest_agent,  "interval": "1hour", "task": "Summarise the last hour."},
@@ -96,7 +95,7 @@ CronJob.run_many([
 ```
 
 <Note>
-This isolation depends on the failure model: a task that raises is logged and retried on the next tick rather than killing its scheduler thread. Without that, one agent raising once would silently take itself offline while the fleet appeared healthy.
+This isolation depends on the failure model: a task that raises is logged and retried at its next interval rather than killing its scheduler thread. Without that, one agent raising once would silently take itself offline while the fleet appeared healthy.
 </Note>
 
 If any job exhausts its budget, `run_many` raises `CronJobExecutionError` once blocking ends, naming which jobs gave up and why.
@@ -121,7 +120,7 @@ CronJob.stop_many(jobs)
 
 ## Verifying cadence
 
-Cadences are independent and accurate. Running three agents at 1s, 2s and 3s for six seconds produces roughly 6, 3 and 2 executions:
+Cadences are independent. Running three agents at 1s, 2s and 3s for six seconds produces roughly 6, 3 and 2 executions. `stop_many` stops the jobs one after another, so a job can fit in one extra run while the ones before it shut down:
 
 ```python
 import time
@@ -144,7 +143,7 @@ jobs = CronJob.run_many([
 time.sleep(6.2)
 CronJob.stop_many(jobs)
 
-print(fast.runs, mid.runs, slow.runs)   # 6 3 2
+print(fast.runs, mid.runs, slow.runs)   # about 6 3 2
 ```
 
 This runs without API keys, since `Echo` stands in for a real agent. Anything exposing `run(task=...)` works.

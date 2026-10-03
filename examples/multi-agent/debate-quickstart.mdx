@@ -68,7 +68,7 @@ topic = "Should artificial intelligence be regulated by governments?"
 # Run the debate
 result = debate.run(task=topic)
 
-# Print the refined answer
+# With the default output_type this is the debate text; use output_type="final" for only the refined answer
 print(result)
 ```
 
@@ -200,12 +200,14 @@ for topic, result in zip(topics, results):
 
 ### Output Types
 
+The conversation records each round's Pro argument, Con argument, and judge synthesis (each agent's answer, not its full transcript). The task itself is not recorded.
+
 | Value | Description |
 |-------|-------------|
-| `"str-all-except-first"` | Formatted string, excluding initialization (default) |
-| `"str"` | All messages as formatted string |
-| `"dict"` | Messages as dictionary |
-| `"list"` | Messages as list |
+| `"str-all-except-first"` | The recorded answers joined by newlines, without speaker names (default). Because the task is not in the conversation, this skips the first message: the Pro agent's round-1 argument |
+| `"str"` / `"all"` | Every message as `Name: content` text |
+| `"dict"` / `"list"` | A list of role/content message dicts |
+| `"final"` | Only the judge's last synthesis, the refined answer |
 
 ---
 

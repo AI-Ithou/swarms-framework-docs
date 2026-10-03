@@ -38,7 +38,7 @@ The harness follows this workflow:
 3. **Execution**: Generator produces concrete output and self-assesses before handoff
 4. **Evaluation**: Evaluator scores output per-criterion with hard thresholds -- any criterion below its threshold fails the step
 5. **Feedback Loop**: On failure, Generator receives scores + trajectory signal (refine or pivot) and retries
-6. **All state on disk**: The shared state file is the single append-only record of the entire run
+6. **All state on disk**: The shared state file is the single append-only record of the run. Each `run()` call rewrites it from scratch
 
 ## Installation
 
@@ -95,23 +95,23 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="max_retries_per_step" type="int" default="3">
-  Max evaluation failures before advancing
+  Retries allowed after a failed evaluation before the harness advances to the next step. Each step gets up to `max_retries_per_step + 1` attempts; `0` means one attempt
 </ParamField>
 
 <ParamField path="working_directory" type="str" default="os.getcwd()">
-  Directory where output is produced
+  Directory where output is produced. Created if it does not exist
 </ParamField>
 
 <ParamField path="shared_state_path" type="str" default="None">
-  Path for the shared state file (auto-generated if None)
+  Path for the shared state file. Defaults to `{working_directory}/pge_shared_state_{id}.md`
 </ParamField>
 
 <ParamField path="default_thresholds" type="Dict[str, float]" default="{}">
-  Fallback score thresholds by criterion name
+  Fallback score thresholds by criterion name, on the same 1-10 scale the Evaluator scores with. Criterion names are matched in lowercase. See [Pass and fail rules](#pass-and-fail-rules)
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict">
-  Format for output (dict, str, list, final, json, yaml)
+  Format for the returned conversation history, such as `"dict"`, `"str"`, `"list"`, `"final"`, `"json"` or `"yaml"`
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -131,15 +131,15 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="planner_agent" type="Agent" default="None">
-  Pre-configured Agent for planning
+  Pre-configured Agent for planning. When set, `planner_model_name` and `planner_system_prompt` are not applied to it
 </ParamField>
 
 <ParamField path="generator_agent" type="Agent" default="None">
-  Pre-configured Agent for generation (e.g., with file/code tools)
+  Pre-configured Agent for generation (e.g., with file/code tools). When set, `generator_model_name` and `generator_system_prompt` are not applied to it
 </ParamField>
 
 <ParamField path="evaluator_agent" type="Agent" default="None">
-  Pre-configured Agent for evaluation (e.g., with Playwright MCP)
+  Pre-configured Agent for evaluation (e.g., with Playwright MCP). When set, `evaluator_model_name` and `evaluator_system_prompt` are not applied to it
 </ParamField>
 
 **Raises:**
@@ -155,13 +155,17 @@ pip install -U swarms
 Execute the full PGE harness pipeline from a short prompt to completed output.
 
 ```python
-def run(self, task: str) -> Any
+def run(self, task: str, *args, **kwargs) -> Any
 ```
 
 **Parameters:**
 - `task` (str): A short natural-language description of the desired task
 
 **Returns:** Formatted conversation history according to `output_type`
+
+**Raises:** `ValueError` if `task` is empty or not a string. Any error raised by an agent is logged and re-raised.
+
+Each call clears the conversation and rewrites the shared state file, so reusing one harness for several tasks does not carry the previous task forward.
 
 After `run()` completes, access `harness.last_result` for structured metadata:
 
@@ -265,8 +269,8 @@ from swarms import EvaluationReport
 
 report = EvaluationReport(
     step_number=1,
-    criterion_scores={"completeness": 0.9, "accuracy": 0.85},
-    criterion_thresholds={"completeness": 0.8, "accuracy": 0.8},
+    criterion_scores={"completeness": 9.0, "accuracy": 8.5},
+    criterion_thresholds={"completeness": 7.0, "accuracy": 8.0},
     passed=True,
     actionable_feedback="Tighten the second paragraph for clarity",
     summary="Meets thresholds; minor stylistic notes",
@@ -279,7 +283,7 @@ report = EvaluationReport(
 </ParamField>
 
 <ParamField path="criterion_scores" type="Dict[str, float] | None" default="None">
-  Map of criterion name to score, typically in `[0, 1]`.
+  Map of lowercased criterion name to score, on the Evaluator's 1-10 scale.
 </ParamField>
 
 <ParamField path="criterion_thresholds" type="Dict[str, float] | None" default="None">
@@ -299,8 +303,10 @@ report = EvaluationReport(
 </ParamField>
 
 <ParamField path="raw_evaluation" type="str" default='""'>
-  Unparsed Evaluator output, retained for debugging.
+  Unparsed Evaluator output. On a retry, this full text is what the Generator receives as feedback.
 </ParamField>
+
+All three classes are plain Python classes with a `to_dict()` method. `EvaluationReport.to_dict()` leaves out `raw_evaluation`.
 
 ### HarnessResult
 
@@ -310,9 +316,9 @@ Final result container — populated after `run()` and accessible via `harness.l
 from swarms import HarnessResult
 
 result = HarnessResult(
-    output_path="runs/2026-05-28/plan.md",
+    output_path="pge_shared_state_example.md",
     plan="...",
-    step_logs=[{"step": 1, "passed": True}, ...],
+    step_logs=[{"step_number": 1, "contract": None, "evaluations": [], "retries": 0, "passed": True}],
     total_duration=42.7,
     total_steps_completed=3,
     total_retries=1,
@@ -320,7 +326,7 @@ result = HarnessResult(
 ```
 
 <ParamField path="output_path" type="str" default='""'>
-  Where the harness wrote artifacts (plan, logs, final output).
+  Path to the shared state file, which holds the plan, every contract, work log and evaluation, and the final summary.
 </ParamField>
 
 <ParamField path="plan" type="str" default='""'>
@@ -328,7 +334,7 @@ result = HarnessResult(
 </ParamField>
 
 <ParamField path="step_logs" type="List[Dict[str, Any]] | None" default="None">
-  Per-step structured log: which Generator/Evaluator turns ran, scores, retries.
+  One dict per step with `step_number`, `contract` (the `StepContract` as a dict), `evaluations` (one `EvaluationReport` dict per attempt), `retries` and `passed`.
 </ParamField>
 
 <ParamField path="total_duration" type="float" default="0.0">
@@ -438,7 +444,7 @@ result = harness.run("Build a todo app with React frontend and FastAPI backend")
 
 ### Custom Thresholds
 
-Provide default score thresholds that apply when the Planner doesn't define them:
+Provide default score thresholds that apply when the Planner doesn't define them. They are used when the Evaluator reports inline scores (`accuracy: 7/10`); a score table row carries its own threshold. See [Pass and fail rules](#pass-and-fail-rules):
 
 ```python
 from swarms import PlannerGeneratorEvaluator
@@ -460,10 +466,15 @@ result = harness.run("Write a technical specification for a rate-limiting middle
 
 ### Shared State File
 
-All inter-agent communication flows through a single append-only markdown file. Each section is timestamped and labeled:
+All inter-agent communication flows through a single append-only markdown file. Each agent call receives the full file pasted into its task, and its reply is appended as a new timestamped, labeled section:
 
 ```
 # PGE Harness Shared State
+
+**Harness ID**: planner-generator-evaluator-...
+**Created**: 2026-03-25 10:30:00
+
+---
 
 ## User Prompt
 [original prompt]
@@ -487,16 +498,42 @@ All inter-agent communication flows through a single append-only markdown file. 
 ---
 ### [STEP 1 EVALUATION] (2026-03-25 10:31:00)
 [Evaluator's per-criterion scores, findings, and feedback]
+
+---
+### [STEP 1 WORK LOG (Retry 1)] (2026-03-25 10:31:30)
+[Generator's revised output, if the step failed]
+
+---
+### [HARNESS SUMMARY] (2026-03-25 10:40:00)
+[Steps passed, total retries, elapsed time, shared state path]
 ```
+
+### Contract negotiation
+
+Before each step, the Generator proposes a contract and the Evaluator reviews it. The contract counts as approved when the review contains "approved" and not "amendments required". Execution proceeds either way: an unapproved review is kept as the contract's `amendments`, and it stays in the shared state for the Generator to read.
+
+### Step count
+
+The harness reads the number of steps from the plan: the highest `Step N` it finds, else the highest numbered list item, else 3. The result is capped at `max_steps`.
+
+### Pass and fail rules
+
+The Evaluator's reply is parsed in this order:
+
+1. **Score table rows** of the form `| criterion | score | threshold | PASS/FAIL |`. Each score is compared with the threshold in its own row.
+2. **Inline scores** such as `Clarity: 7/10` or `Clarity: 7 out of 10`. Each score is compared with the plan's threshold for that criterion. Plan thresholds come from the Planner's criteria table, layered over `default_thresholds`. A criterion with no threshold uses `6.0`.
+3. **No scores found**: an `Overall Status: PASS` or `Overall Status: FAIL` line decides. If there is none, the step passes.
+
+Any criterion below its threshold fails the step. On a retry, the Generator receives the Evaluator's full reply as feedback.
 
 ### Refine vs. Pivot
 
-When a step fails evaluation, the harness computes a score trajectory across retries:
+When a step fails evaluation, the harness compares the average score of the last two evaluations for that step:
 
 - **Scores improving** -- REFINE: keep the current direction, fix specific issues
 - **Scores declining or stagnant** -- PIVOT: take a fundamentally different approach
 
-This signal is passed to the Generator alongside the Evaluator's feedback.
+This signal is passed to the Generator alongside the Evaluator's feedback. It needs two scored evaluations, so it first appears on the second retry.
 
 ### Evaluation Criteria
 

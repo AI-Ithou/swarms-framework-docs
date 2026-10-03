@@ -117,8 +117,8 @@ icon: "circle-question"
 
     3. **Verify installation:**
        ```python
-       from importlib.metadata import version
-       print(version("swarms"))
+       import swarms
+       print(swarms.__version__)
        ```
 
     4. **Check for virtual environment conflicts:**
@@ -306,7 +306,7 @@ icon: "circle-question"
        ```python
        agent = Agent(
            agent_name="AdvancedAgent",
-           model_name="claude-sonnet-4-6",  # More capable than gpt-4o-mini
+           model_name="claude-sonnet-4-6",
        )
        ```
 
@@ -355,8 +355,8 @@ icon: "circle-question"
        ```python
        # Spread load across providers
        agent1 = Agent(model_name="gpt-5.4")  # OpenAI
-       agent2 = Agent(model_name="claude-sonnet-4")  # Anthropic
-       agent3 = Agent(model_name="groq/llama3-8b")  # Groq
+       agent2 = Agent(model_name="claude-sonnet-4-6")  # Anthropic
+       agent3 = Agent(model_name="groq/llama-3.1-8b-instant")  # Groq
        ```
 
     3. **Implement exponential backoff:**
@@ -389,8 +389,8 @@ icon: "circle-question"
     2. **Choose faster models:**
        ```python
        # Fast models
-       agent = Agent(model_name="gpt-5.4")  # Faster than gpt-4o
-       agent = Agent(model_name="groq/llama3-8b")  # Very fast
+       agent = Agent(model_name="gpt-5.4-mini")  # Smaller and faster than gpt-5.4
+       agent = Agent(model_name="groq/llama-3.1-8b-instant")  # Very fast
        ```
 
     3. **Reduce max_loops:**
@@ -400,7 +400,7 @@ icon: "circle-question"
 
     4. **Use streaming for faster perceived response:**
        ```python
-       agent = Agent(stream=True)
+       agent = Agent(streaming_on=True)
        ```
 
     5. **Optimize prompts** to be more concise
@@ -584,13 +584,11 @@ icon: "circle-question"
 
     2. **Metrics Collection:**
        - Track execution time
-       - Monitor token usage
+       - Monitor token usage with `agent.usage` (see [Token usage](/agents/token-usage))
        - Count errors and retries
 
-    3. **Integration with Observability Tools:**
-       - Datadog
-       - New Relic
-       - Prometheus + Grafana
+    3. **Tracing:**
+       Swarms emits OpenTelemetry spans for agent and swarm runs, on by default. See [Telemetry](/deployment/telemetry) for what is captured and how to opt out.
 
     4. **Dashboard:**
        ```python
@@ -605,20 +603,24 @@ icon: "circle-question"
   <Accordion title="How do I handle errors and failures?">
     Error handling best practices:
 
-    1. **Enable Retry Logic:**
+    1. **Enable Retry Logic and Fallback Models:**
        ```python
        agent = Agent(
-           retry_attempts=3
+           model_name="claude-sonnet-4-6",
+           retry_attempts=3,
+           fallback_models=["claude-sonnet-4-6", "gpt-5.4"],
        )
        ```
 
     2. **Use Try-Except Blocks:**
        ```python
+       from swarms import AgentLLMError
+
        try:
            result = agent.run("Task")
-       except Exception as e:
+       except AgentLLMError as e:
+           # Raised once every retry on every model has failed
            logger.error(f"Agent failed: {e}")
-           # Fallback logic
        ```
 
     3. **Implement Fallbacks:**
@@ -629,6 +631,8 @@ icon: "circle-question"
            except Exception:
                return fallback_agent.run(task)
        ```
+
+       For multi-agent systems, `SwarmRouter(fallback_swarms=[...])` falls back to another swarm architecture. See [Production best practices](/deployment/production-best-practices).
 
     4. **Validate Inputs:**
        ```python

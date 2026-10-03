@@ -7,7 +7,7 @@ icon: 'magnifying-glass-arrow-right'
 Tool definitions are part of the prompt. They are re-sent on every request and they sit inside the cached prefix, so a large tool set is paid for continuously. Dynamic tool loading keeps your tools registered and executable but **absent from the schema list sent to the model**, exposing a single `tool_search` tool that loads them on demand.
 
 <Info>
-The 16 built-in autonomous-loop tools alone are roughly 2,600 tokens per request, and a single MCP server can add 40 more tools on top. Selection accuracy also falls as the list grows — a model choosing among 80 tools chooses worse than one choosing among 8.
+The 17 built-in autonomous-loop tools alone are roughly 2,500 tokens per request, and a single MCP server can add 40 more tools on top. Selection accuracy also falls as the list grows — a model choosing among 80 tools chooses worse than one choosing among 8.
 </Info>
 
 ## How It Works
@@ -37,7 +37,7 @@ A deferred tool costs one extra round trip. With `max_loops=1` the model can sea
 
 ## Enabling It
 
-`dynamic_tools` is a constructor parameter on `Agent` and is **`True` by default**.
+`dynamic_tools` is a constructor parameter on `Agent` and is **`False` by default**. Pass `dynamic_tools=True` to opt in.
 
 ```python
 from swarms import Agent
@@ -61,9 +61,11 @@ agent = Agent(
 result = agent.run("What should I pack for Paris next week, and what is 500 USD in euros?")
 ```
 
-<ParamField path="dynamic_tools" type="bool" default="True">
-  Defer tool schemas behind `tool_search` instead of sending them all on every request. Set to `False` to restore classic eager registration, where every tool schema ships with every call.
+<ParamField path="dynamic_tools" type="bool" default="False">
+  Defer tool schemas behind `tool_search` instead of sending them all on every request. Leave it `False` for classic eager registration, where every tool schema ships with every call.
 </ParamField>
+
+The agent's [`ToolManager`](/api/tool-manager) builds the catalog at construction (`agent.tool_manager.setup_dynamic_tools()`) and answers each `tool_search` call (`agent.tool_manager.tool_search_tool()`).
 
 ### When Deferral Actually Activates
 
@@ -72,7 +74,7 @@ Setting `dynamic_tools=True` on its own does nothing. Deferral needs something t
 | Condition | Meaning |
 | --- | --- |
 | `tools` is set | You passed local Python callables |
-| `mcp_enabled` | You passed `mcp_url`, `mcp_urls`, or `mcp_config` |
+| `mcp_enabled` | You passed `mcp_url`, `mcp_urls`, `mcp_config`, or `mcp_configs` |
 | `max_loops == "auto"` | The autonomous loop's built-in tools are deferred |
 
 If none apply, `agent.tool_loader` stays `None` and no catalog is built.
@@ -163,7 +165,7 @@ With `max_loops="auto"`, the loop's own tools are deferred too — but the contr
 
 **Always loaded:** `create_plan`, `think`, `subtask_done`, `complete_task`, `respond_to_user`.
 
-**Deferred into the catalog:** `create_file`, `update_file`, `read_file`, `list_directory`, `delete_file`, `run_bash`, `grep`, `create_sub_agent`, `assign_task`, `check_sub_agent_status`, `cancel_sub_agent_tasks`, plus every tool you passed in `tools`.
+**Deferred into the catalog:** `create_file`, `update_file`, `read_file`, `list_directory`, `delete_file`, `run_bash`, `grep`, `glob`, `create_sub_agent`, `assign_task`, `check_sub_agent_status`, `cancel_sub_agent_tasks`, plus every tool you passed in `tools`.
 
 ### Plan-Based Pre-Warming
 
@@ -218,14 +220,13 @@ agent = Agent(
 result = agent.run("What is the architecture of the kyegomez/swarms repository?")
 ```
 
-MCP deferral is **lazy** — the server is contacted while the LLM is being built, not at construction. To inspect the catalog before running, build the LLM yourself:
+The server is contacted when the agent builds its LLM, which happens at the end of construction. The catalog is ready as soon as the agent exists:
 
 ```python
-agent.llm = agent.llm_handling()
 print(agent.tool_loader.deferred_names)
 ```
 
-The fetch happens once per agent and is cached, so rebuilding the LLM does not re-contact the server. If the server is unreachable, the agent still builds: the failure is logged, zero tools are deferred, and `tool_search` simply has nothing to find.
+The fetch happens once per agent and is cached, so rebuilding the LLM or the loader does not re-contact the server. If the server is unreachable, the agent still builds: the failure is logged, zero tools are deferred, and `tool_search` simply has nothing to find.
 
 <Warning>
 MCP entries are registered as schemas with no local callable, so they never appear in `loader.handlers()`. They are dispatched through the MCP manager instead. This is by design — do not treat an empty `handlers()` as a sign that MCP tools failed to load.
@@ -242,9 +243,9 @@ Every load changes the tool array, which invalidates the provider's cached promp
 If you use `prompt_caching=True`, prefer `select:` with a full list of names, or lean on plan-based pre-warming, so the tool array settles early and stays put for the rest of the run.
 </Tip>
 
-## Turning It Off
+## Eager registration (the default)
 
-Set `dynamic_tools=False` for classic eager registration — every schema ships with every request, and `agent.tool_loader` is `None`.
+With `dynamic_tools=False`, the default, every schema ships with every request and `agent.tool_loader` is `None`.
 
 ```python
 agent = Agent(
@@ -282,11 +283,11 @@ Prefer eager registration when:
   </Accordion>
 
   <Accordion title="tools_list_dictionary is owned by the loader">
-    Once deferral is active, `tools_list_dictionary` becomes an *output* of the loader — it is overwritten every time a search loads something. Schemas you append to it after construction are clobbered. Register them with `agent.defer_tool_schemas([...])` instead.
+    Once deferral is active, `tools_list_dictionary` becomes an *output* of the loader — it is overwritten every time a search loads something. Schemas you append to it after construction are clobbered. Register them with `agent.tool_manager.defer_tool_schemas([...])` instead.
   </Accordion>
 
   <Accordion title="setup_dynamic_tools rebuilds from scratch">
-    Calling `setup_dynamic_tools()` discards the existing loader, including which tools were already marked loaded. Autonomous agents call it twice by design. MCP schemas survive via an internal cache; anything you registered manually must be re-added with `defer_tool_schemas()`.
+    Calling `agent.tool_manager.setup_dynamic_tools()` builds a new loader, so your own tools go back to deferred. The autonomous loop calls it at the start of every run. Schemas already in the tool list, such as the handoff tool, stay always loaded, and MCP schemas are refilled from an internal cache. Schemas you registered manually and that were never loaded are dropped; re-add them with `agent.tool_manager.defer_tool_schemas()`.
   </Accordion>
 
   <Accordion title="Handoffs are never deferred">
@@ -297,6 +298,9 @@ Prefer eager registration when:
 ## Next Steps
 
 <CardGroup cols={2}>
+  <Card title="ToolManager" icon="screwdriver-wrench" href="/api/tool-manager">
+    The agent component that builds the catalog and runs tool_search
+  </Card>
   <Card title="Dynamic Tool Examples" icon="code" href="/examples/tools/dynamic-tool-usage">
     Runnable end-to-end examples for local tools, MCP, and the autonomous loop
   </Card>
@@ -314,5 +318,6 @@ Prefer eager registration when:
 ## Reference
 
 - Loader: `swarms/tools/dynamic_tool_loader.py`
-- Agent parameter and activation: `swarms/structs/agent.py` (`dynamic_tools`, `setup_dynamic_tools`, `defer_tool_schemas`, `defer_mcp_tools`)
+- Agent parameter: `swarms/structs/agent.py` (`dynamic_tools`)
+- Activation, deferral, and search handling: `swarms/agents/tool_manager.py` (`ToolManager.load_tools`, `setup_dynamic_tools`, `defer_tool_schemas`, `defer_mcp_tools`, `tool_search_tool`)
 - Autonomous-loop control tools and pre-warming: `swarms/agents/autonomous_loop.py`

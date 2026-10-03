@@ -12,7 +12,9 @@ icon: "rotate"
 turn t -> agents[t % N]    for t in range(max_loops * N)
 ```
 
-Every agent reads the full conversation transcript accumulated by the agents that spoke before it, and each agent receives exactly `max_loops` turns. Before each turn the swarm injects a role header telling the agent its position, the current loop, the previous/next speaker, and the other participants, then asks it to build on the prior contribution.
+Every agent reads the full conversation accumulated by the agents that spoke before it, and each agent receives exactly `max_loops` turns. Before each turn the swarm injects a role header telling the agent its position, the current loop, the previous/next speaker, and the other participants, then asks it to build on the prior contribution.
+
+Each `run` starts from an empty conversation, so a reused swarm never carries an earlier task's transcript.
 
 <Note>
   Earlier versions of `RoundRobinSwarm` shuffled agents randomly each loop and supported `callback` / `max_retries` parameters. Those are **removed** — the order is now strictly deterministic and those parameters no longer exist.
@@ -74,7 +76,7 @@ RoundRobinSwarm(
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="final">
-  Output format applied to the conversation history. Common values: `"final"` (last message only), `"list"`, `"dict"`, `"str"`, `"json"`.
+  Output format applied to the conversation history. Common values: `"final"` (last message only), `"list"`, `"dict"`, `"str"`, `"json"`. The conversation records timestamps and message IDs, so `"str"` lines carry a timestamp and `"dict"` entries carry extra fields.
 </ParamField>
 
 ## Methods
@@ -88,10 +90,10 @@ def run(self, task: str, *args, **kwargs) -> Union[str, dict, list]
 ```
 
 <ParamField path="task" type="str" required>
-  The task to execute. Posted as the opening `User` message that the first agent responds to.
+  The task to execute. The conversation is cleared, then the task is posted as the opening `User` message that the first agent responds to.
 </ParamField>
 
-`*args` / `**kwargs` are forwarded to each underlying `agent.run()` call.
+`*args` / `**kwargs` are forwarded to each underlying `agent.run()` call. The swarm passes `messages=` itself, so do not pass that keyword.
 
 **Returns:** the task result formatted per `output_type`.
 
@@ -101,7 +103,7 @@ def run(self, task: str, *args, **kwargs) -> Union[str, dict, list]
 
 ### `run_batch(tasks)`
 
-Execute multiple tasks sequentially. Each task runs through its own full round-robin cycle.
+Execute multiple tasks sequentially. Each task runs through its own full round-robin cycle, starting from an empty conversation.
 
 ```python
 def run_batch(self, tasks: List[str]) -> List[Union[str, dict, list]]
@@ -193,16 +195,16 @@ for i, result in enumerate(results):
 
 ## How It Works
 
-1. **Opening message** — the user task is added to the conversation as the first `User` message.
+1. **Opening message** — the conversation is cleared and the user task is added as the first `User` message.
 2. **Deterministic schedule** — for `max_loops` loops, the swarm iterates `agents` in insertion order: turn `t` goes to `agents[t % N]`.
-3. **Full context** — before each turn, the current full transcript is read and passed to the agent.
+3. **Full context as typed turns** — before each turn, the whole conversation is passed to the agent as chat messages: the task as a `user` turn, the agent's own earlier replies as `assistant` turns, and every other agent's replies as `user` turns prefixed with the speaker's name.
 4. **Role header** — a per-turn header (see below) tells the agent its position, loop, previous/next speaker, and peers.
-5. **Collaborative reply** — the agent is asked to build on the prior speaker's contribution (or address the task directly if it opens), and its response is appended to the transcript.
+5. **Collaborative reply** — the agent is asked to build on the prior speaker's contribution (or address the task directly if it opens). Its final answer, not its whole transcript, is appended to the conversation under its name.
 6. **Formatted output** — after all loops complete, the conversation is returned per `output_type`.
 
 ## Per-turn prompt
 
-Each agent receives a generated header and a standing instruction, produced by `build_turn_header` and `build_collaborative_task`. The running transcript is **not** concatenated into this prompt string — `run()` calls `build_collaborative_task(conversation_context="", turn_header=turn_header)`, so the prior-turns transcript is delivered separately to the agent via the `messages` argument of `agent.run()`, not as literal text in the task prompt:
+Each agent receives a generated header and a standing instruction, produced by `build_turn_header` and `build_collaborative_task`. The running transcript is **not** concatenated into this prompt string — `run()` calls `build_collaborative_task(conversation_context="", turn_header=turn_header)`, so the prior turns are delivered separately as typed chat messages via the `messages` argument of `agent.run()`, not as literal text in the task prompt:
 
 ```
 You are Analyst, agent 1 of 3 in loop 1 of 2. Previous speaker:
@@ -219,7 +221,7 @@ Your response:
 ## Features
 
 - **Deterministic order** — agents always speak in declared insertion order, identically every loop.
-- **Full context** — each agent sees the complete transcript accumulated so far.
+- **Full context** — each agent sees the complete conversation so far, with its own replies kept distinct from its peers'.
 - **Collaborative prompting** — agents are told their position and neighbors and asked to build on prior turns.
 - **Flexible output** — choose `"final"`, `"list"`, `"dict"`, `"str"`, or `"json"`.
 - **Batch processing** — `run_batch` runs many tasks, one full cycle each.

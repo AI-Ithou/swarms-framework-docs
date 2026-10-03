@@ -1,0 +1,334 @@
+---
+title: "Autonomous Mode"
+description: "Run an agent with max_loops=\"auto\" so it plans, works through subtasks with built-in tools, and writes its own final summary"
+icon: "robot"
+---
+
+Set `max_loops="auto"` and the agent stops running a fixed number of loops. Instead, `agent.run()` hands the task to the autonomous loop. The agent writes a plan, works through it one subtask at a time with built-in tools and your own, and finishes with a summary.
+
+The loop lives in `swarms/agents/autonomous_loop.py` (`AutonomousAgentLoop`). Its tool schemas, prompts and tool handlers live in `swarms/structs/autonomous_loop_utils.py`.
+
+## Quick start
+
+```python
+from swarms import Agent
+
+agent = Agent(
+    agent_name="Market-Researcher",
+    agent_description="Plans and writes short market research briefs",
+    model_name="gpt-5.4",
+    max_loops="auto",
+    output_type="final",
+)
+
+summary = agent.run(
+    "Write a one-page brief on the vector database market to vector_db_brief.md. "
+    "Keep the plan to three subtasks."
+)
+print(summary)
+```
+
+`output_type="final"` returns only the closing summary. With the default, `"str-all-except-first"`, you get the whole conversation as a string. See [Return value](#return-value).
+
+## How a run works
+
+Every call to `run()` starts a fresh loop. The plan, subtask statuses and think counter are reset, and the request transcript starts from the `messages` you pass to `run()` (if any) followed by the task.
+
+<Note>
+  Only the task and `run(messages=...)` seed the transcript. Turns from earlier runs, the constructor's `messages`, and a `MEMORY.md` preload are kept in `agent.short_memory`, but autonomous runs do not send them. Pass prior turns to `run(messages=...)` when the agent should continue from them.
+</Note>
+
+<Steps>
+  <Step title="Planning">
+    The agent sends the task with a planning prompt and asks the model to call `create_plan`. Each step in the plan has a `step_id`, a `description`, a `priority` (`low`, `medium`, `high` or `critical`) and optional `dependencies`. Dependencies that name an unknown step, or the step itself, are dropped with a warning.
+
+    Planning ends on the first response that contains a tool call. Only `create_plan` and, when `handoffs` is set, `handoff_task` run in this phase. If no attempt produces a tool call within `max_planning_attempts` requests, the run raises an error.
+  </Step>
+  <Step title="Subtask execution">
+    Your own `tools` are added to the tool list after planning. The loop then picks the first pending subtask whose dependencies have all completed, in plan order. `priority` is recorded but does not reorder the plan. A subtask whose dependency failed or was skipped is marked `skipped`.
+
+    For each subtask the agent sends one execution prompt, then iterates. Each iteration checks the context compressor, calls the model once, and runs every tool call in the reply. A subtask ends when:
+
+    - the model calls `subtask_done` with that subtask's `step_id` (`success=true` marks it `completed`, `false` marks it `failed`)
+    - its status changes to `completed` or `failed` some other way
+    - it uses up `max_subtask_loops` iterations, in which case it is marked `failed` with the reason recorded
+
+    When a built-in tool raises, the run continues. The error goes back to the model as that tool's result (`ERROR: ... failed with ...`) so it can correct itself on the next turn. Calls to your own tools that fail are retried up to `tool_retry_attempts` times.
+
+    The model can call `create_plan` again at any point to revise the plan. Steps are merged by `step_id`. Finished steps keep their status and summary, pending steps are updated, and pending steps left out of the new list are dropped.
+
+    Execution ends when every subtask is `completed`, `failed` or `skipped`, when no subtask can run, or once `max_subtask_iterations` subtasks have run. A successful `complete_task` call during execution ends it at once and moves to the summary.
+  </Step>
+  <Step title="Final summary">
+    The agent makes one more model call with a summary prompt that asks for `complete_task`. If the model calls it, a "Task Completion Summary" with a breakdown of every subtask is recorded. If not, the agent assembles a "Task Execution Summary" from the subtask statuses and the model's reply.
+
+    Both paths return the conversation shaped by `output_type`.
+  </Step>
+</Steps>
+
+## Iteration budgets
+
+Three constructor parameters bound the loop. Each must be at least `1`, or `Agent()` raises `ValueError`.
+
+<ParamField path="max_planning_attempts" type="int" default="5">
+  How many requests the planning phase may make to get a plan before the run fails.
+</ParamField>
+
+<ParamField path="max_subtask_iterations" type="int" default="100">
+  Ceiling on how many subtasks the execution phase runs across the whole run. Each pass of the outer loop runs one subtask. Once that many have run, execution stops and the run moves to the final summary. It matters most when the model keeps adding steps by revising the plan.
+</ParamField>
+
+<ParamField path="max_subtask_loops" type="int" default="20">
+  Ceiling on model calls spent inside any one subtask. A subtask that reaches it is marked `failed`, and subtasks that depend on it are skipped.
+</ParamField>
+
+Worst case, a run makes `max_planning_attempts + max_subtask_iterations × max_subtask_loops + 1` model calls. With the defaults that is 5 + 2,000 + 1. Extra calls on top of that come from:
+
+- `tool_call_summary=True` (the default), which summarizes each batch of your own tool results with a separate model call
+- the context compressor, which makes one summarizer call each time it fires
+- sub-agents, which run on their own budgets
+
+The think streak limit is an attribute, not a constructor parameter. `agent.max_consecutive_thinks` defaults to `2`. When the model calls `think` that many times in a row, the loop adds a message telling it to act, then resets the count.
+
+## Built-in tools
+
+These are the tools the loop adds. Relative paths in the file and search tools resolve against the agent's workspace, `agent.workspace.dir`, which is `$WORKSPACE_DIR/agents/{agent-name}-{id12}/`. When `WORKSPACE_DIR` is unset it defaults to `./agent_workspace`. Absolute paths are used as given.
+
+### Control
+
+| Tool | What it does | Arguments |
+| --- | --- | --- |
+| `create_plan` | Creates the plan, or revises it mid-run by merging steps on `step_id` | `task_description`, `steps` |
+| `think` | Records an analysis step. Only offered when `think_tool=True` | `current_state`, `analysis`, `next_actions`, `confidence` |
+| `subtask_done` | Marks a subtask `completed` or `failed` with a summary | `task_id`, `summary`, `success` |
+| `complete_task` | Records the final "Task Completion Summary" and ends the run | `task_id`, `summary`, `success`, `results` (optional), `lessons_learned` (optional) |
+| `respond_to_user` | Prints a message panel (when `print_on=True`) and records it. It does not wait for a reply | `message`, `message_type` (`info`, `question`, `warning`, `error`, `success`) |
+
+### Files
+
+| Tool | What it does | Arguments |
+| --- | --- | --- |
+| `create_file` | Creates a file and any missing parent folders. Refuses to overwrite an existing file | `file_path`, `content` |
+| `update_file` | Replaces or appends to an existing file. Refuses a file that does not exist | `file_path`, `content`, `mode` (`replace` or `append`) |
+| `read_file` | Returns a file's contents, capped by the [output budget](#output-caps) | `file_path` |
+| `list_directory` | Lists a folder's entries with type and size. Empty path lists the workspace root | `directory_path` |
+| `delete_file` | Deletes one file. Refuses directories | `file_path` |
+
+### Search
+
+| Tool | What it does | Arguments |
+| --- | --- | --- |
+| `grep` | Runs `grep` on a file or folder, without a shell, with a 30-second timeout. Output is capped | `pattern`, `path`, `recursive`, `case_insensitive`, `include_line_numbers`, `file_pattern`, `context_lines` |
+| `glob` | Finds files whose names match a pattern, recursively. Returns paths relative to the search root, newest first, so a result can go straight into `read_file`. Output is capped | `pattern`, `path` |
+
+### Shell
+
+| Tool | What it does | Arguments |
+| --- | --- | --- |
+| `run_bash` | Runs a shell command and returns its exit code, stdout and stderr. Output is capped | `command`, `timeout_seconds` (default `60`) |
+
+`run_bash` runs in the Python process's current working directory, not the agent workspace. Before running, it checks each command:
+
+- Commands longer than 512 characters are refused. When the command contains a heredoc or a redirect, the refusal tells the model to write the content with `create_file` or `update_file` instead.
+- Commands that match a blocklist are refused. The blocklist covers recursive `rm`, piping into a shell or interpreter, raw disk writes (including `> /dev/null`), `sudo` and other privilege changes, shutdown and reboot, reading `/etc/passwd`-style files, `curl -d` and similar exfiltration, `printenv`, and redirects into system folders such as `/etc` and `/usr`.
+
+<Warning>
+  The blocklist is a guard, not a sandbox. File tools accept absolute paths and `run_bash` runs with your process's permissions. Run untrusted tasks in a container or a throwaway working directory, or leave `run_bash` and `delete_file` out of `selected_tools`.
+</Warning>
+
+### Sub-agents
+
+| Tool | What it does | Arguments |
+| --- | --- | --- |
+| `create_sub_agent` | Creates one or more sub-agents and caches them on `agent.sub_agents` under IDs like `sub-agent-1a2b3c4d` | `agents` (each with `agent_name`, `agent_description`, optional `system_prompt`) |
+| `assign_task` | Runs tasks on sub-agents through a thread-pool `SubagentRegistry`. Waits for all results by default | `assignments` (each with `agent_id`, `task`, optional `task_id`), `wait_for_completion` |
+| `check_sub_agent_status` | Reports each async task's status, retries and duration for a sub-agent | `agent_name` |
+| `cancel_sub_agent_tasks` | Cancels a sub-agent's pending or running tasks | `agent_name` |
+
+A sub-agent uses the parent's `model_name` and gets the parent's `tools`. It runs with `max_loops=5` when it has tools and `max_loops=1` when it does not, never `"auto"`, so sub-agents cannot start loops of their own. `print_on` and `verbose` follow the parent.
+
+### Tools added by other settings
+
+- `handoff_task`, when `handoffs` is set. The handoff roster is appended to the system prompt.
+- `tool_search`, when `dynamic_tools=True`. Only `create_plan`, `think`, `subtask_done`, `complete_task` and `respond_to_user` stay loaded, and the rest are found on demand. After `create_plan`, up to eight tools that match the plan are loaded ahead of time. See [Dynamic Tool Loading](/agents/dynamic-tools).
+- Tools from your MCP servers (`mcp_url`, `mcp_urls`, `mcp_config`, `mcp_configs`), callable during execution.
+- Your own `tools`, added once planning is done.
+
+## Choose tools with selected_tools
+
+`selected_tools="all"` (the default) offers every built-in tool. Pass a list to keep only the ones you name. The filter applies to built-in tools only. Your own `tools`, MCP tools and `handoff_task` are added regardless.
+
+```python
+from swarms import Agent
+from swarms.structs.autonomous_loop_utils import get_autonomous_loop_tool_names
+
+print(get_autonomous_loop_tool_names())
+
+agent = Agent(
+    agent_name="Read-Only-Analyst",
+    model_name="gpt-5.4",
+    max_loops="auto",
+    selected_tools=[
+        "create_plan",
+        "subtask_done",
+        "complete_task",
+        "read_file",
+        "list_directory",
+        "grep",
+        "glob",
+    ],
+)
+```
+
+<Warning>
+  Keep `create_plan` and `subtask_done` in the list. Without `create_plan` the agent has no way to make a plan. Without `subtask_done` a subtask can only end by using up `max_subtask_loops`, which marks it `failed`. Leaving out `complete_task` is safe: the agent then builds the summary itself.
+</Warning>
+
+Listing `"think"` is not enough to get the think tool. It also needs `think_tool=True`.
+
+## The think tool
+
+<ParamField path="think_tool" type="bool" default="False">
+  Offers the `think` tool in autonomous runs. A `think` call costs a full model round-trip to produce reasoning most models can write inline next to their actions, so it is off by default. When it is off, the system prompt tells the model the tool is unavailable and to reason inline.
+</ParamField>
+
+`thinking_tokens` does not remove the think tool. If you set `think_tool=True` while `thinking_tokens` is set (it defaults to `1024`), the agent logs a suggestion to turn `think_tool` off, because the model already reasons natively.
+
+## Output caps
+
+`read_file`, `run_bash`, `grep` and `glob` cap their output by tokens, counted with the agent's own model tokenizer. The budget is a quarter of `context_length`. When the agent has no context length to share, the budget is 4,096 tokens.
+
+The loop sends its whole transcript on every request, so one oversized result would be paid for on every later call. Cut output ends with a marker such as:
+
+```text
+... (output truncated: showing the first 4000 of 20001 tokens)
+```
+
+The marker tells the model how much it is missing so it can narrow the search. `read_file` still records the file's full length in memory. `list_directory` and your own tools are not capped.
+
+<Tip>
+  `context_length` defaults to the model's input window, which can be very large (over a million tokens for `gpt-5.4`). Set `context_length` lower to tighten both the output caps and the point at which compression fires.
+</Tip>
+
+## Context compression between subtasks
+
+With `context_compression=True` (the default), the loop checks the agent's `ContextCompressor` at the top of every subtask iteration. That is the one point where every tool call has been answered, so the transcript can be replaced safely.
+
+When the conversation reaches 90% of `context_length`, the compressor:
+
+1. Summarizes the conversation with one model call.
+2. Compacts `agent.short_memory` to the summary. With `persistent_memory=True`, it also archives and resets `MEMORY.md`.
+3. Rebuilds the request transcript as the summary plus the prompt for the subtask in progress.
+
+Compression does not run during planning or the final summary. Set `context_compression=False` to turn it off. See [Agent Memory](/agents/agent-memory) for the compressor's settings.
+
+## System prompt
+
+When `max_loops="auto"`, `Agent()` appends the autonomous-loop prompt to your `system_prompt`. That prompt describes the three phases and the control tools. When `think_tool=False`, it ends with a note that the `think` tool is unavailable.
+
+The prompt carries a `Time:` line with the current date and time. It is built when the agent is constructed, not when `swarms` is imported, so each new agent gets the current time. A long-lived agent keeps the time it was built with.
+
+## Streaming
+
+`run_stream()` and `arun_stream()` go through `run()`, so an agent with `max_loops="auto"` enters the autonomous loop when streamed. You receive the text tokens of every model call in the loop: planning, each subtask iteration and the summary.
+
+```python
+from swarms import Agent
+
+agent = Agent(
+    agent_name="Streaming-Planner",
+    model_name="gpt-5.4",
+    max_loops="auto",
+    print_on=False,
+)
+
+for token in agent.run_stream(
+    "Outline a migration plan from REST to gRPC in three subtasks."
+):
+    print(token, end="", flush=True)
+```
+
+You can also pass `streaming_callback` to `run()`, or set it on the agent.
+
+## Return value
+
+`run()` returns `agent.short_memory` shaped by `output_type`, whichever way the summary was produced.
+
+| `output_type` | What you get from an autonomous run |
+| --- | --- |
+| `"final"` or `"last"` | The last message: `complete_task result: Task Completion Summary ...` when the model called `complete_task`, otherwise the "Task Execution Summary" |
+| `"str-all-except-first"` (default) | Every message except the system prompt, as one string, including planning, tool calls and tool results |
+| `"list"`, `"dict"`, `"json"`, `"yaml"` | The full conversation in that format |
+
+## Keep a run bounded
+
+- Lower the budgets. `max_subtask_loops` caps the cost of one stuck subtask. `max_subtask_iterations` caps how many subtasks run.
+- Ask for a small plan in the task itself, for example "Keep the plan to three subtasks."
+- Restrict `selected_tools` to what the task needs.
+- Set `tool_call_summary=False` to skip the extra summary call after each batch of your tools.
+- Set `context_length` to tighten output caps and compression.
+- Point `WORKSPACE_DIR` at a scratch folder, and run `run_bash` tasks from a disposable working directory.
+- Read `agent.usage` after a run to see the provider's token counts for the agent's own model calls. Sub-agents track their own usage. See [Token Usage](/agents/token-usage).
+
+`stopping_condition` and `stopping_func` apply to integer `max_loops` only. The autonomous loop does not check them.
+
+This agent has one custom tool, three iteration budgets and a short tool list:
+
+```python
+from swarms import Agent
+
+
+def get_exchange_rate(base: str, quote: str) -> str:
+    """Return the exchange rate between two currencies.
+
+    Args:
+        base: Currency to convert from, such as USD.
+        quote: Currency to convert to, such as EUR.
+
+    Returns:
+        The rate as a string, or "unknown".
+    """
+    rates = {("USD", "EUR"): 0.92, ("USD", "GBP"): 0.79}
+    return str(rates.get((base.upper(), quote.upper()), "unknown"))
+
+
+agent = Agent(
+    agent_name="FX-Analyst",
+    model_name="gpt-5.4-mini",
+    max_loops="auto",
+    tools=[get_exchange_rate],
+    selected_tools=["create_plan", "subtask_done", "complete_task", "create_file"],
+    max_planning_attempts=2,
+    max_subtask_iterations=5,
+    max_subtask_loops=4,
+    context_length=64000,
+    tool_call_summary=False,
+    output_type="final",
+)
+
+print(agent.run("Convert 250 USD to EUR and GBP, then save the results to fx.md."))
+print(agent.usage)
+```
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Autonomous Looper Tools" icon="screwdriver-wrench" href="/examples/agents/autonomous-looper-tools">
+    Example `selected_tools` setups for common agent roles.
+  </Card>
+  <Card title="Autonomous Looper with Bash" icon="terminal" href="/examples/agents/autonomous-looper-bash">
+    Give an autonomous agent terminal access with `run_bash`.
+  </Card>
+  <Card title="Dynamic Tool Loading" icon="magnifying-glass-arrow-right" href="/agents/dynamic-tools">
+    Defer tool schemas behind `tool_search`.
+  </Card>
+  <Card title="Agent Memory" icon="database" href="/agents/agent-memory">
+    Context compression, `MEMORY.md` and where files are written.
+  </Card>
+  <Card title="ToolManager" icon="toolbox" href="/api/tool-manager">
+    How the agent sets up, parses and runs tool calls.
+  </Card>
+  <Card title="Agent Reference" icon="book" href="/api/agent">
+    Every `Agent` constructor parameter.
+  </Card>
+</CardGroup>

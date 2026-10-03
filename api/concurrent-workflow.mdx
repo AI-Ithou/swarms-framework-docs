@@ -41,6 +41,8 @@ class ConcurrentWorkflow:
         show_dashboard: bool = False,
         autosave: bool = True,
         verbose: bool = False,
+        on_error: str = "store",
+        max_workers: Optional[int] = None,
     )
 ```
 
@@ -63,11 +65,11 @@ class ConcurrentWorkflow:
 </ParamField>
 
 <ParamField path="auto_save" type="bool" default="True">
-  Whether to automatically save workflow metadata
+  Accepted and stored, but never read. Setting it has no effect; use `autosave` to control saving.
 </ParamField>
 
 <ParamField path="output_type" type="str" default="dict-all-except-first">
-  Format for output formatting. Options include "dict-all-except-first", "dict", "list", "str"
+  Format of the returned conversation. Common values: `"dict-all-except-first"` (every agent's message as a `{"role", "content"}` dict, without the user's task), `"dict"` or `"list"` (every message, task included), `"str"` or `"all"` (the transcript as `"role: content"` text), `"str-all-except-first"` (the agents' answers as text) and `"final"` (the last agent's answer). See `SequentialWorkflow` for the full list.
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
@@ -106,6 +108,8 @@ class ConcurrentWorkflow:
 
 Execute all agents concurrently on the given task.
 
+Each call starts with a fresh conversation, so a reused workflow returns only this task's messages. Each agent's final answer is recorded, not its whole transcript, and answers are collected in the order of `agents`, not completion order. With `on_error="store"`, a failed agent is recorded with `"Error: ..."` as its content, under the role `"<agent_name> (failed)"` (or its plain name in dashboard mode). The conversation is autosaved after the run, even when it fails.
+
 <ParamField path="task" type="str" required>
   The task to be executed by all agents
 </ParamField>
@@ -128,14 +132,16 @@ Execute all agents concurrently on the given task.
 
 ### `batch_run(tasks, imgs=None, streaming_callback=None)`
 
-Execute workflow on multiple tasks sequentially.
+Execute workflow on multiple tasks sequentially, running every agent concurrently on each task.
+
+Every task runs in its own conversation, so each result holds only that task's messages. The workflow's own `conversation` is restored afterwards and is left untouched by the batch.
 
 <ParamField path="tasks" type="List[str]" required>
   List of tasks to be executed
 </ParamField>
 
 <ParamField path="imgs" type="Optional[List[str]]" default="None">
-  List of image paths corresponding to each task
+  List of image paths, matched to tasks by index. Tasks past the end of the list run without an image.
 </ParamField>
 
 <ParamField path="streaming_callback" type="Optional[Callable[[str, str, bool], None]]" default="None">
@@ -205,9 +211,13 @@ Display real-time dashboard showing agent status and outputs.
 | `name` | str | Human-readable name for the workflow |
 | `description` | str | Description of the workflow's purpose |
 | `agents` | List[Union[Agent, Callable]] | List of agents to execute concurrently |
-| `agent_statuses` | dict | Dictionary tracking status and output of each agent |
-| `conversation` | Conversation | Conversation object for storing agent interactions |
-| `metadata_output_path` | str | Path for saving workflow metadata |
+| `agent_statuses` | dict | Status (`"pending"`, `"running"`, `"completed"`, `"error"`) and output of each agent, updated in dashboard mode |
+| `conversation` | Conversation | The latest run's conversation; replaced at the start of every `run()` |
+| `on_error` | str | Failure policy, `"store"` or `"raise"` |
+| `max_workers` | Optional[int] | Thread pool size override |
+| `workspace` | WorkspaceManager | Owns the autosave directory |
+| `swarm_workspace_dir` | Optional[str] | Autosave directory; `None` when `autosave=False` |
+| `metadata_output_path` | str | Metadata file name built from the workflow name and ID; nothing is written to it |
 
 ## Usage Examples
 
@@ -349,17 +359,17 @@ result = workflow.run(
 # Different output formats
 workflow_dict = ConcurrentWorkflow(
     agents=[technical_analyst, business_analyst],
-    output_type="dict"  # Returns dict with all agent outputs
+    output_type="dict"  # Every message, including the user's task
 )
 
-workflow_list = ConcurrentWorkflow(
+workflow_str = ConcurrentWorkflow(
     agents=[technical_analyst, business_analyst],
-    output_type="list"  # Returns list of outputs
+    output_type="str"  # Transcript as "role: content" text
 )
 
 workflow_dict_except_first = ConcurrentWorkflow(
     agents=[technical_analyst, business_analyst],
-    output_type="dict-all-except-first"  # Skip first agent in output dict
+    output_type="dict-all-except-first"  # Only the agents' messages, task dropped
 )
 ```
 
@@ -379,7 +389,7 @@ workflow = ConcurrentWorkflow(
 )
 
 result = workflow.run("Analyze market trends")
-# Conversation saved to ./analysis_workspace/swarms/ConcurrentWorkflow/
+# Saved to ./analysis_workspace/swarms/ConcurrentWorkflow/Saved-Analysis-<timestamp>/conversation_history.json
 ```
 
 ## Error Handling
@@ -395,10 +405,9 @@ except ValueError as e:
     print(f"Configuration error: {e}")
 except Exception as e:
     print(f"Execution error: {e}")
-finally:
-    # Cleanup is called automatically
-    pass
 ```
+
+With the default `on_error="store"`, a failing agent does not raise: its error is recorded in the result and the other agents finish. Set `on_error="raise"` to abort the run on the first agent error instead.
 
 ## Dashboard Output Example
 

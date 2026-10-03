@@ -1,6 +1,7 @@
 ---
 title: CronJob
 description: Schedule and run Swarms agents at specified intervals with cron-style scheduling
+icon: clock
 ---
 
 ## Overview
@@ -10,7 +11,7 @@ The **CronJob** class wraps any callable (including Swarms agents) and turns it 
 One `CronJob` binds **one agent** to **one interval**. For several agents on different cadences, use [`run_many`](#run-many).
 
 <Note>
-**Failure model.** A task that raises is logged and retried on the next tick, the way cron behaves. It does not take the schedule down. Set `max_consecutive_errors` to stop a job that is failing every time; when that budget is exhausted the job stops **and** `run()` raises, so a dead schedule is never mistaken for a healthy one.
+**Failure model.** A task that raises is logged, recorded as a failed execution, and retried at the next interval, the way cron behaves. It does not take the schedule down, and a failing task is not retried any faster than its `interval`. Set `max_consecutive_errors` to stop a job that is failing every time; when that budget is exhausted the job stops **and** `run()` raises, so a dead schedule is never mistaken for a healthy one.
 </Note>
 
 ## Constructor
@@ -18,14 +19,13 @@ One `CronJob` binds **one agent** to **one interval**. For several agents on dif
 Create a CronJob instance to schedule recurring agent executions.
 
 ```python
-from swarms.structs.cron_job import CronJob
-from swarms import Agent
+from swarms import Agent, CronJob
 
-# Create an agent
 agent = Agent(
     agent_name="Financial-Analyst",
     system_prompt="You are a financial analyst...",
-    model_name="gpt-4"
+    model_name="gpt-5.4",
+    max_loops=1,
 )
 
 # Create scheduled job
@@ -39,11 +39,11 @@ cron = CronJob(
 ### Parameters
 
 <ParamField path="agent" type="Union[Any, Callable]" default="None">
-  The Swarms Agent instance or callable to be scheduled
+  The Swarms Agent instance or callable to be scheduled. Required: `None` raises `CronJobConfigError`. An object with a callable `run` attribute is called as `agent.run(task=task, **kwargs)`; anything else is called as `agent(task, **kwargs)`
 </ParamField>
 
 <ParamField path="interval" type="str" default="None">
-  The interval string (e.g., "5seconds", "10minutes", "1hour")
+  The interval string (e.g., "5seconds", "10minutes", "1hour"). Must be greater than zero. A malformed or empty value raises `CronJobConfigError` at construction. Leaving it `None` is accepted at construction, but `run()` then raises `CronJobExecutionError`
 </ParamField>
 
 <ParamField path="job_id" type="str" default="None">
@@ -75,7 +75,7 @@ cron = CronJob(
 </ResponseField>
 
 <ResponseField name="execution_count" type="int">
-  Number of times the job has been executed
+  Number of successful executions. Failed executions are counted in `error_count` instead
 </ResponseField>
 
 <ResponseField name="start_time" type="float">
@@ -115,19 +115,25 @@ cron.run(
   Additional parameters to pass to the agent's run method (e.g., `img`, `imgs`, `correct_answer`, `streaming_callback`)
 </ParamField>
 
+<ResponseField name="return" type="schedule.Job">
+  The scheduled job, returned once the schedule stops
+</ResponseField>
+
 **Raises:**
-- `CronJobConfigError`: If agent or interval is not configured
-- `CronJobExecutionError`: If scheduling failed, or if the job gave up after exhausting `max_consecutive_errors`. The message names the failure count and the last error.
+- `CronJobExecutionError`: If scheduling failed (including when no `interval` was configured), or if the job gave up after exhausting `max_consecutive_errors`. The message names the failure count and the last error.
 
 **Behavior:**
 - Schedules the task according to the configured interval
 - Starts the background execution thread
 - Blocks the calling thread until `stop()` is called, `KeyboardInterrupt` is received, or the job exhausts its error budget
-- A task that raises is logged and retried on the next tick; it does not stop the schedule
+- On `KeyboardInterrupt` it stops the job itself and returns normally
+- A task that raises is logged and retried at the next interval; it does not stop the schedule
+
+Calling the instance, `cron("task", **kwargs)`, is the same as `cron.run("task", **kwargs)`.
 
 ### batched_run
 
-Run multiple tasks sequentially with the same schedule.
+Schedule several tasks on the same interval, then block like `run()`.
 
 ```python
 tasks = [
@@ -136,7 +142,7 @@ tasks = [
     "Analyze MSFT stock"
 ]
 
-results = cron.batched_run(tasks)
+jobs = cron.batched_run(tasks)
 ```
 
 <ParamField path="tasks" type="List[str]" required>
@@ -147,9 +153,11 @@ results = cron.batched_run(tasks)
   Additional parameters to pass to the agent's run method
 </ParamField>
 
-<ResponseField name="return" type="List[Any]">
-  List of results from each task execution
+<ResponseField name="return" type="List[schedule.Job]">
+  One scheduled job per task, in input order, returned once the schedule stops. Agent outputs are not collected; use a `callback` to capture them
 </ResponseField>
+
+**Raises:** the same exceptions as `run()`.
 
 **Behavior:** every task in `tasks` is registered on the job's interval *before* blocking, so all of them run on each tick. This is one agent doing several things on one cadence.
 
@@ -168,7 +176,7 @@ A `CronJob` binds one agent to one interval, so a fleet on mixed cadences needs 
 Each job keeps its own scheduler thread, so the agents are **isolated**: one failing does not delay or stop the others, and each carries its own error budget.
 
 ```python
-from swarms.structs.cron_job import CronJob
+from swarms import CronJob
 
 CronJob.run_many([
     {"agent": price_agent,   "interval": "30seconds", "task": "Check BTC price"},
@@ -195,7 +203,7 @@ CronJob.run_many([
 </ResponseField>
 
 **Raises:**
-- `CronJobConfigError`: If `schedules` is empty, or an entry is missing `agent`, `interval` or `task`. The message names the index and the missing key.
+- `CronJobConfigError`: If `schedules` is empty, or an entry is missing (or has an empty) `agent`, `interval` or `task`. The message names the index and the missing key. Entries are checked as they are started, so jobs for earlier entries are already running when a later entry fails.
 - `CronJobExecutionError`: If, once blocking ends, any job had stopped because it exhausted `max_consecutive_errors`
 
 **Non-blocking use:**
@@ -227,11 +235,15 @@ CronJob.stop_many(jobs)
 
 ### start
 
-Manually start the scheduled job.
+Start the background scheduler thread.
 
 ```python
 cron.start()
 ```
+
+<Warning>
+`start()` does not schedule a task. It only starts the thread that runs tasks already scheduled. Use `run()`, `batched_run()` or `run_many()` to schedule work; they call `start()` for you.
+</Warning>
 
 **Raises:**
 - `CronJobExecutionError`: If the job fails to start
@@ -258,6 +270,8 @@ cron.stop()
 - Waits up to 5 seconds for thread to terminate
 - Clears the schedule
 - Logs warning if thread doesn't terminate gracefully
+
+Safe to call from another thread while `run()` is blocking, and safe to call on a job that is already stopped. A clean `stop()` makes `run()` return normally.
 
 ### set_callback
 
@@ -307,7 +321,7 @@ print(stats)
   Dictionary containing:
   - `job_id`: Job identifier
   - `is_running`: Current running status
-  - `execution_count`: Number of executions
+  - `execution_count`: Number of successful executions
   - `start_time`: Start timestamp
   - `uptime`: Time elapsed since start (seconds)
   - `interval`: Configured interval string
@@ -361,8 +375,7 @@ These raise `CronJobConfigError` immediately rather than failing later:
 ### Basic Scheduled Analysis
 
 ```python
-from swarms import Agent
-from swarms.structs.cron_job import CronJob
+from swarms import Agent, CronJob
 
 # Create financial analyst agent
 agent = Agent(
@@ -373,7 +386,7 @@ agent = Agent(
     2. Notable sector performance
     3. Key market drivers
     """,
-    model_name="gpt-4",
+    model_name="gpt-5.4",
     max_loops=1,
     verbose=True
 )
@@ -396,43 +409,38 @@ except KeyboardInterrupt:
 ### Multi-Stock Analysis with Batching
 
 ```python
-from swarms import Agent
-from swarms.structs.cron_job import CronJob
+from swarms import Agent, CronJob
 
-# Create stock analysis agent
 stock_agent = Agent(
     agent_name="Stock-Analyzer",
     system_prompt="Analyze stock performance and provide investment insights.",
-    model_name="gpt-4",
-    max_loops=2
+    model_name="gpt-5.4",
+    max_loops=1
 )
 
-# Schedule every 30 minutes
+def print_analysis(output, task, metadata):
+    print(f"\n{task}:\n{output}")
+    return output
+
+# Every task runs on each 30-minute tick, and the callback prints each result
 cron = CronJob(
     agent=stock_agent,
     interval="30minutes",
-    job_id="stock_analysis"
+    job_id="stock_analysis",
+    callback=print_analysis,
 )
 
-# Analyze multiple stocks
 stocks = ["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA"]
 tasks = [f"Analyze {symbol} stock performance" for symbol in stocks]
 
-try:
-    results = cron.batched_run(tasks)
-    for symbol, result in zip(stocks, results):
-        print(f"\n{symbol} Analysis:")
-        print(result)
-except KeyboardInterrupt:
-    print("Analysis stopped.")
-    cron.stop()
+# Blocks until Ctrl-C or stop()
+cron.batched_run(tasks)
 ```
 
 ### Custom Callback for Output Processing
 
 ```python
-from swarms import Agent
-from swarms.structs.cron_job import CronJob
+from swarms import Agent, CronJob
 import json
 from datetime import datetime
 
@@ -444,7 +452,7 @@ def save_analysis_callback(output, task, metadata):
         "timestamp": datetime.fromtimestamp(metadata["timestamp"]).isoformat(),
         "task": task,
         "analysis": output,
-        "uptime_seconds": metadata.get("start_time", 0)
+        "uptime_seconds": metadata["timestamp"] - metadata["start_time"]
     }
     
     # Save to file
@@ -459,7 +467,8 @@ def save_analysis_callback(output, task, metadata):
 agent = Agent(
     agent_name="Crypto-Analyst",
     system_prompt="Analyze cryptocurrency market trends.",
-    model_name="gpt-4"
+    model_name="gpt-5.4",
+    max_loops=1
 )
 
 # Create cron with callback
@@ -479,8 +488,7 @@ except KeyboardInterrupt:
 ### Image Analysis with Scheduling
 
 ```python
-from swarms import Agent
-from swarms.structs.cron_job import CronJob
+from swarms import Agent, CronJob
 
 # Create vision-capable agent
 vision_agent = Agent(
@@ -508,43 +516,52 @@ except KeyboardInterrupt:
 
 ### Monitoring Execution Stats
 
+`run_many(..., block=False)` schedules the task and returns at once, which leaves your thread free to poll the stats.
+
 ```python
-from swarms import Agent
-from swarms.structs.cron_job import CronJob
+from swarms import Agent, CronJob
 import time
 
 agent = Agent(
     agent_name="Monitor-Agent",
     system_prompt="Monitor system metrics.",
-    model_name="gpt-4"
+    model_name="gpt-5.4",
+    max_loops=1
 )
 
-cron = CronJob(
-    agent=agent,
-    interval="10seconds",
-    job_id="monitor"
+jobs = CronJob.run_many(
+    [{"agent": agent, "interval": "10seconds", "task": "Report current system metrics.", "job_id": "monitor"}],
+    block=False,
 )
-
-# Start the job in background
-cron.start()
+cron = jobs[0]
 
 try:
-    # Monitor stats every 30 seconds
-    while True:
+    while cron.is_running:
         time.sleep(30)
         stats = cron.get_execution_stats()
         print(f"\nExecution Stats:")
         print(f"  Running: {stats['is_running']}")
         print(f"  Executions: {stats['execution_count']}")
+        print(f"  Failures in a row: {stats['consecutive_errors']}")
         print(f"  Uptime: {stats['uptime']:.2f}s")
 except KeyboardInterrupt:
     print("Stopping monitor...")
-    cron.stop()
+finally:
+    CronJob.stop_many(jobs)
 ```
 
 ## Exception Handling
 
-The CronJob class defines several custom exceptions:
+The CronJob module defines several custom exceptions. They are not exported from the top-level `swarms` package, so import them from `swarms.structs.cron_job`:
+
+```python
+from swarms.structs.cron_job import (
+    CronJobConfigError,
+    CronJobError,
+    CronJobExecutionError,
+    CronJobScheduleError,
+)
+```
 
 ### CronJobError
 
@@ -552,7 +569,7 @@ Base exception class for all CronJob errors.
 
 ### CronJobConfigError
 
-Raised for configuration errors.
+Raised at construction for a missing agent or a malformed, empty or zero interval, and by `run_many` for an empty or incomplete schedule list.
 
 ```python
 try:
@@ -563,7 +580,7 @@ except CronJobConfigError as e:
 
 ### CronJobScheduleError
 
-Raised for scheduling related errors.
+Defined for scheduling errors, but `CronJob` does not currently raise it. An invalid interval raises `CronJobConfigError`:
 
 ```python
 try:
@@ -574,13 +591,15 @@ except CronJobConfigError as e:
 
 ### CronJobExecutionError
 
-Raised for execution related errors.
+Raised by `run()` and `batched_run()` when scheduling fails (for example, no `interval` was set) or when the job gives up after `max_consecutive_errors` failures in a row, and by `start()` and `stop()` when the thread cannot be started or stopped. A single failed execution does not raise; it is recorded in the error counters.
 
 ```python
+cron = CronJob(agent=agent, interval="1minute", max_consecutive_errors=5)
+
 try:
-    cron.run(task="")
+    cron.run(task="Fetch the latest reading")
 except CronJobExecutionError as e:
-    print(f"Execution failed: {e}")
+    print(f"Job gave up: {e}")
 ```
 
 ## Best Practices
@@ -589,7 +608,7 @@ except CronJobExecutionError as e:
 2. **Set appropriate intervals**: Choose intervals based on task complexity and resource availability
 3. **Implement callbacks**: Use callbacks for logging, saving results, or sending notifications
 4. **Monitor execution stats**: Regularly check stats to ensure jobs are running as expected
-5. **Handle interrupts**: Always wrap `run()` in try-except to handle KeyboardInterrupt
+5. **Handle interrupts**: `run()` catches `KeyboardInterrupt`, stops the job and returns, so Ctrl-C shuts a job down cleanly
 6. **Consider agent limits**: Ensure your agent's `max_loops` is appropriate for scheduled tasks
 7. **Set an error budget for flaky dependencies**: `max_consecutive_errors` stops a job that is failing every time. Leave it as `None` when a task should retry indefinitely
 8. **Watch `consecutive_errors`, not just `error_count`**: occasional failures on a long-running job are normal; a rising consecutive count is the signal something is actually broken
@@ -614,13 +633,15 @@ The callback function receives a metadata dictionary with:
 {
     "job_id": str,              # Job identifier
     "timestamp": float,         # Unix timestamp of execution
-    "execution_count": int,     # Number of times executed
+    "execution_count": int,     # Successful executions, including this one
     "task": str,                # The task that was run
     "kwargs": dict,             # Additional kwargs passed
     "start_time": float,        # Job start timestamp
     "is_running": bool          # Current running status
 }
 ```
+
+The callback runs only after a successful execution. A failed execution skips it, and a callback that raises is logged and the original output is used.
 
 Use this metadata for:
 - Logging execution history
