@@ -14,7 +14,6 @@ icon: "cubes"
 | `run_agent` | Run a single agent with argument validation and error wrapping |
 | `find_agent_by_name` | Look up an agent by `.agent_name` in a list |
 | `find_agent_by_id` | Look up an agent by `.id` in a list |
-| `find_multiple_agents_by_name` | Look up several agents by `.agent_name` at once |
 | `return_all_agent_names` | Return every agent's `.agent_name` |
 
 `aggregate`, `run_agent`, and `find_agent_by_name` are exported from the top-level `swarms` package. The rest must be imported from `swarms.structs.ma_blocks`.
@@ -29,19 +28,19 @@ pip install -U swarms
 
 ## aggregate()
 
-Run every worker on the same task concurrently, then hand the combined transcript to an aggregator agent for synthesis.
+Run every worker on the same task concurrently, then hand their answers to an aggregator agent for synthesis.
 
 ```python
 def aggregate(
-    workers: List[Callable],
+    workers: List[Agent],
     task: str = None,
     type: HistoryOutputType = "all",
-    aggregator_model_name: str = "anthropic/claude-3-sonnet-20240229",
+    aggregator_model_name: str = "claude-sonnet-5",
 )
 ```
 
-<ParamField path="workers" type="List[Callable]" required>
-  Agents (or any callables matching the `Agent` interface) to run on the task.
+<ParamField path="workers" type="List[Agent]" required>
+  Agents to run on the task. Each worker's `agent_name` labels its turn in the conversation, and its answer is read from its own conversation history.
 </ParamField>
 
 <ParamField path="task" type="str" required>
@@ -52,8 +51,8 @@ def aggregate(
   Output format passed to `history_output_formatter`.
 </ParamField>
 
-<ParamField path="aggregator_model_name" type="str" default='"anthropic/claude-3-sonnet-20240229"'>
-  Model used by the synthesizing aggregator agent.
+<ParamField path="aggregator_model_name" type="str" default='"claude-sonnet-5"'>
+  Model used by the synthesizing aggregator agent. The aggregator sets no `max_tokens`, `temperature` or `top_p`, so it uses the model's own output limit and the provider's sampling defaults.
 </ParamField>
 
 **Raises:** `ValueError` if `task` is `None`, `workers` is `None`, or `workers` is not a list of callables.
@@ -61,10 +60,10 @@ def aggregate(
 **Behavior:**
 
 1. All workers run concurrently via `run_agents_concurrently`.
-2. Each worker's result is added to a shared `Conversation`, keyed by `worker.agent_name`.
-3. A new `Aggregator` agent runs with `AGGREGATOR_SYSTEM_PROMPT` and produces a ~3,000-word synthesis of the worker outputs.
+2. Each worker's final answer, not its full transcript, is added to a new `Conversation` as one turn, with the worker's `agent_name` as the role (`"Worker"` when the name is empty).
+3. A new `Aggregator` agent runs with `AGGREGATOR_SYSTEM_PROMPT` and `output_type="final"`. It receives the worker turns as separate chat messages, each labelled with the worker's name, plus an instruction to write a ~3,000-word synthesis.
 4. The aggregator's response is appended to the conversation.
-5. The full conversation is returned formatted per `type`.
+5. The conversation, one turn per worker plus the aggregator's turn, is returned formatted per `type`.
 
 ## run_agent()
 
@@ -151,29 +150,6 @@ def find_agent_by_id(
 
 **Import:** not exported from top-level `swarms` — use `from swarms.structs.ma_blocks import find_agent_by_id`.
 
-## find_multiple_agents_by_name()
-
-Look up several agents by `.agent_name` in one call.
-
-```python
-def find_multiple_agents_by_name(
-    agents: List[Union[Agent, Callable]],
-    agent_names: List[str],
-) -> List[Agent]
-```
-
-<ParamField path="agents" type="List[Union[Agent, Callable]]" required>
-  List of agent-like objects to search through.
-</ParamField>
-
-<ParamField path="agent_names" type="List[str]" required>
-  Names to match against each agent's `.agent_name`.
-</ParamField>
-
-**Returns:** The subset of `agents` whose `.agent_name` is in `agent_names`. Names with no match are silently dropped — no exception is raised.
-
-**Import:** not exported from top-level `swarms` — use `from swarms.structs.ma_blocks import find_multiple_agents_by_name`.
-
 ## return_all_agent_names()
 
 Return every agent's `.agent_name`.
@@ -211,10 +187,15 @@ analysts = [
 result = aggregate(
     workers=analysts,
     task="Is now a good time to invest in industrial automation stocks?",
+    type="dict",
+    aggregator_model_name="claude-sonnet-4-6",
 )
+
+for message in result:
+    print(message["role"], len(str(message["content"])))
 ```
 
-The returned value is the full conversation — three analyst responses plus the aggregator's synthesis.
+The returned value is the full conversation — three analyst responses plus the aggregator's synthesis. With `type="dict"` it is a list of message dicts with `role` and `content` keys.
 
 ### Safe Single-Agent Run
 
@@ -254,7 +235,6 @@ writer = find_agent_by_name(agents, "Writer")
 from swarms import Agent
 from swarms.structs.ma_blocks import (
     find_agent_by_id,
-    find_multiple_agents_by_name,
     return_all_agent_names,
 )
 
@@ -266,8 +246,6 @@ agents = [
 
 print(return_all_agent_names(agents))
 # ['Researcher', 'Writer', 'Editor']
-
-subset = find_multiple_agents_by_name(agents, ["Writer", "Editor"])
 
 by_id = find_agent_by_id(agents, agents[0].id)
 ```

@@ -18,8 +18,8 @@ pip install -U swarms
 
 | Architecture | Strengths | Weaknesses |
 |--------------|-----------|------------|
-| HHCS | Clear task routing, specialized swarm handling, parallel processing capability, good for complex multi-domain tasks | More complex setup, overhead in routing, requires careful swarm design |
-| Auto Agent Builder | Dynamic agent creation, flexible scaling, self-organizing, good for evolving tasks | Higher resource usage, potential creation overhead, may create redundant agents |
+| HHCS | Clear task routing, specialized swarm handling, concurrent batch processing, good for complex multi-domain tasks | More complex setup, overhead in routing, requires careful swarm design |
+| Auto Agent Builder | Dynamic agent creation, task-specific system prompts and models, good for evolving tasks | Extra LLM call to design the team, roster quality depends on the builder model, you still choose how to run the agents |
 | SwarmRouter | Multiple workflow types, simple configuration, flexible deployment, good for varied task types | Less specialized than HHCS, limited inter-swarm communication, may require manual type selection |
 
 ## Core Architectures
@@ -28,8 +28,8 @@ pip install -U swarms
 
 Hybrid Hierarchical-Cluster Swarm (HHCS) is an architecture that uses a Router Agent to analyze and distribute tasks to other swarms.
 
-- Tasks are routed to specialized swarms based on their requirements
-- Enables parallel processing through multiple specialized swarms
+- Each task is routed to one specialized swarm based on its requirements
+- `batched_run()` routes many tasks concurrently, each to its own swarm
 - Ideal for complex, multi-domain tasks and enterprise-scale operations
 - Provides clear task routing but requires more complex setup
 
@@ -41,58 +41,67 @@ flowchart TD
     Analysis -->|Analyze Requirements| Selection[Swarm Selection]
     Selection -->|Select Best Swarm| Route[Route Task]
 
-    Route --> Swarm1[Specialized Swarm 1]
-    Route --> Swarm2[Specialized Swarm 2]
-    Route --> SwarmN[Specialized Swarm N]
+    Route -->|one of| Swarm1[Specialized Swarm 1]
+    Route -->|one of| Swarm2[Specialized Swarm 2]
+    Route -->|one of| SwarmN[Specialized Swarm N]
 
-    Swarm1 -->|Process| Result1[Output 1]
-    Swarm2 -->|Process| Result2[Output 2]
-    SwarmN -->|Process| ResultN[Output N]
+    Swarm1 -->|Process| History[Conversation History]
+    Swarm2 -->|Process| History
+    SwarmN -->|Process| History
 
-    Result1 --> Final[Final Output]
-    Result2 --> Final
-    ResultN --> Final
+    History --> Final[Final Output]
 ```
 
 ### Auto Agent Builder
 
-Auto Agent Builder is a dynamic agent architecture that creates specialized agents on-demand.
+Auto Agent Builder (`AutoAgentBuilder`) is a dynamic agent architecture that creates specialized agents on demand.
 
-- Analyzes tasks and automatically builds appropriate agents for the job
-- Maintains an agent pool that feeds into task orchestration
+- A builder agent analyzes the task and designs a roster of up to `max_agents` agents (default 5), each with its own name, description, system prompt and model
+- `run()` returns constructed `Agent` objects, or the raw configuration dicts when `return_dict=True`
+- It does not run the agents. Hand them to a structure such as `SwarmRouter` or `HierarchicalSwarm` to execute the task
 - Best suited for evolving requirements and dynamic workloads
-- Self-organizing but may have higher resource usage
 
 ```mermaid
 flowchart TD
-    Task[Task Input] --> Builder[Agent Builder]
+    Task[Task Input] --> Builder[Builder Agent]
     Builder --> Analysis{Task Analysis}
 
     Analysis --> Create[Create Specialized Agents]
-    Create --> Pool[Agent Pool]
+    Create --> Roster[Agent Roster]
 
-    Pool --> Agent1[Specialized Agent 1]
-    Pool --> Agent2[Specialized Agent 2]
-    Pool --> AgentN[Specialized Agent N]
+    Roster --> Agent1[Specialized Agent 1]
+    Roster --> Agent2[Specialized Agent 2]
+    Roster --> AgentN[Specialized Agent N]
 
-    Agent1 --> Orchestration[Task Orchestration]
-    Agent2 --> Orchestration
-    AgentN --> Orchestration
+    Agent1 --> Structure[Your Multi-Agent Structure]
+    Agent2 --> Structure
+    AgentN --> Structure
 
-    Orchestration --> Result[Final Result]
+    Structure --> Result[Final Result]
+```
+
+```python
+from swarms import AutoAgentBuilder, SwarmRouter
+
+task = "Evaluate whether a mid-size retailer should build or buy its e-commerce platform."
+
+agents = AutoAgentBuilder(model_name="gpt-5.4", max_agents=3).run(task)
+
+router = SwarmRouter(agents=agents, swarm_type="SequentialWorkflow")
+result = router.run(task)
 ```
 
 ### SwarmRouter
 
-SwarmRouter is a flexible system supporting multiple swarm architectures through a simple interface:
+SwarmRouter is a flexible system supporting multiple swarm architectures through a simple interface. You pick the architecture with `swarm_type`, including:
 
 - Sequential workflows
 - Concurrent workflows
 - Hierarchical swarms
 - Group chat interactions
-- Simpler to configure and deploy compared to other architectures
-- Best for general-purpose tasks and smaller scale operations
-- Recommended for 5-20 agents
+- Mixture of agents, majority voting, debate, council and planner-worker patterns
+
+It is simpler to configure and deploy than the other architectures here, and best for general-purpose tasks and smaller scale operations. See [SwarmRouter](/api/swarm-router) for every `swarm_type`.
 
 ```mermaid
 flowchart TD
@@ -166,4 +175,5 @@ Best for:
 
 - [Hybrid Hierarchical-Cluster Swarm (HHCS)](/api/hhcs)
 - [SwarmRouter](/api/swarm-router)
+- [Auto Agent Builder](/api/auto-agent-builder)
 - [Auto Swarm Builder](/api/auto-swarm-builder)

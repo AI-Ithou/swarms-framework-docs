@@ -29,26 +29,68 @@ OPENAI_API_KEY=""
 
 - Turn on streaming in `Agent()` with `streaming_on=True`
 
-- Optional: If you want to pretty print it, you can do `print_on=True`; if not, it will print normally
+- `print_on=True` (the default) renders the tokens in a live panel; `print_on=False` streams silently and only returns the final text
 
 ## Code
 
 ```python
 from swarms import Agent
 
-# Enable real-time streaming
 agent = Agent(
     agent_name="StoryAgent",
     model_name="gpt-5.4",
-    streaming_on=True,  # 🔥 This enables real streaming!
+    streaming_on=True,
     max_loops=1,
-    print_on=True,  # By default, it's False for raw streaming!
+    print_on=True,
 )
 
-# This will now stream in real-time with a beautiful UI!
+# Tokens render in a live panel as they arrive
 response = agent.run("Tell me a detailed story about humanity colonizing the stars")
 print(response)
 ```
+
+## Send tokens to your own function
+
+`streaming_callback` receives each token as a string. It only fires on streamed calls, so keep `streaming_on=True`:
+
+```python
+from swarms import Agent
+
+
+def on_token(token: str) -> None:
+    print(token, end="", flush=True)
+
+
+agent = Agent(
+    agent_name="StoryAgent",
+    model_name="gpt-5.4",
+    streaming_on=True,
+    streaming_callback=on_token,
+    max_loops=1,
+)
+
+response = agent.run("Tell me a short story about a lighthouse keeper")
+```
+
+## Iterate over tokens
+
+`run_stream()` yields tokens as a generator, and `arun_stream()` is its async version. Both turn streaming on for the call, so you do not need `streaming_on=True`:
+
+```python
+from swarms import Agent
+
+agent = Agent(agent_name="StoryAgent", model_name="gpt-5.4", max_loops=1)
+
+for token in agent.run_stream("Tell me a short story about a lighthouse keeper"):
+    print(token, end="", flush=True)
+
+# Streamed calls are counted once the stream is consumed
+print("\n", agent.usage)
+```
+
+`run_stream()` and `arun_stream()` run the agent through `run()` on a background thread. With `max_loops="auto"` they enter the autonomous loop, and tokens from every LLM turn, including turns that follow tool calls, come through the same stream. Exceptions raised in the run are re-raised once the stream ends.
+
+See [Agent Configuration](/agents/agent-configuration#streaming-methods) for `arun_stream()` and the detailed `stream=True` mode, and [Token usage](/agents/token-usage) for what `agent.usage` reports.
 
 ## Connect With Us
 

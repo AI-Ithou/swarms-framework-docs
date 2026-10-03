@@ -47,8 +47,8 @@ graph TD
 
 ## Attributes
 
-<ParamField path="id" type="str" default="swarm_id()">
-  Unique identifier for the majority voting system.
+<ParamField path="id" type="Optional[str]" default="None">
+  Unique identifier for the majority voting system. When omitted, one is generated as `majority-voting-<32 hex characters>`.
 </ParamField>
 
 <ParamField path="name" type="str" default="MajorityVoting">
@@ -64,7 +64,7 @@ graph TD
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="False">
-  Whether to autosave conversations.
+  When `True`, each run writes the conversation to `conversation_history.json` in a workspace directory, `{WORKSPACE_DIR}/swarms/MajorityVoting/{name}-{timestamp}/`. The directory path is available as `swarm_workspace_dir`.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -72,11 +72,11 @@ graph TD
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of consensus building loops.
+  Maximum number of consensus building loops. Must be greater than `0`.
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict">
-  Output format: "str", "dict", "list", or other.
+  Output format passed to `history_output_formatter`, for example `"dict"`, `"list"`, `"str"`, `"json"`, or `"final"`. `"dict"` returns the message list, including the task.
 </ParamField>
 
 <ParamField path="consensus_agent_prompt" type="str" default="CONSENSUS_AGENT_PROMPT">
@@ -96,8 +96,12 @@ graph TD
 </ParamField>
 
 <ParamField path="additional_consensus_agent_kwargs" type="dict" default="{}">
-  Additional keyword arguments passed to the consensus agent.
+  Additional keyword arguments passed to the consensus agent's `Agent` constructor.
 </ParamField>
+
+<Note>
+  The constructor validates the configuration and raises `ValueError` if `agents` is empty or `None`, or if `max_loops` is `0` or less.
+</Note>
 
 ## Methods
 
@@ -111,27 +115,23 @@ def run(self, task: str, streaming_callback: Optional[Callable[[str, str, bool],
 
 **Parameters:**
 - `task` (str): The task or question to be analyzed by the agent panel
-- `streaming_callback` (Optional[Callable[[str, str, bool], None]]): Optional callback invoked as `(agent_name, chunk, is_final)` while the consensus agent streams its response
-- `*args` (Any): Variable length argument list passed to individual agents
-- `**kwargs` (Any): Arbitrary keyword arguments passed to individual agents
+- `streaming_callback` (Optional[Callable[[str, str, bool], None]]): Optional callback invoked as `(agent_name, chunk, is_final)` while the consensus agent streams its response. Only the consensus agent's output is streamed, and `is_final` is always `False`.
+- `*args`, `**kwargs`: Accepted for compatibility and ignored. They are not forwarded to the agents.
 
-**Returns:** The consensus result formatted according to the specified `output_type`
-
-**Raises:**
-- `ValueError`: If the agents list is empty or None
+**Returns:** The conversation formatted according to `output_type`
 
 **Process Flow:**
-1. Adds the input task to the conversation history
+1. Starts a fresh conversation and adds the task to it, so a reused instance never carries an earlier task's votes
 2. For each loop (up to `max_loops`):
-   - Runs all agents concurrently on the current conversation state
-   - Collects agent responses and adds them to conversation history
-   - Runs the consensus agent to analyze and synthesize responses
-   - Adds consensus output to conversation history
-3. Returns the final result in the specified output format
+   - Runs all voters concurrently. Each voter receives the shared conversation as typed chat turns: the task as a `user` turn, its own earlier answers as `assistant` turns, and peers' answers and earlier consensus as `user` turns labelled with the speaker's name
+   - Records each voter's final answer (not its whole transcript) under the voter's name. A voter that raises is recorded with the exception in place of an answer
+   - Runs the consensus agent on the same typed history and records its answer
+3. Saves the conversation to the workspace when `autosave=True`
+4. Returns the conversation in the specified output format
 
 ### batch_run()
 
-Executes the majority voting system for multiple tasks sequentially.
+Executes the majority voting system for multiple tasks sequentially. Each task starts from a fresh conversation.
 
 ```python
 def batch_run(self, tasks: List[str], *args, **kwargs) -> List[Any]
@@ -146,22 +146,18 @@ def batch_run(self, tasks: List[str], *args, **kwargs) -> List[Any]
 
 ### run_concurrently()
 
-Executes the majority voting system for multiple tasks concurrently using thread pooling.
+Executes the majority voting system for multiple tasks concurrently in a thread pool. Each task runs on its own shallow copy of the instance, so the tasks never share a conversation. The copies share the same voter and consensus agents.
 
 ```python
-def run_concurrently(self, tasks: List[str], *args, **kwargs) -> List[Any]
+def run_concurrently(self, tasks: List[str], *args, **kwargs) -> Union[List[Any], Dict[Any, Any]]
 ```
 
 **Parameters:**
 - `tasks` (List[str]): List of tasks or questions to be processed
-- `*args` (Any): Variable length argument list passed to each task execution
-- `**kwargs` (Any): Arbitrary keyword arguments passed to each task execution
+- `max_workers` (int, keyword): Number of threads. Defaults to `os.cpu_count()`
+- `*args`, `**kwargs`: Forwarded to each task's `run` call
 
 **Returns:** List of consensus results in **input order**, so element *i* is the vote for `tasks[i]`
-
-<Note>
-Results are read in submission order, so element *i* is always the vote for `tasks[i]`.
-</Note>
 
 ### reliability_check()
 
@@ -444,51 +440,36 @@ for i, result in enumerate(concurrent_results, 1):
 
 ### Majority Voting with Custom Streaming
 
+The callback receives the consensus agent's output as it streams. Voters are not streamed.
+
 ```python
-from swarms import Agent
-from swarms.prompts.finance_agent_sys_prompt import (
-    FINANCIAL_AGENT_SYS_PROMPT,
-)
-from swarms.structs.majority_voting import MajorityVoting
+from swarms import Agent, MajorityVoting
+
 
 def streaming_callback(agent_name: str, chunk: str, is_final: bool):
-    if not hasattr(streaming_callback, "_buffer"):
-        streaming_callback._buffer = ""
-        streaming_callback._buffer_size = 0
+    print(chunk, end="", flush=True)
 
-    min_chunk_size = 512
 
-    if chunk:
-        streaming_callback._buffer += chunk
-        streaming_callback._buffer_size += len(chunk)
-    if streaming_callback._buffer_size >= min_chunk_size or is_final:
-        if streaming_callback._buffer:
-            print(streaming_callback._buffer, end="", flush=True)
-            streaming_callback._buffer = ""
-            streaming_callback._buffer_size = 0
-    if is_final:
-        print()
+# Each voter needs its own Agent instance and a unique name.
+voters = [
+    Agent(
+        agent_name=f"Financial-Analyst-{i}",
+        agent_description="Personal finance advisor agent",
+        system_prompt="You are a personal finance advisor focused on ETFs and index funds.",
+        max_loops=1,
+        model_name="gpt-5.4",
+    )
+    for i in range(3)
+]
 
-# Initialize the agent
-agent = Agent(
-    agent_name="Financial-Analysis-Agent",
-    agent_description="Personal finance advisor agent",
-    system_prompt=FINANCIAL_AGENT_SYS_PROMPT,
-    max_loops=1,
-    model_name="gpt-5.4",
-    dynamic_temperature_enabled=True,
-    max_tokens=4000,
-    streaming_on=True,
-)
-
-swarm = MajorityVoting(agents=[agent, agent, agent])
+swarm = MajorityVoting(agents=voters)
 
 swarm.run(
-    "Create a table of super high growth opportunities for AI. "
-    "I have $40k to invest in ETFs, index funds, and more. "
-    "Please create a table in markdown.",
+    "Create a markdown table of high-growth AI investment opportunities "
+    "for a $40k budget across ETFs and index funds.",
     streaming_callback=streaming_callback,
 )
+print()
 ```
 
 ## Usage Patterns
@@ -496,16 +477,10 @@ swarm.run(
 ### Single Task Analysis
 
 ```python
-# Simple single task execution
 result = swarm.run("What are the key risks in the current market?")
-
-# With custom parameters
-result = swarm.run(
-    "Analyze this investment opportunity",
-    temperature=0.7,
-    max_tokens=1000
-)
 ```
+
+To change sampling settings, set them on each voter `Agent` or pass them to the consensus agent through `additional_consensus_agent_kwargs`. `run` ignores extra keyword arguments.
 
 ### Batch Processing
 
@@ -533,8 +508,9 @@ results = swarm.run_concurrently(questions)
 | Consideration | Description |
 |---|---|
 | Sequential Processing (`batch_run`) | Tasks are processed one after another, not in parallel |
-| Concurrent Processing (`run_concurrently`) | Tasks run simultaneously using all available CPU cores |
-| Independent Conversation History | Each task maintains its own conversation history |
+| Concurrent Processing (`run_concurrently`) | Tasks run in a thread pool, one thread per CPU core by default (`max_workers`) |
+| Independent Conversation History | Each task starts from its own fresh conversation |
+| Shared Agents | Concurrent tasks share the same voter agents, so each voter may serve several tasks at once |
 | Memory Usage | Scales with the number of tasks and the length of each conversation |
 
 ## Source Code

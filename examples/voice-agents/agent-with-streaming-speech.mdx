@@ -26,6 +26,7 @@ agent = Agent(
     max_loops=1,
     dynamic_context_window=True,
     top_p=None,
+    streaming_on=True,  # the callback only receives tokens when the agent streams
 )
 ```
 
@@ -47,7 +48,7 @@ OpenAI ships six voices: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`.
 
 ## Step 4: Run the agent with the callback
 
-Pass the callback as `streaming_callback`. Tokens flow into the agent's response and into the TTS engine in parallel.
+Pass the callback as `streaming_callback`. Because the agent has `streaming_on=True`, tokens flow into the agent's response and into the TTS engine in parallel.
 
 ```python
 out = agent.run(
@@ -79,6 +80,7 @@ agent = Agent(
     max_loops=1,
     dynamic_context_window=True,
     top_p=None,
+    streaming_on=True,
 )
 
 tts_callback = StreamingTTSCallback(

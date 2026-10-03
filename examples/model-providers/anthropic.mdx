@@ -59,7 +59,7 @@ For Fable 5 specifically, see the dedicated [Claude Fable 5 tutorial](/examples/
 
 ## Fable 5 — Frontier Reasoning
 
-Fable 5 is Anthropic's state-of-the-art model. It excels at long, complex tasks but does **not** support tools or `temperature`.
+Fable 5 is Anthropic's state-of-the-art model. It excels at long, complex tasks but does **not** support tools or `temperature`. `temperature` and `top_p` default to `None` on `Agent`, and Swarms leaves unset values out of the request, so you only need to avoid setting them.
 
 ```python
 from swarms import Agent
@@ -67,11 +67,7 @@ from swarms import Agent
 agent = Agent(
     agent_name="Fable-5-Researcher",
     model_name="anthropic/claude-fable-5",
-    thinking_tokens=4096,
     reasoning_effort="high",
-    temperature=None,              # required
-    top_p=None,                    # required
-    tools_list_dictionary=None,    # required — tools not supported
     max_loops=1,
 )
 
@@ -119,7 +115,7 @@ print(agent.run("My subscription renewed but I was charged twice."))
 
 ## Extended Thinking
 
-All recent Claude models support extended thinking. Swarms exposes it via two parameters:
+All recent Claude models support extended thinking. Swarms exposes it two ways:
 
 ```python
 from swarms import Agent
@@ -127,16 +123,21 @@ from swarms import Agent
 agent = Agent(
     agent_name="Deep-Thinker",
     model_name="claude-opus-4-8",
+    reasoning_enabled=True,      # sends a thinking block with the budget below
     thinking_tokens=8192,        # private reasoning budget
-    reasoning_effort="high",     # "low" | "medium" | "high"
     max_loops=1,
 )
 
 print(agent.run("Prove that the sum of the first n odd integers equals n²."))
 ```
 
+- **`reasoning_enabled=True` with `thinking_tokens`** sends an explicit thinking budget. `thinking_tokens` (default `1024`) has no effect unless `reasoning_enabled=True`.
+- **`reasoning_effort`** (`"low"`, `"medium"`, `"high"`) is forwarded on its own, and LiteLLM maps it to a thinking budget for Claude.
+
+With either, Swarms forces `temperature=1`, drops `top_p`, and raises `max_tokens` above the thinking budget, as Anthropic requires.
+
 <Note>
-When `thinking_tokens` is set, Swarms automatically filters the redundant `think` tool out of autonomous planning — the model is already reasoning internally.
+The autonomous loop's `think` tool is off by default (`think_tool=False`), so a model that already reasons natively doesn't spend an extra round-trip on it. Set `think_tool=True` only for models that don't reason natively.
 </Note>
 
 ## Streaming
@@ -165,6 +166,7 @@ def on_token(token: str) -> None:
 agent = Agent(
     agent_name="Callback-Claude",
     model_name="claude-sonnet-4-6",
+    streaming_on=True,  # the callback only fires while streaming
     streaming_callback=on_token,
     max_loops=1,
 )
@@ -249,11 +251,7 @@ researcher = Agent(
 synthesizer = Agent(
     agent_name="Synthesizer",
     model_name="anthropic/claude-fable-5",         # frontier reasoning
-    thinking_tokens=4096,
     reasoning_effort="high",
-    temperature=None,
-    top_p=None,
-    tools_list_dictionary=None,
     system_prompt="Synthesize the research into a definitive answer.",
     max_loops=1,
 )

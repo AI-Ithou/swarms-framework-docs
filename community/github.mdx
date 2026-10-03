@@ -31,7 +31,7 @@ Found a bug or problem? Here's how to report it effectively:
 
 When creating a bug report, include:
 
-1. **Clear Title**: A concise summary of the issue
+1. **Clear Title**: A concise summary of the issue, in the [WARP format](/community/contributing#warp-git-messages)
    - Good: "Agent fails when using tools with streaming enabled"
    - Bad: "Agent broken"
 
@@ -101,7 +101,7 @@ Have an idea for a new feature? Here's how to request it:
 
 Include the following in your feature request:
 
-1. **Clear Title**: Describe the feature concisely
+1. **Clear Title**: Describe the feature concisely, in the [WARP format](/community/contributing#warp-git-messages)
    - Good: "Add support for async agent execution"
    - Bad: "Make it better"
 
@@ -193,9 +193,11 @@ Include the following in your feature request:
   </Accordion>
 
   <Accordion title="Write Clear Commit Messages">
+    Use the WARP format, `[TYPE][Function/FileName][Short Description]`, for commit messages, PR titles, and issue titles. See [WARP git messages](/community/contributing#warp-git-messages).
+
     ```bash
     # Good
-    git commit -m "Add async support for agent execution"
+    git commit -m "[FEAT][Agent.arun][Add async support for agent execution]"
     
     # Bad
     git commit -m "updates"

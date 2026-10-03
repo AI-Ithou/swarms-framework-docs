@@ -38,7 +38,7 @@ Swarms unlock capabilities beyond what single agents can achieve:
 
 ## Swarm Architectures
 
-Swarms provides multiple pre-built architectures for different collaboration patterns:
+Swarms provides multiple pre-built architectures for different collaboration patterns. This page covers the most common ones. The [structures catalog](/architectures/structures-catalog) lists every structure in the library, including small [communication topologies](/api/swarming-architectures) such as `OneToOne`, `Broadcast` and `OneToThree`.
 
 ### Sequential Workflow
 
@@ -367,7 +367,7 @@ graph TD
 ```python
 from swarms import Agent, SequentialWorkflow
 
-# Stage 1: Research
+# Stage 1: Research (web_search_tool and database_tool are your own tool functions)
 researcher = Agent(
     agent_name="Researcher",
     system_prompt="Research topics thoroughly using multiple sources.",

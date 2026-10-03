@@ -74,7 +74,7 @@ class SequentialWorkflow:
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict">
-  Format of the output from the workflow. Options include "dict", "list", "str", etc.
+  Format of the output from the workflow. One of `"list"`, `"dict"`, `"dictionary"`, `"str"`, `"string"`, `"all"`, `"final"`, `"last"`, `"json"`, `"yaml"`, `"dict-all-except-first"`, `"str-all-except-first"`, `"dict-final"`, `"list-final"`. The default `"dict"` returns the run's conversation as a list of `{"role", "content"}` message dicts.
 </ParamField>
 
 <ParamField path="shared_memory_system" type="callable" default="None">
@@ -100,7 +100,7 @@ class SequentialWorkflow:
 </Note>
 
 <ParamField path="team_awareness" type="bool" default="False">
-  Whether agents are aware of the team structure and their position
+  If `True`, the step-by-step flow structure is added to the shared conversation as a system message. Each agent always receives the names of the agents ahead and behind it as a system turn, whether or not this is set.
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="True">
@@ -112,11 +112,11 @@ class SequentialWorkflow:
 </ParamField>
 
 <ParamField path="drift_detection" type="bool" default="False">
-  If `True`, a judge agent scores the final output's semantic alignment with the original task after the pipeline completes. If the score falls below `drift_threshold`, the pipeline reruns and the cycle repeats until the score meets the threshold. If the judge output cannot be parsed, drift checking is skipped and the last result is returned as-is.
+  If `True`, a judge agent scores the final output's semantic alignment with the original task after the pipeline completes. If the score falls below `drift_threshold`, the pipeline reruns, at most `drift_max_retries` times. If the judge output cannot be parsed, drift checking is skipped and the last result is returned as-is.
 </ParamField>
 
 <ParamField path="drift_threshold" type="float" default="0.75">
-  Minimum alignment score (0.0–1.0) to consider the output acceptable. A warning is logged when the score falls below this value, and the pipeline reruns. Used only when `drift_detection=True`.
+  Minimum alignment score (0.0–1.0) to consider the output acceptable. A warning is logged when the score falls below this value, and the pipeline reruns while retries remain. Used only when `drift_detection=True`.
 </ParamField>
 
 <ParamField path="drift_model" type="str" default="claude-sonnet-4-5">
@@ -125,8 +125,10 @@ class SequentialWorkflow:
 
 <ParamField path="drift_max_retries" type="int" default="3">
   Maximum number of pipeline reruns when the alignment score stays below
-  `drift_threshold`. Used only when `drift_detection=True`. Must be `>= 0`;
-  a negative value raises `ValueError`.
+  `drift_threshold`. Once exhausted, the last output is returned with a
+  warning. `0` disables reruns, so the output is scored but never regenerated.
+  Used only when `drift_detection=True`. Must be `>= 0`; a negative value
+  raises `ValueError`.
 </ParamField>
 
 ## Methods
@@ -135,7 +137,9 @@ class SequentialWorkflow:
 
 Executes a specified task through the agents in the dynamically constructed flow.
 
-If `drift_detection` is configured, a judge agent scores the final output's semantic alignment with the original task after the pipeline completes. If the score falls below `drift_threshold`, the pipeline reruns and the cycle repeats until the score meets the threshold.
+Each call starts a fresh conversation on the internal `AgentRearrange`, so a reused workflow does not carry the previous task's transcript. The conversation is autosaved after the run, even when it fails.
+
+If `drift_detection` is configured, a judge agent scores the final output's semantic alignment with the original task after the pipeline completes. If the score falls below `drift_threshold`, the pipeline reruns, at most `drift_max_retries` times, then returns the last output with a warning.
 
 <ParamField path="task" type="str" required>
   The task for the agents to execute
@@ -146,7 +150,7 @@ If `drift_detection` is configured, a judge agent scores the final output's sema
 </ParamField>
 
 <ParamField path="imgs" type="Optional[List[str]]" default="None">
-  Optional list of images. Accepted for API compatibility; only `img` is currently forwarded to the underlying flow.
+  Optional list of images, forwarded to every agent's `run()`
 </ParamField>
 
 <ResponseField name="result" type="str | dict | list">
@@ -155,7 +159,7 @@ If `drift_detection` is configured, a judge agent scores the final output's sema
 
 ### `run_batched(tasks)`
 
-Executes a batch of tasks through the agents sequentially.
+Executes a batch of tasks through the agents, one task after another. Each task runs on its own clone of the flow, with a fresh conversation and deep-copied agents where the agent supports it, so no task sees another task's transcript.
 
 <ParamField path="tasks" type="List[str]" required>
   A list of tasks for the agents to execute. Must be a non-empty list of strings.
@@ -179,14 +183,14 @@ Executes the specified task through the agents asynchronously.
 
 ### `async run_concurrent(tasks)`
 
-Executes a batch of tasks through the agents concurrently using ThreadPoolExecutor. This method is `async` and must be awaited.
+Executes a batch of tasks through the agents concurrently on a thread pool sized to `os.cpu_count()`. Each task runs on its own clone of the flow, so concurrent tasks never share a conversation or an agent's memory. This method is `async` and must be awaited, but it waits on the thread pool synchronously, so it blocks the event loop until every task finishes.
 
 <ParamField path="tasks" type="List[str]" required>
   A list of tasks for the agents to execute. Must be a non-empty list of strings.
 </ParamField>
 
 <ResponseField name="results" type="List[str]">
-  A list of final results after processing through all agents
+  The final result for each task, in completion order rather than input order
 </ResponseField>
 
 ### `run_stream(task, img=None, with_events=False, **kwargs)`
@@ -266,7 +270,7 @@ Constructs a string representation of the agent execution order.
 Validates the workflow configuration and prepares agents for execution.
 
 **Raises:**
-- `ValueError`: If the agents list is None or empty, or if max_loops is set to 0
+- `ValueError`: If the agents list is None or empty, if max_loops is set to 0, or if `drift_max_retries` is negative
 
 ## Attributes
 
@@ -280,14 +284,17 @@ Validates the workflow configuration and prepares agents for execution.
 | `output_type` | OutputType | Format of the output from the workflow |
 | `shared_memory_system` | callable | Optional shared memory helper |
 | `multi_agent_collab_prompt` | bool | Whether each agent receives the collaboration preamble as a system turn |
+| `collab_prompt` | Optional[str] | Custom preamble text, used only when `multi_agent_collab_prompt=True` |
 | `team_awareness` | bool | Whether team-awareness is enabled on the underlying `AgentRearrange` |
 | `autosave` | bool | Whether conversation history is autosaved to disk |
 | `verbose` | bool | Whether verbose logging is on |
 | `drift_threshold` | float | Minimum alignment score required when `drift_detection=True` |
+| `drift_max_retries` | int | Maximum pipeline reruns when the drift score stays low |
 | `drift_agent` | Optional[Agent] | Judge agent used for drift detection; `None` when disabled |
-| `swarm_workspace_dir` | Optional[str] | Workspace directory used for autosave; populated by `_setup_autosave()` |
+| `workspace` | WorkspaceManager | Owns the autosave directory and writes `conversation_history.json` into it |
+| `swarm_workspace_dir` | Optional[str] | Workspace directory used for autosave; `None` when `autosave=False` |
 | `flow` | str | String representation of the agent execution order |
-| `agent_rearrange` | AgentRearrange | Internal helper for managing agent execution |
+| `agent_rearrange` | AgentRearrange | Internal helper for managing agent execution; holds the latest run's `conversation` |
 
 ## Usage Examples
 
@@ -410,17 +417,17 @@ result = workflow.run("Create a comprehensive market analysis")
 # Different output formats
 workflow_dict = SequentialWorkflow(
     agents=[researcher, writer],
-    output_type="dict"  # Returns dict format
+    output_type="dict"  # List of {"role", "content"} message dicts
 )
 
-workflow_list = SequentialWorkflow(
+workflow_final = SequentialWorkflow(
     agents=[researcher, writer],
-    output_type="list"  # Returns list format
+    output_type="final"  # Only the last agent's answer
 )
 
 workflow_str = SequentialWorkflow(
     agents=[researcher, writer],
-    output_type="str"  # Returns string format
+    output_type="str"  # Whole transcript as "role: content" text
 )
 ```
 
@@ -440,8 +447,10 @@ workflow = SequentialWorkflow(
 )
 
 result = workflow.run("Generate a report")
-# Conversation history saved to ./my_workspace/swarms/SequentialWorkflow/
+# Saved to ./my_workspace/swarms/SequentialWorkflow/SavedWorkflow-<timestamp>/conversation_history.json
 ```
+
+When `WORKSPACE_DIR` is unset, it defaults to `./agent_workspace`.
 
 ## Error Handling
 

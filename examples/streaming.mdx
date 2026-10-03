@@ -90,18 +90,16 @@ def detailed_callback(token_info: dict):
     Receive detailed token information
     
     Args:
-        token_info (dict): Contains token, usage, finish_reason, etc.
+        token_info (dict): Contains token, token_index, model, finish_reason, usage, etc.
     """
-    # Access detailed information
-    if 'content' in token_info:
-        print(token_info['content'], end="", flush=True)
+    print(token_info["token"], end="", flush=True)
     
-    # Access metadata
-    if 'usage' in token_info:
-        print(f"\n\nTokens used: {token_info['usage']}")
+    # finish_reason and usage stay None until the final chunk
+    if token_info["finish_reason"]:
+        print(f"\nFinished: {token_info['finish_reason']}")
     
-    if 'finish_reason' in token_info:
-        print(f"Finished: {token_info['finish_reason']}")
+    if token_info["usage"]:
+        print(f"Tokens used: {token_info['usage']}")
 
 agent = Agent(
     agent_name="Detailed-Streaming-Agent",
@@ -115,6 +113,12 @@ response = agent.run(
     streaming_callback=detailed_callback,
 )
 ```
+
+With `stream=True` the callback receives one `token_info` dict per token. The text is under `"token"`; the dict also carries `token_index`, `model`, `id`, `created`, `finish_reason`, `usage`, `logprobs`, and `timestamp`. Detailed mode also prints each `token_info` and a final chunk summary to stdout.
+
+<Note>
+A `streaming_callback` only fires when the agent is streaming, so set `streaming_on=True` (string tokens) or `stream=True` (`token_info` dicts). Without either, the callback is ignored and the agent makes a normal, non-streaming call.
+</Note>
 
 ### 2. Silent Streaming
 
@@ -600,7 +604,7 @@ def callback(token: str):
 - [Basic Agent](/examples/basic-agent) - Learn agent fundamentals
 - [Multi-Agent Workflows](/architectures/concurrent-workflow) - Stream from multiple agents
 - [Agent Output Types](/agents/structured-outputs) - Structure streaming outputs
-- [Interactive GroupChat](/examples/group-chat-example) - Real-time agent interactions
+- [Group Chat](/examples/group-chat-example) - Real-time agent interactions
 
 ## Learn More
 

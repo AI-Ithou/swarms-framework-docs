@@ -1,26 +1,40 @@
 ---
 title: "Swarming Architectures"
-description: "Topology functions describing how agents pass tasks among each other — circular, grid, star, mesh, pyramid, one-to-one, and broadcast"
+description: "Topology functions and point-to-point classes that wire how agents pass messages: circular, grid, star, mesh, pyramid, one-to-one, broadcast, and one-to-three"
 icon: "share-nodes"
 ---
 
 ## Overview
 
-`swarms.structs.swarming_architectures` is a set of lightweight functions implementing common message-passing topologies between agents. Each function takes a list of `Agent` objects, a task or task list, and an `output_type`, then drives the agents through the topology and returns a formatted conversation history.
+Swarms ships a set of lightweight communication topologies. Each one takes `Agent` objects and a task (or a task list), drives the agents through a fixed message-passing pattern, and returns the conversation history in the format `output_type` selects.
 
-These are functional building blocks — no shared class, no orchestration object. Reach for them when you want a one-off interaction pattern without instantiating a full swarm class. All seven functions are exported from the top-level `swarms` package.
+There is no orchestration object to configure. Reach for these when you want a one-off interaction pattern, or when you want to test whether the shape of the conversation changes the result.
 
-| Function | Topology | Per-call shape |
+The topologies live in four modules. Every name below is exported from the top-level `swarms` package.
+
+| Module | Contents |
+|---|---|
+| `swarms/structs/swarming_architectures.py` | `circular_swarm`, `grid_swarm`, `star_swarm`, `mesh_swarm`, `pyramid_swarm` |
+| `swarms/structs/one_to_one.py` | `one_to_one` function and `OneToOne` class |
+| `swarms/structs/broadcast.py` | `broadcast` async function and `Broadcast` class |
+| `swarms/structs/one_to_three.py` | `one_to_three` function and `OneToThree` class |
+
+<Note>
+`one_to_one` and `broadcast` no longer live in `swarming_architectures.py`, and the old `various_alt_swarms.py` module is gone. Import every name from `swarms`. `from swarms.structs.swarming_architectures import broadcast` now raises `ImportError`.
+</Note>
+
+| Name | Topology | Call shape |
 |---|---|---|
-| `circular_swarm` | Ring — every agent processes every task in order | `(agents, tasks)` |
-| `grid_swarm` | Agents laid out in a √N×√N grid; one task per cell | `(agents, tasks)` |
-| `star_swarm` | Star — a central agent processes every task first, then every other agent processes it too | `(agents, tasks)` |
-| `mesh_swarm` | Mesh — agents pull from a shared FIFO task queue until it's empty | `(agents, tasks)` |
-| `pyramid_swarm` | Pyramid — agents arranged in triangular levels; one task per cell | `(agents, tasks)` |
-| `one_to_one` | A → B handoff for `max_loops` turns | `(sender, receiver, task)` |
-| `broadcast` | One sender → many receivers, async | `(sender, agents, task)` |
+| `circular_swarm` | Ring. Every agent answers every task, in order, on one shared conversation | `circular_swarm(agents, tasks)` |
+| `grid_swarm` | Agents laid out in a √N×√N grid; one task per cell | `grid_swarm(agents, tasks)` |
+| `star_swarm` | `agents[0]` is the hub and answers each task first; every other agent then answers the same task | `star_swarm(agents, tasks)` |
+| `mesh_swarm` | Agents take turns pulling the next task from a shared FIFO queue until it is empty | `mesh_swarm(agents, tasks)` |
+| `pyramid_swarm` | Agents arranged in triangular levels; one task per cell | `pyramid_swarm(agents, tasks)` |
+| `one_to_one`, `OneToOne` | Sender and receiver alternate for `max_loops` exchanges | `one_to_one(sender, receiver, task)` |
+| `broadcast`, `Broadcast` | One sender speaks, then every receiver replies in turn | `await broadcast(sender, agents, task)` |
+| `one_to_three`, `OneToThree` | One sender speaks, then exactly three receivers reply in turn | `one_to_three(sender, receivers, task)` |
 
-All functions return whatever shape `output_type` selects via `history_output_formatter` — `"dict"` (default), `"list"`, `"str"`, etc.
+The classes are thin wrappers around the functions. They hold the agents and the output format, so you can run the same group on many tasks.
 
 ## Installation
 
@@ -28,9 +42,38 @@ All functions return whatever shape `output_type` selects via `history_output_fo
 pip install -U swarms
 ```
 
+## What each agent sees
+
+Every call starts a fresh shared `Conversation` and returns its history. The topologies differ in what each agent reads.
+
+- **Reads the shared conversation:** every agent in `circular_swarm`, `one_to_one`, `broadcast` and `one_to_three`, plus the hub in `star_swarm`. The agent receives the conversation as typed chat turns: its own messages as `assistant` turns, everyone else's as `user` turns labelled with the speaker's name. Its final answer, not its whole transcript, is recorded under its `agent_name`.
+- **Gets only its task:** every agent in `grid_swarm`, `mesh_swarm` and `pyramid_swarm`, plus the non-hub agents in `star_swarm`. These call `agent.run(task)` and record whatever it returns.
+
+<Tip>
+`Agent.run` returns according to the agent's `output_type`, which defaults to `"str-all-except-first"` (the agent's whole conversation). For the "only its task" topologies, set `output_type="final"` on your agents if you want just the answer recorded.
+</Tip>
+
+## Return shape
+
+All topologies pass the conversation through `history_output_formatter` with your `output_type`. The default is `"dict"`.
+
+<ResponseField name="dict (default)" type="List[Dict[str, Any]]">
+  The conversation history as a list of message dicts, oldest first: `[{"role": "User", "content": task}, {"role": "Writer", "content": "..."}, ...]`. Each agent's turn uses its `agent_name` as the role. Despite the name, this is a list, so iterate it directly.
+</ResponseField>
+
+<ResponseField name="str / string" type="str">
+  The history as one string, `"role: content"` blocks separated by blank lines.
+</ResponseField>
+
+<ResponseField name="final / last" type="str">
+  The content of the last message only.
+</ResponseField>
+
+Other accepted values include `"list"`, `"json"`, `"yaml"`, `"all"`, `"dict-all-except-first"`, `"str-all-except-first"`, `"dict-final"` and `"list-final"`.
+
 ## circular_swarm()
 
-Every agent runs every task, in order. Each agent sees the running conversation context.
+For each task, the task is posted once as a `User` message, then every agent answers it in order on the shared conversation. Later agents see what earlier agents said, and the conversation carries over from one task to the next.
 
 ```python
 def circular_swarm(
@@ -41,22 +84,22 @@ def circular_swarm(
 ```
 
 <ParamField path="agents" type="AgentListType" required>
-  Flat list of `Agent` instances (or list-of-lists; the function flattens once).
+  A flat list of `Agent` instances, or a list of lists (flattened one level).
 </ParamField>
 
 <ParamField path="tasks" type="List[str]" required>
-  Tasks processed sequentially. Each agent runs each task.
+  Tasks processed in order. Every agent answers every task.
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default='"dict"'>
   Format for the returned conversation history.
 </ParamField>
 
-**Raises:** `ValueError` if `agents` or `tasks` is empty.
+**Raises:** `ValueError` if `tasks` is empty or the flattened agent list is empty. An empty `agents` list fails with `IndexError` before that check.
 
 ## grid_swarm()
 
-Place agents in a √N×√N grid, pop tasks one by one, assign to cells row-by-row.
+Places agents in a square grid of side `int(sqrt(len(agents)))` and assigns tasks to cells row by row. Each agent runs only its own task.
 
 ```python
 def grid_swarm(
@@ -66,11 +109,15 @@ def grid_swarm(
 ) -> Union[Dict[str, Any], List[str]]
 ```
 
-Best when `len(agents)` is a perfect square and `len(tasks)` matches the cell count. Extra tasks are dropped; extra agents are idle.
+Best when `len(agents)` is a perfect square and `len(tasks)` matches the cell count. Agents beyond the square are idle, and tasks beyond the cell count are not processed.
+
+<Warning>
+`grid_swarm` pops tasks off the list you pass, so after the call it holds only the unprocessed tasks. Pass a copy (`tasks=list(my_tasks)`) if you need the original. It does not validate empty inputs.
+</Warning>
 
 ## star_swarm()
 
-`agents[0]` acts as the central agent: it processes each task first (seeing the running conversation), then every other agent processes the same task independently.
+`agents[0]` is the hub. For each task, the task is posted as a `User` message and the hub answers it on the shared conversation. Every other agent then runs the same task on its own; it does not see the hub's answer.
 
 ```python
 def star_swarm(
@@ -84,7 +131,7 @@ def star_swarm(
 
 ## mesh_swarm()
 
-All tasks are pushed onto a shared FIFO queue. Agents repeatedly loop over the `agents` list, each popping the next task off the front of the queue, until the queue is empty. (Despite the name, task assignment is deterministic FIFO order, not randomized.)
+Posts the full task list as one `User` message, copies it into a FIFO queue, then loops over `agents`, each taking the next task off the front of the queue, until the queue is empty. Despite the name, assignment is deterministic, not random. Your `tasks` list is not modified.
 
 ```python
 def mesh_swarm(
@@ -98,7 +145,7 @@ def mesh_swarm(
 
 ## pyramid_swarm()
 
-Agents are arranged into triangular levels (level `i` holds `i + 1` agents), and tasks are popped one at a time and assigned to each cell in the pyramid, level by level.
+Arranges agents into triangular levels (level `i` holds `i + 1` agents) and assigns tasks to each cell, level by level. Each agent runs only its own task. No `User` message is posted, so the history holds only agent turns.
 
 ```python
 def pyramid_swarm(
@@ -108,13 +155,17 @@ def pyramid_swarm(
 ) -> Union[Dict[str, Any], List[str]]
 ```
 
-Best when `len(agents)` is a triangular number (1, 3, 6, 10, ...) and `len(tasks)` matches the cell count. Extra tasks are dropped; extra agents are idle.
+Best when `len(agents)` is a triangular number (1, 3, 6, 10, ...) and `len(tasks)` matches. Extra agents are idle; extra tasks are not processed.
 
 **Raises:** `ValueError` if `agents` or `tasks` is empty.
 
+<Warning>
+Like `grid_swarm`, `pyramid_swarm` pops tasks off the list you pass. Pass a copy if you need the original.
+</Warning>
+
 ## one_to_one()
 
-Two-agent handoff: `sender` processes the task, `receiver` processes the sender's output, repeat for `max_loops`.
+Two-agent exchange. The task is posted as a `User` message, then the sender answers and the receiver replies to the sender. The pair repeats this `max_loops` times on the same conversation, so each agent can tell its own earlier messages from the other agent's.
 
 ```python
 def one_to_one(
@@ -123,28 +174,72 @@ def one_to_one(
     task: str,
     max_loops: int = 1,
     output_type: OutputType = "dict",
-) -> Union[Dict[str, Any], List[str]]
+) -> Union[Dict[str, Any], List[str], str]
 ```
 
 <ParamField path="sender" type="Agent" required>
-  Agent that processes the task first each loop.
+  The agent that speaks first in each exchange.
 </ParamField>
 
 <ParamField path="receiver" type="Agent" required>
-  Agent that processes the sender's output.
+  The agent that replies to the sender.
 </ParamField>
 
 <ParamField path="task" type="str" required>
-  Task for the sender on the first turn.
+  The task posted at the start of the conversation.
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Number of sender→receiver round trips.
+  Number of sender-then-receiver exchanges.
 </ParamField>
+
+<ParamField path="output_type" type="OutputType" default='"dict"'>
+  Format for the returned conversation history.
+</ParamField>
+
+**Raises:** `ValueError` if `sender`, `receiver`, or `task` is empty.
+
+## OneToOne
+
+A reusable wrapper around `one_to_one()` that holds the pair and the output format.
+
+```python
+from swarms import OneToOne
+```
+
+### Constructor
+
+<ParamField path="sender" type="Agent" required>
+  The agent that speaks first.
+</ParamField>
+
+<ParamField path="receiver" type="Agent" required>
+  The agent that replies.
+</ParamField>
+
+<ParamField path="name" type="str" default='"OneToOne"'>
+  Name of the pattern.
+</ParamField>
+
+<ParamField path="description" type="str" default='"A one-to-one communication pattern between two agents"'>
+  Description of the pattern's purpose.
+</ParamField>
+
+<ParamField path="output_type" type="OutputType" default='"dict"'>
+  Format for the returned conversation history.
+</ParamField>
+
+### run()
+
+```python
+def run(self, task: str, max_loops: int = 1) -> Union[Dict[str, Any], List[str], str]
+```
+
+Calls `one_to_one()` with the stored agents and `output_type`. `max_loops` is passed per call, not set on the instance.
 
 ## broadcast()
 
-**Async function.** One sender produces a message based on the conversation context; every agent in `agents` then processes the sender's broadcast independently.
+One-to-many. The task is posted as a `User` message and the sender answers it. Then each receiver, in list order, reads the shared conversation and replies.
 
 ```python
 async def broadcast(
@@ -152,21 +247,145 @@ async def broadcast(
     agents: AgentListType,
     task: str,
     output_type: OutputType = "dict",
-) -> Union[Dict[str, Any], List[str]]
+) -> Union[Dict[str, Any], List[str], str]
 ```
 
-Must be awaited:
+<ParamField path="sender" type="Agent" required>
+  The agent that speaks first.
+</ParamField>
 
-```python
-import asyncio
-result = asyncio.run(broadcast(sender, agents, task))
-```
+<ParamField path="agents" type="AgentListType" required>
+  The receivers, as a flat list or a list of lists (flattened one level).
+</ParamField>
+
+<ParamField path="task" type="str" required>
+  The task posted at the start of the conversation.
+</ParamField>
+
+<ParamField path="output_type" type="OutputType" default='"dict"'>
+  Format for the returned conversation history.
+</ParamField>
 
 **Raises:** `ValueError` if `sender`, `agents`, or `task` is empty.
 
-## Usage Examples
+<Warning>
+`broadcast` is declared `async`, so you must await it, but the work inside is synchronous. Receivers run one after another, not in parallel, and each one also sees the replies of the receivers before it. Awaiting it blocks the event loop until every agent is done. For a parallel fan-out, use [ConcurrentWorkflow](/api/concurrent-workflow) or [run_agents_concurrently](/api/multi-agent-execution-utilities).
+</Warning>
 
-### Circular: Every Agent Reviews Every Document
+## Broadcast
+
+A reusable wrapper around the same logic as `broadcast()`. Unlike the function, `Broadcast.run` is synchronous, so you call it without `await`.
+
+```python
+from swarms import Broadcast
+```
+
+### Constructor
+
+<ParamField path="sender" type="Agent" required>
+  The agent that speaks first.
+</ParamField>
+
+<ParamField path="receivers" type="AgentListType" required>
+  The receivers, as a flat list or a list of lists. Flattened at construction and stored as `self.receivers`.
+</ParamField>
+
+<ParamField path="name" type="str" default='"Broadcast"'>
+  Name of the pattern.
+</ParamField>
+
+<ParamField path="description" type="str" default='"A broadcast communication pattern from one agent to many agents"'>
+  Description of the pattern's purpose.
+</ParamField>
+
+<ParamField path="output_type" type="OutputType" default='"dict"'>
+  Format for the returned conversation history.
+</ParamField>
+
+### run()
+
+```python
+def run(self, task: str) -> Union[Dict[str, Any], List[str], str]
+```
+
+Runs the sender, then each receiver in order, and returns the conversation history. Raises `ValueError` if `task` is empty or there are no receivers.
+
+<Note>
+The receivers argument is named `agents` on the `broadcast()` function and `receivers` on the `Broadcast` class.
+</Note>
+
+## one_to_three()
+
+The same flow as `broadcast()`, fixed to exactly three receivers and synchronous. The task is posted as a `User` message, the sender answers, then each of the three receivers replies in turn on the shared conversation.
+
+```python
+def one_to_three(
+    sender: Agent,
+    receivers: AgentListType,
+    task: str,
+    output_type: OutputType = "dict",
+) -> Union[Dict[str, Any], List[str], str]
+```
+
+<ParamField path="sender" type="Agent" required>
+  The agent that speaks first.
+</ParamField>
+
+<ParamField path="receivers" type="AgentListType" required>
+  Exactly three receiving agents.
+</ParamField>
+
+<ParamField path="task" type="str" required>
+  The task posted at the start of the conversation.
+</ParamField>
+
+<ParamField path="output_type" type="OutputType" default='"dict"'>
+  Format for the returned conversation history.
+</ParamField>
+
+**Raises:** `ValueError` if there are not exactly three receivers, or if `sender` or `task` is empty.
+
+## OneToThree
+
+A reusable wrapper around `one_to_three()`.
+
+```python
+from swarms import OneToThree
+```
+
+### Constructor
+
+<ParamField path="sender" type="Agent" required>
+  The agent that speaks first.
+</ParamField>
+
+<ParamField path="receivers" type="AgentListType" required>
+  Exactly three receiving agents. Checked at construction; any other count raises `ValueError`.
+</ParamField>
+
+<ParamField path="name" type="str" default='"OneToThree"'>
+  Name of the pattern.
+</ParamField>
+
+<ParamField path="description" type="str" default='"A one-to-three communication pattern from one agent to exactly three agents"'>
+  Description of the pattern's purpose.
+</ParamField>
+
+<ParamField path="output_type" type="OutputType" default='"dict"'>
+  Format for the returned conversation history.
+</ParamField>
+
+### run()
+
+```python
+def run(self, task: str) -> Union[Dict[str, Any], List[str], str]
+```
+
+Calls `one_to_three()` with the stored agents and `output_type`.
+
+## Usage examples
+
+### Circular: every agent reviews every document
 
 ```python
 from swarms import Agent, circular_swarm
@@ -177,68 +396,171 @@ reviewers = [
     Agent(agent_name="Privacy", model_name="claude-sonnet-4-6", max_loops=1),
 ]
 
-result = circular_swarm(
+history = circular_swarm(
     agents=reviewers,
     tasks=[
         "Review draft TOS section 4.",
         "Review draft TOS section 5.",
     ],
 )
+
+for message in history:
+    print(f"[{message['role']}] {message['content']}\n")
 ```
 
-Each reviewer sees the running conversation, so later reviewers can build on earlier comments.
+Each reviewer reads the shared conversation, so later reviewers can build on earlier comments.
 
-### One-to-One: Generator/Critic Loop
+### OneToOne: writer and editor
+
+```python
+from swarms import Agent, OneToOne
+
+writer = Agent(
+    agent_name="Writer",
+    system_prompt="You write short product taglines. Reply with one tagline.",
+    model_name="gpt-5.4",
+    max_loops=1,
+)
+
+editor = Agent(
+    agent_name="Editor",
+    system_prompt="You are a strict editor. Rewrite the tagline to be shorter and punchier.",
+    model_name="gpt-5.4",
+    max_loops=1,
+)
+
+pair = OneToOne(sender=writer, receiver=editor)
+
+history = pair.run("Write a tagline for a password manager.", max_loops=2)
+
+for message in history:
+    print(f"[{message['role']}] {message['content']}\n")
+```
+
+### one_to_one: generator and critic, final answer only
 
 ```python
 from swarms import Agent, one_to_one
 
 generator = Agent(agent_name="Generator", model_name="claude-sonnet-4-6", max_loops=1)
-critic = Agent(agent_name="Critic", model_name="claude-opus-4-6", max_loops=1)
+critic = Agent(agent_name="Critic", model_name="gpt-5.4", max_loops=1)
 
-result = one_to_one(
+last_reply = one_to_one(
     sender=generator,
     receiver=critic,
-    task="Draft a one-paragraph announcement for v12.1",
+    task="Draft a one-paragraph product announcement.",
     max_loops=3,
+    output_type="final",
 )
+print(last_reply)
 ```
 
-### Broadcast: Notify a Pool of Workers
+### Broadcast: one announcement, departmental replies
+
+```python
+from swarms import Agent, Broadcast
+
+announcer = Agent(
+    agent_name="Announcer",
+    system_prompt="You announce a company policy change in three sentences.",
+    model_name="gpt-5.4",
+    max_loops=1,
+)
+
+departments = [
+    Agent(
+        agent_name=name,
+        system_prompt=f"You lead the {name} department. In two sentences, say how this change affects your team.",
+        model_name="gpt-5.4",
+        max_loops=1,
+    )
+    for name in ["Engineering", "Sales", "Support", "Finance"]
+]
+
+group = Broadcast(sender=announcer, receivers=departments)
+history = group.run("Announce that the company is moving to a four-day work week.")
+
+for message in history:
+    print(f"[{message['role']}] {message['content']}\n")
+```
+
+### broadcast: the async function
 
 ```python
 import asyncio
+
 from swarms import Agent, broadcast
 
-dispatcher = Agent(agent_name="Dispatcher", model_name="claude-sonnet-4-6", max_loops=1)
-workers = [
-    Agent(agent_name=f"Worker-{i}", model_name="claude-sonnet-4-6", max_loops=1)
-    for i in range(5)
+lead = Agent(agent_name="Tech-Lead", model_name="claude-sonnet-4-6", max_loops=1)
+reviewers = [
+    Agent(agent_name=name, model_name="claude-sonnet-4-6", max_loops=1)
+    for name in ["Security", "Performance", "Cost"]
 ]
 
-result = asyncio.run(
-    broadcast(
-        sender=dispatcher,
-        agents=workers,
-        task="Status check: report your current workload.",
+
+async def main():
+    history = await broadcast(
+        sender=lead,
+        agents=reviewers,
+        task="Propose moving the session store from Redis to Postgres.",
     )
-)
+    for message in history:
+        print(f"[{message['role']}] {message['content']}\n")
+
+
+asyncio.run(main())
 ```
 
-## Choosing a Topology
+### OneToThree: a pitch to three investors
+
+```python
+from swarms import Agent, OneToThree
+
+founder = Agent(
+    agent_name="Founder",
+    system_prompt="You pitch a startup idea in three sentences.",
+    model_name="gpt-5.4",
+    max_loops=1,
+)
+
+investors = [
+    Agent(
+        agent_name=name,
+        system_prompt=f"You are a {style} investor. In two sentences, react to the pitch.",
+        model_name="gpt-5.4",
+        max_loops=1,
+    )
+    for name, style in [
+        ("Growth-VC", "growth-focused"),
+        ("Value-Investor", "cautious, numbers-first"),
+        ("Angel", "founder-friendly"),
+    ]
+]
+
+panel = OneToThree(sender=founder, receivers=investors, output_type="str")
+print(panel.run("Pitch a marketplace for renting professional camera gear."))
+```
+
+More runnable scripts live in the swarms repo under [`examples/multi_agent/one_to_one_examples`](https://github.com/kyegomez/swarms/tree/master/examples/multi_agent/one_to_one_examples), [`broadcast_examples`](https://github.com/kyegomez/swarms/tree/master/examples/multi_agent/broadcast_examples) and [`one_to_three_examples`](https://github.com/kyegomez/swarms/tree/master/examples/multi_agent/one_to_three_examples).
+
+## Choosing a topology
 
 | Pattern | When to use |
 |---|---|
-| `circular_swarm` | Each agent should see every task and the accumulating context |
+| `circular_swarm` | Each agent should see every task and the accumulating discussion |
 | `grid_swarm` | Tasks map cleanly to a 2D layout you already have |
-| `star_swarm` | One agent should weigh in first on every task, then the rest respond independently |
+| `star_swarm` | One agent should weigh in first on every task, then the rest answer on their own |
 | `mesh_swarm` | A pool of interchangeable agents should drain a shared task queue |
-| `pyramid_swarm` | Tasks map cleanly to a triangular/hierarchical layout you already have |
-| `one_to_one` | Two-agent loops — generator/critic, proposer/judge |
-| `broadcast` | Fan-out where one message needs to reach many workers |
+| `pyramid_swarm` | Tasks map cleanly to a triangular layout you already have |
+| `one_to_one`, `OneToOne` | Two-agent loops: writer and editor, generator and critic, proposer and judge |
+| `broadcast`, `Broadcast` | One message that many agents should react to, each seeing the replies before theirs |
+| `one_to_three`, `OneToThree` | The same, fixed to a panel of exactly three reviewers |
 
-For richer orchestration (planning, voting, hierarchies) see [SwarmRouter](/api/swarm-router), [HierarchicalSwarm](/api/hierarchical-swarm), or [MajorityVoting](/api/majority-voting).
+For richer orchestration (planning, voting, hierarchies) see [SwarmRouter](/api/swarm-router), [HierarchicalSwarm](/api/hierarchical-swarm), or [MajorityVoting](/api/majority-voting). For side-by-side snippets of every pattern, see [Social swarm patterns](/examples/social-swarm-patterns).
 
-## Source Code
+## Source code
 
-View the [source on GitHub](https://github.com/kyegomez/swarms/blob/master/swarms/structs/swarming_architectures.py).
+- [swarming_architectures.py](https://github.com/kyegomez/swarms/blob/master/swarms/structs/swarming_architectures.py)
+- [one_to_one.py](https://github.com/kyegomez/swarms/blob/master/swarms/structs/one_to_one.py)
+- [broadcast.py](https://github.com/kyegomez/swarms/blob/master/swarms/structs/broadcast.py)
+- [one_to_three.py](https://github.com/kyegomez/swarms/blob/master/swarms/structs/one_to_three.py)

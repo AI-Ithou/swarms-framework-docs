@@ -62,7 +62,7 @@ This uses the direct TypeSafe endpoint and `TYPESAFE_API_KEY`. The response's `m
 
 Suppose a service you control accepts `model_id`, `context`, and `prompts`, and returns `model_id`, `decisions`, and `token_usage`. The typed question and answer dictionaries inside those fields are unchanged.
 
-The subclass below translates those field names. It calls the base payload builder first to retain question validation, and the base response parser after normalization to retain missing-answer and answer-type checks. Adapt these mappings to your provider's actual schema. If it uses different authentication, also override `build_headers()` as described in the [reference](/api/decision-model#custom-providers-and-formats).
+The subclass below translates those field names. It calls the base payload builder first to retain question validation, and the base response parser after normalization to retain missing-answer and answer-type checks. Adapt these mappings to your provider's actual schema. If it uses different authentication, also override `build_headers()` as described in the [reference](/api/decision-model#extension-hooks).
 
 ## Complete runnable example
 

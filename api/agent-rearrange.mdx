@@ -74,10 +74,10 @@ class AgentRearrange:
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of execution loops. Must be greater than 0.
+  Number of times the whole flow runs per `run()` call. Values below 1 are treated as 1.
 </ParamField>
 
-<ParamField path="verbose" type="bool" default="True">
+<ParamField path="verbose" type="bool" default="False">
   Whether to enable verbose logging
 </ParamField>
 
@@ -86,7 +86,7 @@ class AgentRearrange:
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="all">
-  Format for output results. Options: "all", "final", "list", "dict"
+  Format of the returned conversation. One of `"list"`, `"dict"`, `"dictionary"`, `"str"`, `"string"`, `"all"`, `"final"`, `"last"`, `"json"`, `"yaml"`, `"dict-all-except-first"`, `"str-all-except-first"`, `"dict-final"`, `"list-final"`. The default `"all"` returns the transcript as `"role: content"` text. Any other value raises `ValueError` at construction.
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="True">
@@ -94,7 +94,7 @@ class AgentRearrange:
 </ParamField>
 
 <ParamField path="team_awareness" type="bool" default="False">
-  Whether agents should be aware of team structure and sequential flow
+  If `True`, the step-by-step flow structure (see `get_sequential_flow_structure()`) is added to the shared conversation as a system message at the start of each run. Agents in single-agent steps always receive the names of the agents ahead and behind them as a system turn, whether or not this is set.
 </ParamField>
 
 <ParamField path="collab_prompt" type="str" optional>
@@ -126,6 +126,8 @@ The flow pattern defines how agents execute:
 
 Execute the agent rearrangement task.
 
+Each call starts a fresh shared conversation, so a reused instance does not carry the previous task's transcript. Every agent's final answer, not its whole transcript, is added to that conversation. The flow is not validated up front: a step that names an unregistered agent raises `ValueError` when it is reached, after earlier steps have run.
+
 <ParamField path="task" type="str" required>
   The task to execute through the agent workflow
 </ParamField>
@@ -140,27 +142,27 @@ Execute the agent rearrangement task.
 
 ### `batch_run(tasks, img=None, batch_size=10, *args, **kwargs)`
 
-Process multiple tasks in batches.
+Process multiple tasks in batches. Batches run one after another; the tasks inside a batch run concurrently. Each task runs on an isolated clone with a fresh conversation and deep-copied agents (falling back to the original agent when it cannot be copied).
 
 <ParamField path="tasks" type="List[str]" required>
   List of tasks to process through the agent workflow
 </ParamField>
 
 <ParamField path="img" type="Optional[List[str]]" default="None">
-  Optional list of images corresponding to tasks
+  Optional list of images corresponding to tasks. Must be the same length as `tasks`, or `ValueError` is raised.
 </ParamField>
 
 <ParamField path="batch_size" type="int" default="10">
-  Number of tasks to process simultaneously in each batch
+  Number of tasks to process simultaneously in each batch. Must be positive, or `ValueError` is raised.
 </ParamField>
 
 <ResponseField name="results" type="List[str]">
-  List of results corresponding to input tasks
+  List of results in the same order as the input tasks
 </ResponseField>
 
 ### `concurrent_run(tasks, img=None, max_workers=None, *args, **kwargs)`
 
-Process multiple tasks concurrently using ThreadPoolExecutor.
+Process multiple tasks concurrently on a thread pool. Each task runs on an isolated clone with a fresh conversation, so concurrent tasks never share history.
 
 <ParamField path="tasks" type="List[str]" required>
   List of tasks to process through the agent workflow
@@ -171,11 +173,11 @@ Process multiple tasks concurrently using ThreadPoolExecutor.
 </ParamField>
 
 <ParamField path="max_workers" type="Optional[int]" default="None">
-  Maximum number of worker threads. Uses default ThreadPoolExecutor behavior if None.
+  Maximum number of worker threads. Defaults to `os.cpu_count()` when `None`.
 </ParamField>
 
 <ResponseField name="results" type="List[str]">
-  List of results corresponding to input tasks
+  List of results in the same order as the input tasks
 </ResponseField>
 
 ### `run_async(task, img=None, *args, **kwargs)`
@@ -196,7 +198,7 @@ Asynchronously execute a task.
 
 ### `set_custom_flow(flow)`
 
-Set a custom flow pattern for agent execution.
+Set a custom flow pattern for agent execution. The new flow is validated immediately; if it is empty or names an unregistered agent, `ValueError` is raised and the previous flow is kept.
 
 <ParamField path="flow" type="str" required>
   The new flow pattern to use for agent execution
@@ -220,7 +222,7 @@ Add multiple agents to the swarm at once.
 
 ### `remove_agent(agent_name)`
 
-Remove an agent from the swarm.
+Remove an agent from the swarm. Raises `ValueError` if no agent has that name.
 
 <ParamField path="agent_name" type="str" required>
   The name of the agent to be removed
@@ -308,9 +310,14 @@ Convert all attributes to a dictionary for serialization.
 | `id` | str | Unique identifier for the system |
 | `name` | str | Human-readable name |
 | `description` | str | Description of the system's purpose |
-| `agents` | List[Union[Agent, Callable]] | List of agents or callables in the system |
+| `agents` | List[Union[Agent, Callable]] | The agents in the system, as a list. Look agents up by `agent_name`, not by indexing with a name |
 | `flow` | str | Flow pattern defining agent execution order |
-| `conversation` | Conversation | Conversation history management |
+| `steps` | List[List[str]] | Read-only property: the parsed flow, one list of agent names per `->` step. `"a -> b, c"` gives `[["a"], ["b", "c"]]` |
+| `max_loops` | int | Number of times the flow runs per call |
+| `output_type` | OutputType | Format of the returned conversation |
+| `team_awareness` | bool | Whether the flow structure is added to the conversation |
+| `collab_prompt` | Optional[str] | Guidance prepended to every agent's messages |
+| `conversation` | Conversation | The latest run's shared conversation; replaced at the start of every run |
 
 ## Usage Examples
 
@@ -373,25 +380,25 @@ result = system.run("Analyze this topic from different angles")
 # Create more agents
 data_collector = Agent(
     agent_name="data_collector",
-    llm=llm,
+    model_name="gpt-5.4-mini",
     system_prompt="You collect and organize data."
 )
 
 technical_analyst = Agent(
     agent_name="technical_analyst",
-    llm=llm,
+    model_name="gpt-5.4-mini",
     system_prompt="You analyze technical aspects."
 )
 
 business_analyst = Agent(
     agent_name="business_analyst",
-    llm=llm,
+    model_name="gpt-5.4-mini",
     system_prompt="You analyze business aspects."
 )
 
 synthesizer = Agent(
     agent_name="synthesizer",
-    llm=llm,
+    model_name="gpt-5.4",
     system_prompt="You synthesize multiple perspectives."
 )
 
@@ -497,7 +504,7 @@ result = system.run("Create comprehensive analysis")
 system_all = AgentRearrange(
     agents=[researcher, writer],
     flow="researcher -> writer",
-    output_type="all"  # Return all agent outputs
+    output_type="all"  # Whole transcript as "role: content" text
 )
 
 # Return only final output
@@ -511,14 +518,14 @@ system_final = AgentRearrange(
 system_list = AgentRearrange(
     agents=[researcher, writer],
     flow="researcher -> writer",
-    output_type="list"  # Return list of outputs
+    output_type="list"  # List of {"role", "content"} message dicts
 )
 
-# Return as dict
-system_dict = AgentRearrange(
+# Agents' answers only, without the task
+system_answers = AgentRearrange(
     agents=[researcher, writer],
     flow="researcher -> writer",
-    output_type="dict"  # Return dict mapping agent names to outputs
+    output_type="str-all-except-first"
 )
 ```
 
@@ -558,8 +565,8 @@ except Exception as e:
 2. **Team Awareness**: Enable for complex flows where context matters
 3. **Error Handling**: Always wrap execution in try-except blocks
 4. **Logging**: Enable verbose mode during development
-5. **Memory Systems**: Use for tasks requiring persistent context
-6. **Flow Validation**: Always validate flows before production use
+5. **Memory**: `memory_system` is not read; set `persistent_memory=True` on individual agents for context that survives restarts
+6. **Flow Validation**: Call `validate_flow()` or `explain()` before production use, since construction does not check agent names
 7. **Agent Naming**: Use clear, descriptive agent names in flows
 
 ## Common Flow Patterns

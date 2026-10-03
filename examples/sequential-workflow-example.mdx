@@ -50,7 +50,7 @@ print(final_post)
 2. **Research Phase**: The Researcher agent processes the task and produces a detailed summary
 3. **Handoff**: The Researcher's output automatically becomes the input for the Writer agent
 4. **Writing Phase**: The Writer agent takes the research summary and creates an engaging blog post
-5. **Final Output**: The workflow returns the final blog post from the Writer agent
+5. **Final Output**: With the default `output_type="dict"`, the workflow returns the whole conversation as a list of role/content message dicts, and the Writer's blog post is the last entry. Pass `output_type="final"` to `SequentialWorkflow` to get only the blog post
 
 ## Common Use Cases
 

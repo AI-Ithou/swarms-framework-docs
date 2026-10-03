@@ -37,9 +37,9 @@ An **Agent** is the fundamental building block of a swarm—an autonomous entity
     ```
     
     **Key Parameters:**
-    - `model_name`: The language model to use (e.g., "gpt-5.4", "claude-sonnet-4-5")
-    - `max_loops`: Number of reasoning iterations ("auto" for automatic determination)
-    - `interactive`: Enable real-time feedback and conversation
+    - `model_name`: The language model to use (e.g., "gpt-5.4", "claude-sonnet-4-6")
+    - `max_loops`: Number of reasoning iterations, or `"auto"` to let the agent plan, act, and decide when it is done (see [Autonomous mode](/agents/autonomous-mode))
+    - `interactive`: Prompt you for follow-up input after each response
   </Step>
 
   <Step title="Run your agent">
@@ -188,7 +188,7 @@ The `SequentialWorkflow` executes agents in order, creating a pipeline where eac
     Extend your agent's capabilities with external tools and APIs
   </Card>
   
-  <Card title="Explore Multi-Agent Architectures" icon="diagram-project">
+  <Card title="Explore Multi-Agent Architectures" icon="diagram-project" href="/architectures/overview">
     Learn about HierarchicalSwarm, ConcurrentWorkflow, MixtureOfAgents, and more
   </Card>
   
@@ -196,8 +196,8 @@ The `SequentialWorkflow` executes agents in order, creating a pipeline where eac
     Connect to OpenAI, Anthropic, Groq, Cohere, and other LLM providers
   </Card>
   
-  <Card title="Build Production Applications" icon="rocket" href="/deployment/scaling">
-    Deploy agents as distributed services with Agent Orchestration Protocol
+  <Card title="Build Production Applications" icon="rocket" href="/deployment/production-best-practices">
+    Handle errors, control costs, and scale agents in production
   </Card>
 </CardGroup>
 
@@ -265,7 +265,7 @@ results = concurrent_workflow.run(
   </Accordion>
   
   <Accordion title="Rate limit errors">
-    Consider using `max_loops=1` to reduce API calls, or implement retry logic with exponential backoff.
+    Use `max_loops=1` to reduce API calls. Each agent already retries a failed LLM call `retry_attempts` times (default `3`); after that, `run()` tries any `fallback_models` you configured and then raises `AgentLLMError`. Catch it to add your own backoff.
   </Accordion>
 </AccordionGroup>
 

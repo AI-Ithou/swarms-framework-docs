@@ -1,12 +1,12 @@
 ---
 title: "SwarmRearrange"
-description: "Orchestrate multiple swarms in sequential or parallel flow patterns with thread-safe operations"
+description: "Orchestrate multiple swarms in a flow pattern, passing each swarm's output to the next"
 icon: "arrows-split-up-and-left"
 ---
 
 ## Overview
 
-`SwarmRearrange` is a class for orchestrating multiple swarms in a sequential or parallel flow pattern. It provides thread-safe operations for managing swarm execution, history tracking, and flow validation.
+`SwarmRearrange` is a class for orchestrating multiple swarms in a flow pattern. Each swarm is looked up by its `name` attribute, and its output becomes the next step's task. Every swarm's output is also added to `arrangement.conversation`.
 
 ## Installation
 
@@ -37,11 +37,11 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of execution loops.
+  Number of passes through the whole flow. Values of 0 or less are replaced with 1.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="True">
-  Enable detailed logging.
+  Stored but not read. Logging happens either way.
 </ParamField>
 
 <ParamField path="human_in_the_loop" type="bool" default="False">
@@ -53,7 +53,7 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="return_json" type="bool" default="False">
-  Return results in JSON format.
+  Stored but not read. `run()` always returns a string.
 </ParamField>
 
 <ParamField path="output_type" type="HistoryOutputType" default="dict-all-except-first">
@@ -118,18 +118,6 @@ def set_custom_flow(self, flow: str)
 **Parameters:**
 - `flow` (str): The new flow pattern string
 
-### track_history()
-
-Appends a result to a swarm's execution history. Called internally; can also be invoked directly for custom tracking.
-
-```python
-def track_history(self, swarm_name: str, result: str)
-```
-
-**Parameters:**
-- `swarm_name` (str): Name of the swarm whose history to update
-- `result` (str): Result to append to that swarm's history
-
 ### run()
 
 Executes the swarm arrangement according to the flow pattern.
@@ -141,18 +129,24 @@ def run(self, task: str = None, img: str = None, custom_tasks: Dict[str, str] = 
 **Parameters:**
 - `task` (str, optional): The task to be executed
 - `img` (str, optional): Image input for the task
-- `custom_tasks` (Dict[str, str], optional): Custom tasks mapped to specific swarms
-- `*args`, `**kwargs`: Forwarded to each swarm's `run()` call
+- `custom_tasks` (Dict[str, str], optional): Custom tasks mapped to specific swarms. See the warning below
+- `*args`, `**kwargs`: Forwarded to each swarm's `run()` call, after `task` and `img`
 
 **Returns:** A plain `str` -- always `current_task` (the final swarm's textual output), regardless of `output_type`. `run()` catches all exceptions internally and, on failure, returns `str(e)` instead of raising -- so callers must check the returned string for error text rather than relying on a `try`/`except` around `run()`.
+
+<Warning>
+  `custom_tasks` does not work in the current release. Only its first entry is read, and it is matched against the raw flow segments, which keep their surrounding spaces. If it does match, the task text is spliced into the flow as if it were a swarm name, so the run fails and returns the error string. Put the task in `task` instead.
+</Warning>
 
 ## Flow Pattern Syntax
 
 The flow pattern uses arrow notation (`->`) to define execution order:
 
 - **Sequential**: `"SwarmA -> SwarmB -> SwarmC"`
-- **Parallel**: `"SwarmA, SwarmB -> SwarmC"`
-- **Human intervention**: Use `"H"` in the flow
+- **Fan-in**: `"SwarmA, SwarmB -> SwarmC"`. Comma-separated swarms run one after another, not concurrently, each on the same input. Their outputs are joined with `"; "` and passed to the next step
+- **Human intervention**: Use `"H"` in the flow. With `human_in_the_loop=True` and a `custom_human_in_the_loop` function, that function receives the current task and its return value becomes the next task. Otherwise `run()` prompts on stdin with `input()`
+
+The flow must contain at least one `->`, and each swarm name may appear only once.
 
 ## Usage Examples
 
@@ -327,7 +321,7 @@ def custom_human_input(task):
 # Create arrangement with human intervention
 arrangement = SwarmRearrange(
     name="HumanAugmented",
-    swarms=[swarm1, swarm2],
+    swarms=[swarm1, swarm2],  # swarm1.name == "SwarmA", swarm2.name == "SwarmB"
     flow="SwarmA -> H -> SwarmB",
     human_in_the_loop=True,
     custom_human_in_the_loop=custom_human_input
@@ -343,7 +337,7 @@ result = arrangement.run("Initial task")
 |--------------|-------------|
 | **Flow Validation** | Always validate flows before execution |
 | **Error Handling** | `run()` never raises -- it catches all exceptions internally and returns `str(e)`. Inspect the returned string for error text rather than wrapping `run()` in try/catch |
-| **History Tracking** | Use `track_history()` for monitoring swarm execution |
+| **History Tracking** | Read `arrangement.conversation` to see every swarm's output in order |
 | **Resource Management** | Set appropriate `max_loops` to prevent infinite execution |
 | **Logging** | Enable verbose mode during development for detailed logging |
 

@@ -13,7 +13,7 @@ MCP (Model Context Protocol) provides:
 - **Dynamic Discovery**: Automatically discover available tools from MCP servers
 - **Multi-Server Support**: Connect to multiple MCP servers simultaneously
 - **Type Safety**: Automatic schema validation for tool calls
-- **Flexible Transport**: Support for HTTP, WebSocket, and stdio transports
+- **Flexible Transport**: Streamable HTTP, SSE, and stdio transports
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ agent = Agent(
 )
 ```
 
-The agent sees the union of every server's tools and each call is routed back to the server that owns it.
+The agent sees the union of every server's tools and each call is routed back to the server that owns it. If two servers expose a tool with the same name, the first server's tool is kept and a warning is logged.
 
 ### Without an agent
 
@@ -79,12 +79,14 @@ agent = Agent(
     agent_name="Secure-MCP-Agent",
     model_name="claude-sonnet-4-6",
     mcp_url="https://api.example.com/mcp",
-    mcp_api_key="sk-...",                    # or mcp_authorization_token
+    mcp_api_key="sk-...",                    # or mcp_authorization_token, or mcp_oauth
     mcp_headers={"X-Tenant": "acme"},
     mcp_transport="streamable_http",
     mcp_timeout=30,
 )
 ```
+
+`mcp_api_key`, `mcp_authorization_token`, and `mcp_oauth` only fill in servers that have no credential of their own. `mcp_headers` is merged into each server's headers, with the server's own winning. `mcp_transport` and `mcp_timeout` replace every server's own value.
 
 ### Per-server settings with MCPConnection
 
@@ -111,7 +113,7 @@ agent = Agent(
 
 ### Secrets from the environment
 
-Keep keys out of source — both `env:NAME` and `${NAME}` are resolved when the connection is made:
+Keep keys out of source — both `env:NAME` and `${NAME}` are resolved when the connection is made. This works for `api_key`, `authorization_token`, the OAuth credential fields, and stdio `env` values; `headers` are sent as written:
 
 ```python
 MCPConnection(url="https://api.example.com/mcp", api_key="env:EXAMPLE_MCP_KEY")
@@ -119,13 +121,19 @@ MCPConnection(url="https://api.example.com/mcp", api_key="env:EXAMPLE_MCP_KEY")
 
 ### Transport
 
-Transport is auto-detected from the URL. Force it when you need to:
+Every connection uses streamable HTTP unless you say otherwise; the URL alone does not switch it. Set the transport for an SSE server:
 
 ```python
-MCPManager(mcp_url="https://api.example.com/mcp", transport="sse")
+MCPManager(mcp_url="https://api.example.com/sse", transport="sse")
 ```
 
-Valid values are `streamable_http`, `sse`, and `stdio`. Hyphenated forms such as `streamable-http` are normalized automatically.
+Valid values are `streamable_http`, `sse`, `stdio`, and `auto`. With `auto`, a URL ending in `/sse` uses SSE and a value with no scheme, such as `"python server.py"`, uses stdio. A connection with `command` set always uses stdio:
+
+```python
+MCPConnection(command="python", args=["server.py"], env={"API_KEY": "env:API_KEY"})
+```
+
+Hyphenated forms such as `streamable-http` are normalized automatically.
 
 ### OAuth 2.1
 
@@ -144,7 +152,7 @@ connection = MCPConnection(
 )
 ```
 
-Full OAuth 2.1 is supported, including PKCE authorization-code flow with RFC 7591 dynamic client registration, headless client credentials, and pre-issued tokens.
+Full OAuth 2.1 is supported, including PKCE authorization-code flow with RFC 7591 dynamic client registration, headless client credentials, and pre-issued tokens. See [MCPManager](/api/mcp-manager) for every field.
 
 ## Multi-Server Integration
 
@@ -204,12 +212,7 @@ Each result is an envelope:
 ```
 
 <Note>
-When a tool returns structured data, its payload arrives as a JSON string in `result`:
-
-```python
-import json
-payload = json.loads(results[0]["result"])
-```
+`result` is a `str` when the server returned text, which is how most servers send dicts and numbers, so it may hold JSON. It is a `dict` when the server returned structured content only, or text mixed with images or resources. Check the type before calling `json.loads()`; see [What result holds](/api/mcp-manager#what-result-holds).
 </Note>
 
 ### Calling one tool directly
@@ -257,15 +260,61 @@ result = agent.run(
 
 The agent discovers the server's tools on startup, decides which to call, executes them, and feeds results back into its own loop.
 
+## Serving your own agents over MCP
+
+The integration also runs the other way. [`MCPDeployer`](/api/mcp-deployer) turns an agent, any swarm with a `run()` method, or a plain function into an MCP server with an auth layer in front of it. Each target becomes one tool that takes `task` and an optional `img`, so any MCP client, including another swarms agent, can call it.
+
+```python
+from swarms import Agent, MCPDeployer
+
+analyst = Agent(
+    agent_name="Market-Analyst",
+    agent_description="Answers questions about markets and companies.",
+    model_name="gpt-5.4",
+    max_loops=1,
+    print_on=False,
+)
+
+# Serves http://127.0.0.1:8000/mcp with one tool, market_analyst.
+MCPDeployer(analyst, api_keys=["sk-local-dev"], port=8000).run()
+```
+
+Another agent connects with the same `MCPConnection` used for any other server:
+
+```python
+from swarms import Agent
+from swarms.schemas.mcp_schemas import MCPConnection
+
+client = Agent(
+    agent_name="Portfolio-Manager",
+    model_name="gpt-5.4",
+    mcp_url=MCPConnection(url="http://127.0.0.1:8000/mcp", api_key="sk-local-dev"),
+    max_loops=2,
+)
+```
+
+- **Several agents, one server.** Pass a list, or a dict of tool name to target: `MCPDeployer({"research": researcher, "write": pipeline}, api_keys=[...])`.
+- **Auth.** Static `api_keys`, keys from an environment variable with `api_key_env`, your own `auth` callable, or an `mcp` `TokenVerifier` with `required_scopes`. A server with no auth configured refuses to build unless you pass `allow_anonymous=True`.
+- **Transports.** Streamable HTTP (default), SSE, or stdio for desktop MCP hosts.
+- **Requirements.** `swarms` 15.0.3 or later and `mcp>=2.0.0`.
+
+<CardGroup cols={2}>
+  <Card title="Serve an agent over MCP" icon="rocket" href="/examples/mcp/mcp-deployer-serve-agent">
+    One agent behind an API key, called by a second agent.
+  </Card>
+  <Card title="MCPDeployer reference" icon="server" href="/api/mcp-deployer">
+    Every parameter, auth mode, transport, and method.
+  </Card>
+</CardGroup>
+
 ## Error Handling
 
-Failures raise the agent MCP exceptions, and operations retry with exponential backoff up to `retry_attempts` (default 3) before raising:
+Connection and discovery failures raise the agent MCP exceptions. Tool discovery retries with exponential backoff up to `retry_attempts` (default 3) before raising; tool calls are not retried:
 
 ```python
 from swarms.schemas.agent_mcp_errors import (
     AgentMCPConnectionError,
     AgentMCPError,
-    AgentMCPToolError,
 )
 from swarms.tools.mcp_manager import MCPManager
 
@@ -277,18 +326,16 @@ try:
     ).get_tools()
 except AgentMCPConnectionError as e:
     print(f"Could not reach the server or authentication failed: {e}")
-except AgentMCPToolError as e:
-    print(f"A tool call failed on the server: {e}")
 except AgentMCPError as e:
     print(f"Any other MCP failure: {e}")
 ```
 
-Per-result failures do not raise — check the envelope instead:
+`AgentMCPToolError` is raised only by `call_tool()`, when no configured server exposes the tool name. Per-call failures do not raise — check the envelope instead. A failure reported by the server carries its text in `result`; a client-side failure carries it in `error`:
 
 ```python
 for result in manager.execute_tool_calls(response):
     if result["is_error"]:
-        print(f"{result['tool']} failed: {result['result']}")
+        print(f"{result['tool']} failed: {result.get('error') or result.get('result')}")
 ```
 
 ## Inspecting Configuration
@@ -323,8 +370,8 @@ Build one manager and reuse it rather than constructing one per call.
 ## Best Practices
 
 <CardGroup cols={2}>
-  <Card title="Connection Pooling" icon="network-wired">
-    Reuse MCP connections when fetching tools multiple times
+  <Card title="Reuse the manager" icon="network-wired">
+    Tool schemas are cached per manager, so build one and reuse it
   </Card>
   <Card title="Timeout Configuration" icon="clock">
     Set appropriate timeouts based on server response times
@@ -343,21 +390,23 @@ Build one manager and reuse it rather than constructing one per call.
 
 **Connection Timeouts**
 ```python
-# Increase timeout for slow servers
 connection = MCPConnection(
     url="https://slow-server.com/mcp",
-    timeout=120,  # 2 minutes
+    timeout=60,         # connecting and sending requests
+    tool_timeout=300,   # how long one tool call may run; default 120
 )
 ```
 
 **Authentication Failures**
 ```python
-# Ensure authorization token is set
+# Pass the raw token; swarms adds the "Bearer " prefix
 connection = MCPConnection(
     url="https://api.example.com/mcp",
-    authorization_token="Bearer your-token",
+    authorization_token="your-token",
 )
 ```
+
+With `mcp` 2.x a rejected credential shows up as `Server returned an error response`, not `401`. Check the server's logs for the reason.
 
 **Tool Not Found**
 ```python
@@ -378,6 +427,12 @@ print(agent.mcp_manager.list_tool_names())     # what the agent will be offered
 <CardGroup cols={2}>
   <Card title="MCP tutorials" icon="plug" href="/examples/mcp/overview">
     Step-by-step tutorials against real servers: DeepWiki, Exa, Firecrawl, Hugging Face, Semgrep
+  </Card>
+  <Card title="MCPManager" icon="plug" href="/api/mcp-manager">
+    The full client reference: connections, results, errors, OAuth
+  </Card>
+  <Card title="MCPDeployer" icon="server" href="/api/mcp-deployer">
+    Serve your own agents and swarms as MCP servers
   </Card>
   <Card title="Model Providers" icon="brain" href="/integrations/model-providers">
     Configure different LLM providers

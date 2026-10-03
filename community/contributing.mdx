@@ -79,7 +79,7 @@ If you find any bugs, inconsistencies, or have suggestions for enhancements, ple
 
 1. **Search Existing Issues**: Before opening a new issue, check if it has already been reported
 2. **Open a New Issue**: If it hasn't been reported, create a new issue and provide detailed information
-   - **Title**: A concise summary of the issue
+   - **Title**: A concise summary in the [WARP format](#warp-git-messages), for example `[FIX][SwarmRouter.run][Pass output_type to fallback swarms]`
    - **Description**: Detailed description, steps to reproduce, expected behavior, and any relevant logs or screenshots
 3. **Label Appropriately**: Use labels to categorize the issue (e.g., bug, enhancement, documentation)
 
@@ -101,11 +101,12 @@ We welcome pull requests (PRs) for bug fixes, improvements, and new features. Pl
 
 1. **Fork the Repository**: Create a personal fork of the repository on GitHub
 
-2. **Clone Your Fork**: Clone your forked repository to your local machine
+2. **Clone Your Fork**: Clone your forked repository to your local machine and install it in editable mode
 
    ```bash
-   git clone https://github.com/kyegomez/swarms.git
+   git clone https://github.com/<your-username>/swarms.git
    cd swarms
+   pip install -e .
    ```
 
 3. **Create a New Branch**: Use a descriptive branch name
@@ -118,10 +119,10 @@ We welcome pull requests (PRs) for bug fixes, improvements, and new features. Pl
 
 5. **Add Tests**: Write tests to cover your changes
 
-6. **Commit Your Changes**: Write clear and concise commit messages
+6. **Commit Your Changes**: Write the commit message in the [WARP format](#warp-git-messages)
 
    ```bash
-   git commit -am "Add feature X"
+   git commit -am "[FEAT][SwarmRouter][Add fallback_swarms]"
    ```
 
 7. **Push to Your Fork**:
@@ -134,14 +135,38 @@ We welcome pull requests (PRs) for bug fixes, improvements, and new features. Pl
 
    - Go to the original repository on GitHub
    - Click on "New Pull Request"
-   - Select your branch and create the PR
-   - Provide a clear description of your changes and reference any related issues
+   - Select your branch and open the PR against `master` with a WARP title
+   - Describe the problem it solves and link the issue (`Fixes #1234`)
 
 9. **Respond to Feedback**: Be prepared to make changes based on code reviews
 
 <Note>
-  It's recommended to create small and focused PRs for easier review and faster integration.
+  Keep PRs small and focused: one bug fix, one feature, or one refactor per PR. Under about 100 changed lines is reviewed fastest. Don't mix reformatting, renames, or unrelated cleanup into a functional change.
 </Note>
+
+## WARP git messages
+
+Every commit message, PR title, and issue title in the Swarms repository must use the WARP (Warp Speed Protocol) shorthand. The rule applies to people and AI agents alike.
+
+```
+[TYPE][Function/FileName][Short Description]
+```
+
+- `TYPE`: the kind of change, in capitals, for example `FEAT`, `FIX`, `DOCS`, `REFACTOR`, `TEST`, or `CHORE`.
+- `Function/FileName`: the function, class, module, or file the change is about.
+- `Short Description`: one imperative line saying what changed.
+
+```
+[FIX][Agent._run][Raise AgentLLMError after retry exhaustion]
+[FEAT][MCPDeployer][Serve several agents as separate tools]
+[DOCS][README][Add the MCPDeployer section]
+```
+
+The full specification, with the type list and validation rules, is the [WARP Git Message Skill](https://swarms.world/prompt/32d1e7b4-34da-4035-bc05-d18f8e71a2f1) on the Swarms marketplace. AI coding agents can load it directly.
+
+<Warning>
+  Issues and PRs that do not follow WARP are triaged after the ones that do, so expect a delay on review and merge.
+</Warning>
 
 ## Coding Standards
 
@@ -211,6 +236,33 @@ To maintain code quality and consistency, please adhere to the following standar
 - **PEP 8 Compliance**: Follow [PEP 8](https://www.python.org/dev/peps/pep-0008/) style guidelines
 - **Linting Tools**: The CI lint gate runs `black --check` and `ruff check .` — run `black .` and `ruff check .` locally before submitting
 - **Consistency**: Maintain consistency with the existing codebase
+- **No unrelated reformatting**: Change only the lines you need to
+
+### Comments
+
+Write code that explains itself, and comment only what it can't. A comment is one line. If it needs a paragraph, it belongs in the docstring.
+
+- No multi-line comment blocks: no banners, section dividers, or multi-paragraph explanations
+- No commented-out code; git history keeps it
+- Don't restate the code, such as `# loop over agents` above a `for` loop
+
+```python
+# Bad: a block that restates the code and goes stale
+# ------------------------------------------------------------
+# This function takes a list of agents and runs each of them
+# against the provided task, collecting the results into a
+# list which is then returned to the caller.
+# ------------------------------------------------------------
+def run_all(agents: List[Agent], task: str) -> List[str]:
+    return [agent.run(task) for agent in agents]
+
+
+# Good: the docstring states the contract, a comment explains the surprise
+def run_all(agents: List[Agent], task: str) -> List[str]:
+    """Run task on each agent and return their outputs in order."""
+    # Sequential on purpose: agents share a rate-limited client.
+    return [agent.run(task) for agent in agents]
+```
 
 ## Development Resources
 

@@ -45,7 +45,7 @@ graph TD
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `agent_name` | `str` | `"gkp-agent"` | Name identifier for the agent |
+| `agent_name` | `str` | `"gkp-agent"` | Name identifier for the agent. Components are named `<agent_name>-knowledge-generator`, `<agent_name>-reasoner` and `<agent_name>-coordinator` |
 | `model_name` | `str` | `"openai/o1"` | LLM model to use for all components |
 | `num_knowledge_items` | `int` | `6` | Number of knowledge snippets to generate per query |
 
@@ -57,12 +57,26 @@ graph TD
 
 `run()` only accepts a single task string (it internally calls the private `_run([task])[0]`). There is no public batch-processing method that accepts a list of tasks; process each task with a separate `run()` call if you need to handle multiple queries.
 
+`process(query)` makes one knowledge call, one reasoner call per knowledge item (one after another), and one coordinator call, so a query costs `num_knowledge_items + 2` model calls. It returns:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `query` | `str` | The query |
+| `knowledge_items` | `List[str]` | The generated knowledge statements. Missing items are padded with empty strings, so the list always has `num_knowledge_items` entries |
+| `reasoning_results` | `List[Dict[str, str]]` | One dict per knowledge item, with `explanation`, `confidence`, `answer` and `knowledge` |
+| `final_answer` | `Dict[str, str]` | The coordinator's `analysis`, `response` and `explanation`. `run()` returns `final_answer["response"]` |
+| `process_time` | `float` | Seconds the query took |
+
+Each query and its final answer are also added to `agent.conversation`.
+
 ### KnowledgeGenerator
+
+`KnowledgeGenerator` and `Reasoner` are not exported from `swarms`. Import them with `from swarms.agents.gkp_agent import KnowledgeGenerator, Reasoner`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `agent_name` | `str` | `"knowledge-generator"` | Name identifier |
-| `description` | `str` | `"Generates factual, relevant knowledge to assist with answering queries"` | Description of the agent's role |
+| `description` | `str` | `"Generates factual, relevant knowledge to assist with answering queries"` | Accepted but not used |
 | `model_name` | `str` | `"openai/o1"` | Model for knowledge generation |
 | `num_knowledge_items` | `int` | `2` | Number of knowledge items to generate per query |
 

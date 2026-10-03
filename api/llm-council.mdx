@@ -16,10 +16,12 @@ pip install -U swarms
 
 ## Workflow
 
-1. **Dispatch**: Query sent to all council members in parallel
-2. **Respond**: Each member independently answers the query
-3. **Evaluate**: All members review and rank anonymized responses
-4. **Synthesize**: Chairman creates final answer based on responses and rankings
+1. **Dispatch**: Task sent to all council members in parallel
+2. **Respond**: Each member independently answers the task
+3. **Evaluate**: Every member reviews and ranks all responses, which are relabelled `Response A`, `Response B`, and so on in a shuffled order. Evaluations run concurrently
+4. **Synthesize**: The Chairman receives every response under its member's name, every evaluation, and the mapping from anonymous IDs to members, and writes the final answer
+
+Each `run` starts from an empty conversation, so reusing a council for several tasks never mixes their transcripts.
 
 ## Attributes
 
@@ -36,19 +38,19 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="council_members" type="Optional[List[Agent]]" default="None">
-  List of Agent instances representing council members. If None, creates default council with GPT-5.1, Gemini 3 Pro, Claude Sonnet 4.5, and Grok-4
+  List of Agent instances representing council members. If None, creates the [default council](#default-council-members) of four members on OpenAI, Gemini, Anthropic, and xAI models.
 </ParamField>
 
 <ParamField path="chairman_model" type="str" default="gpt-5.1">
-  Model name for the Chairman agent that synthesizes responses
+  Model name for the Chairman agent that synthesizes responses. The Chairman runs with `temperature=0.7`.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="True">
-  Whether to print progress and intermediate results
+  Whether to log one line per stage through `loguru`: initialization, collecting responses, ranking, synthesis, and completion.
 </ParamField>
 
 <ParamField path="output_type" type="HistoryOutputType" default="dict-all-except-first">
-  Format for the output ("list", "dict", "string", "final", "json", "yaml", etc.)
+  Format for the output (`"list"`, `"dict"`, `"string"`, `"final"`, `"json"`, `"yaml"`, and so on). The default returns every message after the task as a list of message dicts. Use `"final"` for only the Chairman's answer.
 </ParamField>
 
 ## Methods
@@ -58,18 +60,23 @@ pip install -U swarms
 Execute the full LLM Council workflow.
 
 ```python
-def run(self, task: str = None, query: str = None)
+def run(self, task: str)
 ```
 
 **Parameters:**
-- `task` (str): The user's task/query to process (preferred parameter)
-- `query` (str): Alias for task (kept for backwards compatibility)
+- `task` (str): The user's task to process. Required.
 
-**Returns:** Formatted output containing conversation history with all responses, evaluations, and synthesis
+**Returns:** The conversation formatted according to `output_type`, containing the member responses, evaluations, and the Chairman's synthesis
+
+**Raises:** `ValueError` if `task` is not a string, is empty, or contains only whitespace
+
+<Note>
+  The `query` alias was removed. Call `run(task=...)` or pass the task positionally.
+</Note>
 
 ### batched_run()
 
-Run the LLM Council workflow for a batch of tasks.
+Run the LLM Council workflow for a batch of tasks, one after another.
 
 ```python
 def batched_run(self, tasks: List[str]) -> list
@@ -119,7 +126,7 @@ council_members = [
         agent_name="Performance-Expert",
         agent_description="Performance and scalability specialist",
         system_prompt="You are a performance expert. Focus on scalability.",
-        model_name="anthropic/claude-sonnet-4-5",
+        model_name="claude-sonnet-4-6",
         max_loops=1,
     ),
     Agent(
@@ -163,7 +170,7 @@ for i, result in enumerate(results):
 council_final = LLMCouncil(output_type="final")
 final_answer = council_final.run(task="Explain machine learning")
 
-# Get full conversation history as dict
+# Get the full conversation, including the task, as a list of message dicts
 council_dict = LLMCouncil(output_type="dict")
 full_conversation = council_dict.run(task="Explain machine learning")
 
@@ -175,30 +182,59 @@ json_output = council_json.run(task="Explain machine learning")
 ### Non-Verbose Mode
 
 ```python
-# Run without printing progress
+# Run without logging progress
 council = LLMCouncil(verbose=False)
 result = council.run(task="Some query")
+```
+
+With `verbose=True`, the council logs one line per stage:
+
+```
+[LLM Council] Initialized with 4 members: GPT-5.1-Councilor, Gemini-3-Pro-Councilor, Claude-Sonnet-4.5-Councilor, Grok-4-Councilor
+[LLM Council] Collecting responses from 4 members
+[LLM Council] Members ranking the anonymized responses
+[LLM Council] Chairman synthesizing the final answer
+[LLM Council] Session complete
 ```
 
 ## Default Council Members
 
 When no custom members are provided, the default council includes:
 
-1. **GPT-5.1 Councilor**
-   - Specialization: Analytical and comprehensive responses
-   - Focus: Deep analysis, thorough exploration
+| Agent name | Model | Temperature | Persona |
+|---|---|---|---|
+| `GPT-5.1-Councilor` | `gpt-5.1` | 0.7 | Analytical and comprehensive |
+| `Gemini-3-Pro-Councilor` | `gemini-2.5-flash` | 0.7 | Concise and well-structured |
+| `Claude-Sonnet-4.5-Councilor` | `anthropic/claude-sonnet-4-5` | 0.0 | Thoughtful and balanced |
+| `Grok-4-Councilor` | `xai/grok-4-1-fast-reasoning` | 0.8 | Creative and innovative |
 
-2. **Gemini 3 Pro Councilor**
-   - Specialization: Concise and well-structured responses
-   - Focus: Clear structure, efficient information processing
+The agent names do not always match the model: the Gemini councilor runs on `gemini-2.5-flash`. The default council calls four providers, so you need credentials for OpenAI, Anthropic, xAI, and Google. LiteLLM routes the unprefixed `gemini-2.5-flash` to Vertex AI. If you only have API keys, pass your own `council_members`, for example with `gemini/gemini-2.5-flash`.
 
-3. **Claude Sonnet 4.5 Councilor**
-   - Specialization: Thoughtful and balanced responses
-   - Focus: Nuanced reasoning, ethical considerations
+## Prompts
 
-4. **Grok-4 Councilor**
-   - Specialization: Creative and innovative responses
-   - Focus: Unique perspectives, creative problem-solving
+All council prompts live in `swarms.prompts.llm_council_prompts`. Use them to give custom members the same personas:
+
+| Function | Used for |
+|---|---|
+| `get_gpt_councilor_prompt()` | GPT councilor system prompt |
+| `get_gemini_councilor_prompt()` | Gemini councilor system prompt |
+| `get_claude_councilor_prompt()` | Claude councilor system prompt |
+| `get_grok_councilor_prompt()` | Grok councilor system prompt |
+| `get_chairman_prompt()` | Chairman system prompt |
+| `get_evaluation_prompt(query, responses, evaluator_name)` | Peer-ranking task sent to each member |
+| `get_synthesis_prompt(query, original_responses, evaluations, id_to_member)` | Synthesis task sent to the Chairman |
+
+```python
+from swarms import Agent, LLMCouncil
+from swarms.prompts.llm_council_prompts import get_gpt_councilor_prompt
+
+analyst = Agent(
+    agent_name="Analyst-Councilor",
+    system_prompt=get_gpt_councilor_prompt(),
+    model_name="gpt-5.4",
+    max_loops=1,
+)
+```
 
 ## Evaluation Process
 
@@ -233,7 +269,7 @@ The Chairman agent:
 
 ## Output Structure
 
-The conversation history includes:
+The full conversation (for example with `output_type="dict"`) looks like this. The default `"dict-all-except-first"` omits the first `User` entry.
 
 ```python
 [
@@ -265,6 +301,6 @@ The conversation history includes:
 
 1. **Council Composition**: Include agents with complementary strengths
 2. **Clear Queries**: Provide well-defined questions for best results
-3. **Output Type**: Use "final" for end-user answers, "dict" for analysis
+3. **Output Type**: Use `"final"` for end-user answers, and the default `"dict-all-except-first"` or `"dict"` for analysis
 4. **Custom Members**: Tailor council to your domain/use case
 5. **Verbose Mode**: Enable for understanding the decision process

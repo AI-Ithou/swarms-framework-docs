@@ -1,11 +1,14 @@
 ---
 title: Utilities
 description: Essential utility functions and classes for file processing, logging, formatting, and token management
+icon: "toolbox"
 ---
 
 ## Overview
 
 The `swarms.utils` module provides essential utilities for file operations, logging, output formatting, token counting, and data processing. These utilities support core agent functionality and framework operations.
+
+Every name in `swarms.utils.__all__` is re-exported from the top-level package, so `from swarms import count_tokens` works. Names outside `__all__`, such as `Formatter` and `get_supported_models`, are imported from their modules.
 
 ## Logging
 
@@ -14,7 +17,7 @@ The `swarms.utils` module provides essential utilities for file operations, logg
 Initialize a Loguru logger with custom formatting and output configuration.
 
 ```python
-from swarms.utils.loguru_logger import initialize_logger
+from swarms import initialize_logger
 
 logger = initialize_logger(log_folder="my_logs")
 
@@ -28,15 +31,17 @@ logger.debug("Debug information")
 </ParamField>
 
 <ResponseField name="return" type="Logger">
-  Configured Loguru logger instance
+  The shared Loguru logger. Handlers are configured on the first call and reused afterwards
 </ResponseField>
 
 **Features:**
-- Colored console output
+- Colored console output at `INFO` level
 - Timestamp formatting
 - Function and line number tracking
 - Backtrace and diagnostics enabled
 - Thread-safe enqueuing
+
+**Log files:** logs go to `{WORKSPACE_DIR}/logs`, or `agent_workspace/logs` when `WORKSPACE_DIR` is unset. That directory holds a combined `swarms_{YYYY-MM-DD}.log`, rotated daily and kept for 10 days, plus one `{module}.log` per `swarms` module that logs, rolled to `{module}.log.1` past 10 MB. If the directory cannot be created, the logger falls back to console output only.
 
 ## Formatting & Output
 
@@ -69,6 +74,10 @@ formatter.print_markdown(
   Enable markdown output rendering
 </ParamField>
 
+The module also exposes a ready-made instance, `from swarms.utils.formatter import formatter`, created with `md=False`.
+
+Panel body text renders in a neutral grey (`grey85`), whatever border color or style you choose.
+
 #### Methods
 
 ##### print_panel
@@ -92,7 +101,7 @@ formatter.print_panel(
 </ParamField>
 
 <ParamField path="style" type="str" default="bold blue">
-  Panel style (color and formatting)
+  Border style when markdown is enabled. With `md=False`, the border gets a random color and `style` is not used
 </ParamField>
 
 ##### print_markdown
@@ -140,7 +149,7 @@ response = formatter.print_streaming_panel(
 </ParamField>
 
 <ParamField path="style" type="str" default="None">
-  Panel style (uses random color if None)
+  Border style. A random color is used when `None`
 </ParamField>
 
 <ParamField path="collect_chunks" type="bool" default="False">
@@ -184,6 +193,20 @@ formatter.print_agent_dashboard(
   Whether this is the final update
 </ParamField>
 
+##### Other methods
+
+| Method | Description |
+|---|---|
+| `loading_status(message="Thinking...", spinner="dots", spinner_style="bold yellow")` | Return a Rich `Status` context manager that shows a spinner while a block runs |
+| `print_table(title, data)` | Print a two-column table from a `Dict[str, List[str]]` |
+| `print_progress(description, task_fn, *args, **kwargs)` | Show a spinner while `task_fn(*args, **kwargs)` runs, then return its result |
+| `print_panel_token_by_token(tokens, title="Output", style="bold cyan", delay=0.01, by_word=False)` | Replay a string into a live panel one character or word at a time |
+| `stop_dashboard()` | Stop the live dashboard started by `print_agent_dashboard` |
+| `print_plan_tree(task_description, steps, print_on=True)` | Render a plan as a tree. Each step dict carries `step_id`, `description`, `priority` and optional `dependencies` |
+| `display_hierarchy(director_name, director_model_name, agents, swarm_name)` | Render a director and its worker agents as a tree |
+| `print_director_task_distribution(director_name, orders, plan=None, title=None)` | Show a director's plan and its `agent_name`/`task` orders in a panel |
+| `print_thinking_panel(content, title="Thinking")` | Show reasoning content in a dimmed panel |
+
 ## Data Structure Formatting
 
 ### format_dict_to_string
@@ -191,7 +214,7 @@ formatter.print_agent_dashboard(
 Recursively format a dictionary into a readable, multi-line string.
 
 ```python
-from swarms.utils import format_dict_to_string
+from swarms import format_dict_to_string
 
 text = format_dict_to_string({"name": "Agent", "config": {"loops": 3}})
 print(text)
@@ -214,7 +237,7 @@ print(text)
 Format any Python data structure (dict, list, tuple, set, or object) into a readable, indented, multi-line string.
 
 ```python
-from swarms.utils import format_data_structure
+from swarms import format_data_structure
 
 text = format_data_structure({"agents": ["A", "B"], "count": 2})
 print(text)
@@ -237,7 +260,7 @@ print(text)
 Check if a value is not `None`.
 
 ```python
-from swarms.utils import exists
+from swarms import exists
 
 exists(None)  # False
 exists("value")  # True
@@ -250,7 +273,7 @@ exists("value")  # True
 Create a file with content in a specified folder.
 
 ```python
-from swarms.utils import create_file_in_folder
+from swarms import create_file_in_folder
 
 file_path = create_file_in_folder(
     folder_path="./reports",
@@ -280,12 +303,13 @@ file_path = create_file_in_folder(
 Clean and sanitize file paths for cross-platform compatibility.
 
 ```python
-from swarms.utils import sanitize_file_path
+from swarms import sanitize_file_path
 
 safe_path = sanitize_file_path("`C:/Users/file<name>.txt`")
 # Returns: C__Users_file_name_.txt
-# `:`, `/`, `\`, `<`, `>`, `"`, `|`, `?`, `*`, and backticks are all replaced with `_`
 ```
+
+Backticks are removed and surrounding whitespace is stripped. Each of `<`, `>`, `:`, `"`, `/`, `\`, `|`, `?` and `*` is replaced with `_`, so path separators are replaced too.
 
 <ParamField path="file_path" type="str" required>
   File path to sanitize
@@ -295,12 +319,16 @@ safe_path = sanitize_file_path("`C:/Users/file<name>.txt`")
   Sanitized file path safe for all platforms
 </ResponseField>
 
+<Note>
+The file helpers in this section log failures and return `None` instead of raising. Check the return value before you use it.
+</Note>
+
 ### load_json
 
 Load and parse a JSON string.
 
 ```python
-from swarms.utils import load_json
+from swarms import load_json
 
 json_str = '{"name": "Agent", "status": "active"}'
 data = load_json(json_str)
@@ -312,15 +340,15 @@ print(data["name"])  # "Agent"
 </ParamField>
 
 <ResponseField name="return" type="object">
-  Parsed Python object (dict, list, etc.)
+  Parsed Python object (dict, list, etc.), or `None` if the string is not valid JSON
 </ResponseField>
 
 ### zip_workspace
 
-Zip an entire workspace directory.
+Zip an entire workspace directory. The archive is written to a new temporary directory, not the current one.
 
 ```python
-from swarms.utils import zip_workspace
+from swarms import zip_workspace
 
 zip_path = zip_workspace(
     workspace_path="./my_workspace",
@@ -333,19 +361,19 @@ zip_path = zip_workspace(
 </ParamField>
 
 <ParamField path="output_filename" type="str" required>
-  Name for output zip file (without .zip extension)
+  Name for output zip file. A `.zip` extension in it is removed, then added back once
 </ParamField>
 
 <ResponseField name="return" type="str">
-  Path to created zip file
+  Path to created zip file, or `None` on failure
 </ResponseField>
 
 ### zip_folders
 
-Zip multiple folders into a single archive.
+Zip two folders into a single archive. Each folder appears under its own base name inside the archive. Returns `None`.
 
 ```python
-from swarms.utils import zip_folders
+from swarms import zip_folders
 
 zip_folders(
     folder1_path="./data",
@@ -363,7 +391,7 @@ zip_folders(
 </ParamField>
 
 <ParamField path="zip_file_path" type="str" required>
-  Output zip file path
+  Output archive path without the extension. `.zip` is appended
 </ParamField>
 
 ## Token Management
@@ -373,12 +401,12 @@ zip_folders(
 Count tokens in text using LiteLLM tokenizer.
 
 ```python
-from swarms.utils import count_tokens
+from swarms import count_tokens
 
 text = "Analyze the financial statements"
 token_count = count_tokens(
     text=text,
-    model="gpt-4"
+    model="gpt-5.4"
 )
 print(f"Tokens: {token_count}")
 ```
@@ -396,10 +424,14 @@ print(f"Tokens: {token_count}")
 </ParamField>
 
 <ResponseField name="return" type="int">
-  Number of tokens in the text
+  Number of tokens in the text. Empty or whitespace-only text returns `0`
 </ResponseField>
 
 **Raises:** `ValueError` if both the primary model and the fallback encoder fail to tokenize the text.
+
+<Tip>
+To see what a run actually cost, read the provider-reported counts on `agent.usage` instead of re-counting text. See [Token usage](/agents/token-usage).
+</Tip>
 
 ### get_supported_models
 
@@ -420,20 +452,20 @@ print(models)
 
 ### load_agent_from_markdown
 
-Load agent configuration from markdown file.
+Load an agent from a markdown file with YAML frontmatter. Keyword arguments override values from the file. See [AgentLoader](/api/agent-loader) for the file format.
 
 ```python
-from swarms.utils import load_agent_from_markdown
+from swarms import load_agent_from_markdown
 
 agent = load_agent_from_markdown("agent_config.md")
 ```
 
 ### load_agents_from_markdown
 
-Load multiple agents from markdown files.
+Load multiple agents from a directory path or a list of markdown files.
 
 ```python
-from swarms.utils import load_agents_from_markdown
+from swarms import load_agents_from_markdown
 
 agents = load_agents_from_markdown([
     "agent1.md",
@@ -442,12 +474,24 @@ agents = load_agents_from_markdown([
 ])
 ```
 
+<ParamField path="file_paths" type="Union[str, List[str]]" required>
+  A directory path or a list of markdown file paths
+</ParamField>
+
+<ParamField path="concurrent" type="bool" default="True">
+  Load files in parallel with a thread pool
+</ParamField>
+
+<ParamField path="max_file_size_mb" type="float" default="10.0">
+  Skip files larger than this size
+</ParamField>
+
 ### MarkdownAgentLoader
 
 Class for loading agents from markdown with advanced options. `load_agent_from_markdown` and `load_agents_from_markdown` are thin wrappers around it.
 
 ```python
-from swarms.utils import MarkdownAgentLoader
+from swarms import MarkdownAgentLoader
 
 loader = MarkdownAgentLoader(max_workers=4)
 
@@ -456,13 +500,15 @@ agents = loader.load_multiple_agents("./agent_configs")
 ```
 
 <ParamField path="max_workers" type="int" default="None">
-  Worker count used when loading multiple files concurrently
+  Accepted but currently ignored. The constructor always sets `max_workers` to twice the CPU count
 </ParamField>
 
 | Method | Description |
 |---|---|
 | `load_single_agent(file_path, **kwargs)` | Load one agent from a markdown file |
 | `load_multiple_agents(file_paths, **kwargs)` | Load agents from a directory path or a list of file paths |
+| `load_agent_from_markdown(file_path, **kwargs)` | Same as `load_single_agent` |
+| `load_agents_from_markdown(file_paths, concurrent=True, max_file_size_mb=10.0, **kwargs)` | Same as `load_multiple_agents`, with concurrency and file-size controls |
 | `parse_markdown_file(file_path)` | Parse a markdown file into a `MarkdownAgentConfig` without building an `Agent` |
 | `parse_yaml_frontmatter(content)` | Parse just the YAML frontmatter out of markdown content |
 
@@ -509,10 +555,10 @@ Relevant `Conversation` constructor parameters:
 
 ### history_output_formatter
 
-Format a `Conversation` object's history into one of several output formats.
+Format a `Conversation` object's history into one of several output formats. This is what an agent's or swarm's `output_type` setting runs through.
 
 ```python
-from swarms.utils import history_output_formatter
+from swarms import history_output_formatter
 
 formatted = history_output_formatter(
     conversation=conversation_history,
@@ -526,19 +572,25 @@ print(formatted)
 </ParamField>
 
 <ParamField path="type" type="HistoryOutputType" default="list">
-  Output format. One of: `"list"`, `"dict"`/`"dictionary"`, `"string"`/`"str"`, `"final"`/`"last"`, `"json"`, `"all"`, `"yaml"`, `"xml"`, `"dict-all-except-first"`, `"str-all-except-first"`, `"dict-final"`, `"list-final"`
+  Output format. One of: `"list"`, `"dict"`/`"dictionary"`, `"string"`/`"str"`, `"final"`/`"last"`, `"json"`, `"all"` (same as `"str"`), `"yaml"`, `"dict-all-except-first"`, `"str-all-except-first"`, `"dict-final"`, `"list-final"`
 </ParamField>
 
 **Raises:** `ValueError` if `type` is not one of the supported values.
+
+`HistoryOutputType` is the `Literal` type listing these values, exported from `swarms.utils` and `swarms` for type hints. `OutputType` in `swarms.utils.output_types` is an alias of it.
+
+<Warning>
+The `"xml"` output type and the `swarms.utils.xml_utils` module have been removed, so `"xml"` now raises `ValueError`. Use `"json"` or `"yaml"` for a serialized history. `"basemodel"` is still listed in `HistoryOutputType`, but `history_output_formatter` does not handle it and raises `ValueError`.
+</Warning>
 
 ## LiteLLM Wrapper
 
 ### LiteLLM
 
-Wrapper class for LiteLLM with error handling.
+Wrapper class for LiteLLM with error handling. `Agent` builds one of these internally; use it directly for single LLM calls outside an agent.
 
 ```python
-from swarms.utils import LiteLLM
+from swarms import LiteLLM
 
 llm = LiteLLM(
     model_name="gpt-5.4",
@@ -547,16 +599,75 @@ llm = LiteLLM(
 )
 
 response = llm.run("Analyze this data")
+print(llm.usage)
 ```
 
 The constructor parameter is `model_name`, not `model` — because `LiteLLM.__init__` absorbs unrecognized keywords via `**kwargs`, passing `model=` silently fails to set the model instead of raising an error.
 
+Commonly used constructor parameters:
+
+<ParamField path="model_name" type="str" default="gpt-5.4">
+  Any LiteLLM model string
+</ParamField>
+
+<ParamField path="system_prompt" type="str" default="None">
+  System prompt sent with every call
+</ParamField>
+
+<ParamField path="temperature" type="float" default="None">
+  Sampling temperature. When `None` it is left out of the request and the provider's default applies
+</ParamField>
+
+<ParamField path="max_tokens" type="int" default="4000">
+  Maximum output tokens per call
+</ParamField>
+
+<ParamField path="stream" type="bool" default="False">
+  Return a generator of chunks instead of a string
+</ParamField>
+
+<ParamField path="tools_list_dictionary" type="List[dict]" default="None">
+  OpenAI-format tool schemas the model may call
+</ParamField>
+
+<ParamField path="reasoning_effort" type="str" default="None">
+  `"low"`, `"medium"` or `"high"` for reasoning models
+</ParamField>
+
+<ParamField path="thinking_tokens" type="int" default="None">
+  Extended thinking budget for Anthropic reasoning models
+</ParamField>
+
+<ParamField path="prompt_caching" type="bool" default="False">
+  Add provider-side prompt-cache breakpoints (Anthropic models). Tune with `cache_config`
+</ParamField>
+
+<ParamField path="base_url" type="str" default="None">
+  Custom API endpoint, for local or self-hosted models
+</ParamField>
+
+<ParamField path="api_key" type="str" default="None">
+  API key. Falls back to the provider's environment variable
+</ParamField>
+
+<ParamField path="usage_hook" type="Callable[[dict], None]" default="None">
+  Called with each call's token counts. For a stream, it fires once the provider's final usage chunk has been consumed
+</ParamField>
+
+| Method or attribute | Description |
+|---|---|
+| `run(task=None, audio=None, img=None, imgs=None, messages=None, *args, **kwargs)` | Make one completion call. Keyword arguments override constructor settings for that call |
+| `arun(...)` | Async version of `run`, with the same arguments |
+| `__call__(task, *args, **kwargs)` | Same as `run(task, ...)` |
+| `batched_run(tasks, batch_size=10)` | Run several prompts concurrently and return responses in input order |
+| `usage` | Running totals: `input_tokens`, `output_tokens`, `cached_tokens`, `reasoning_tokens`, `total_tokens` |
+
 ### NetworkConnectionError
 
-Exception raised for network connection issues.
+Raised by `LiteLLM.run()` and `arun()` when the provider cannot be reached. The message includes troubleshooting steps.
 
 ```python
-from swarms.utils import NetworkConnectionError
+from swarms import NetworkConnectionError
 
 try:
     response = llm.run(prompt)
@@ -567,16 +678,20 @@ except NetworkConnectionError as e:
 
 ### LiteLLMException
 
-General exception for LiteLLM errors.
+Exception class for LiteLLM wrapper errors. The wrapper re-raises it if it occurs, but nothing in the framework raises it today. Provider errors such as authentication or bad-request failures reach you as LiteLLM's own exception types.
 
 ```python
-from swarms.utils import LiteLLMException
+from swarms import LiteLLMException
 
 try:
     response = llm.run(prompt)
 except LiteLLMException as e:
     print(f"LiteLLM error: {e}")
 ```
+
+<Note>
+When the call goes through an `Agent`, a model that still fails after `retry_attempts` (and after any `fallback_models`) raises `AgentLLMError` from `Agent.run()`. See [Agent error schemas](/api/schemas#agent-error-schemas).
+</Note>
 
 ## Workspace Management
 
@@ -585,11 +700,14 @@ except LiteLLMException as e:
 Creates a swarm's autosave directory once and writes to it on demand. The directory is `{WORKSPACE_DIR}/swarms/{ClassName}/{name}-{stamp}`, created eagerly so `dir` is usable straight after construction.
 
 ```python
-from swarms.utils import WorkspaceManager
+from swarms import WorkspaceManager
 
 manager = WorkspaceManager(owner=my_swarm, verbose=True)
 print(manager.dir)
+manager.save_conversation(my_swarm.conversation)
 ```
+
+If `WORKSPACE_DIR` is unset, the manager sets it to `./agent_workspace` before creating the directory. No method raises: a failed write logs a warning and returns `None`, so autosave never fails a run.
 
 <ParamField path="owner" type="Any" required>
   The swarm instance. Its class name and `name` attribute pick the directory, and it is the default source for conversation and config data
@@ -619,10 +737,27 @@ print(manager.dir)
   Base fields merged into `_autosave_metadata` on every write, in place of the default `{class_name, swarm_name, swarm_id}`
 </ParamField>
 
+| Method | Description |
+|---|---|
+| `WorkspaceManager.for_agent(agent, verbose=False, enabled=True)` | Class method. Build a manager over an agent's own `agents/{name}-{id}` directory |
+| `save_json(filename, data)` | Write `data` as JSON into the directory |
+| `save_text(filename, content)` | Write text into the directory atomically |
+| `save_conversation(conversation=None, filename="conversation_history.json")` | Write conversation history. Defaults to `owner.conversation`; pass it explicitly when the swarm keeps it elsewhere |
+| `save_config(additional_metadata=None)` | Write the owner's configuration to `config.json` |
+| `save_state(state_data=None)` | Write a state snapshot to `state.json` |
+| `save_metadata(execution_result=None, execution_metadata=None)` | Write run metadata to `metadata.json` |
+| `save_all(conversation=None, execution_result=None)` | Write config, state, metadata and conversation. Returns a dict of the written paths |
+
+Each `save_*` method returns the written path, or `None` when the manager is disabled or the write failed. `bool(manager)` is `True` only when writes will land somewhere.
+
+<Note>
+`WorkspaceManager` replaces the old `swarms.utils.swarm_autosave` module, which has been deleted. Build a `WorkspaceManager` in your swarm's `__init__` and call its `save_*` methods from `run`.
+</Note>
+
 ## Example: Complete Utility Usage
 
 ```python
-from swarms.utils import (
+from swarms import (
     initialize_logger,
     create_file_in_folder,
     count_tokens,

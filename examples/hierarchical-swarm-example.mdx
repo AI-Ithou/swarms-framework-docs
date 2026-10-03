@@ -12,8 +12,8 @@ The hierarchical pattern follows a command-and-control structure:
 1. **Planning Phase**: Director analyzes the task and creates a comprehensive plan
 2. **Task Distribution**: Director assigns specific subtasks to appropriate worker agents
 3. **Worker Execution**: Specialized workers complete their assigned tasks independently
-4. **Evaluation Phase**: Director reviews all worker outputs
-5. **Feedback Loop**: Director can issue refinements or new tasks based on results
+4. **Next Loop**: With `max_loops > 1`, the director sees the previous loop's results and issues refinements or new orders
+5. **Optional Review**: `director_feedback_on=True` adds a feedback pass on worker outputs, and `agent_as_judge=True` scores them with a judge agent
 
 ### Key Characteristics
 
@@ -90,10 +90,10 @@ print(result)
    - Brand Strategist: "Define positioning against Asana and Monday.com"
 4. **Execution**: All workers complete their tasks in parallel
 5. **Review & Coordination**: Director reviews outputs and ensures alignment
-6. **Refinement Loop** (max_loops=2): Director may ask for adjustments:
+6. **Refinement Loop** (max_loops=2): In the second loop the director reads the first loop's results and may ask for adjustments:
    - "Align content calendar with campaign launch dates"
    - "Incorporate top SEO keywords into brand messaging"
-7. **Final Synthesis**: Director combines all work into cohesive strategy
+7. **Output**: `run()` returns the conversation shaped by `output_type`. The default, `"dict-all-except-first"`, is a list of role/content messages: the director's plan and orders, each worker's answer, and a marker for each completed loop. There is no separate final-synthesis step.
 
 ## The Director-Worker Pattern
 
@@ -320,7 +320,7 @@ The `max_loops` parameter enables iterative refinement:
 
 ### Single Loop (max_loops=1)
 ```python
-# Director plans → Workers execute → Director synthesizes → Done
+# Director plans → Workers execute → Done
 swarm = HierarchicalSwarm(
     agents=[agent1, agent2, agent3],
     max_loops=1,  # One-pass execution
@@ -329,8 +329,7 @@ swarm = HierarchicalSwarm(
 
 ### Multiple Loops (max_loops=2+)
 ```python
-# Loop 1: Director plans → Workers execute → Director reviews
-# Loop 2: Director requests refinements → Workers improve → Director finalizes
+# Each later loop: the director reads the previous results and issues new orders
 swarm = HierarchicalSwarm(
     agents=[agent1, agent2, agent3],
     max_loops=3,  # Multiple refinement cycles
@@ -360,27 +359,14 @@ swarm = HierarchicalSwarm(
     name="Design-Dev-Team",
     agents=[designer, developer],
     max_loops=3,  # Allow for iteration
+    director_feedback_on=True,  # Director critiques worker output between loops
     verbose=True
 )
 
 result = swarm.run("Build a user-friendly dashboard for analytics")
-
-# Behind the scenes:
-# Loop 1:
-#   Director: "Designer, create dashboard mockup. Developer, review technical feasibility."
-#   Workers execute
-#   Director: "Design looks good but developer flagged performance concerns"
-#
-# Loop 2:
-#   Director: "Designer, simplify complex charts. Developer, optimize data loading."
-#   Workers execute
-#   Director: "Better, but need mobile responsiveness"
-#
-# Loop 3:
-#   Director: "Designer, add mobile layouts. Developer, implement responsive design."
-#   Workers execute
-#   Director: "Perfect, all requirements met" → Final output
 ```
+
+In loop 1 the director might order the Designer to create a mockup and the Developer to check feasibility. With `director_feedback_on=True`, a feedback director reviews those outputs (for example, flagging performance concerns), and loop 2's orders build on that review. Loop 3 is the last, so it skips the feedback pass. The feedback only runs when `max_loops > 1`.
 
 ## Benefits of Hierarchical Swarm
 

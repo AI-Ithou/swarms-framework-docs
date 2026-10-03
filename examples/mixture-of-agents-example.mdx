@@ -12,6 +12,8 @@ The MoA pattern follows a two-phase approach:
 1. **Parallel Expert Phase**: Multiple specialized agents process the task independently and simultaneously
 2. **Aggregation Phase**: A dedicated aggregator agent synthesizes all expert outputs into a coherent final result
 
+The expert phase repeats for `layers` rounds (default `3`) before the aggregator runs once. From the second layer on, each expert sees the original task plus the previous layer's answers. Set `layers=1` for a single expert pass. `run()` returns the aggregator's answer by default (`output_type="final"`).
+
 ### Key Characteristics
 
 - **Expert Diversity**: Each agent brings unique perspective and expertise
@@ -319,8 +321,7 @@ aggregator = Agent(
     model_name="gpt-5.4"
 )
 
-# Use SwarmRouter for MoA — SwarmRouter always uses the LAST agent in the
-# `agents` list as the aggregator, so it must be listed last here.
+# SwarmRouter uses the last agent in the list as the aggregator
 moa_router = SwarmRouter(
     swarm_type="MixtureOfAgents",
     agents=[writer, editor, reviewer, aggregator],
@@ -331,6 +332,8 @@ aggregated_output = moa_router.run(
 )
 print(aggregated_output)
 ```
+
+Through `SwarmRouter`, the whole `agents` list (aggregator included) runs as the expert layer, and the router's `max_loops` sets the number of layers. To keep the aggregator out of the expert layer, construct `MixtureOfAgents` directly.
 
 ## Best Practices
 

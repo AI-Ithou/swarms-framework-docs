@@ -16,7 +16,7 @@ from swarms import Agent
 # Initialize a new agent
 agent = Agent(
     model_name="gpt-5.4",  # Specify the LLM
-    max_loops="auto",           # Set the number of interactions
+    max_loops="auto",           # Run autonomously until the task is done
     interactive=True,           # Enable interactive mode for real-time feedback
 )
 
@@ -166,6 +166,8 @@ Now that you've created your first agent, explore these advanced topics:
 - [Vision Agent](/examples/vision-agent) - Process images and multimodal content
 - [Streaming Responses](/examples/streaming) - Stream agent outputs in real-time
 - [Multi-Agent Workflows](/architectures/sequential-workflow) - Coordinate multiple agents
+- [Autonomous Mode](/agents/autonomous-mode) - How `max_loops="auto"` plans, acts, and stops
+- [Token Usage](/agents/token-usage) - Track what each run costs
 
 ## Common Patterns
 

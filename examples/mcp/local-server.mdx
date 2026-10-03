@@ -1,6 +1,6 @@
 ---
 title: 'Build your own MCP server'
-description: 'Expose your own Python functions over MCP with FastMCP, point an agent at them, and inspect the server directly with MCPManager.'
+description: 'Expose your own Python functions over MCP with the mcp package, point an agent at them, and inspect the server directly with MCPManager.'
 icon: 'server'
 ---
 
@@ -10,29 +10,33 @@ The reason to do this rather than pass Python functions to `Agent(tools=[...])` 
 
 | | |
 |---|---|
-| **Server framework** | `FastMCP` from the `mcp` package |
+| **Server framework** | `MCPServer` from the `mcp` package (`FastMCP` on `mcp` 1.x) |
 | **Transport** | streamable HTTP, `http://localhost:8000/mcp` |
 | **Model used here** | `gpt-5.4-mini` |
 
 ## Prerequisites
 
 ```bash
-pip install -U swarms "mcp>=1.28.1,<2.0.0" requests
+pip install -U swarms "mcp>=2.0.0" requests
 export OPENAI_API_KEY="sk-..."
 ```
+
+<Note>
+  `mcp` 2.x renamed `FastMCP` to `MCPServer` and moved it to `mcp.server.mcpserver`. On `mcp` 1.x, import `from mcp.server.fastmcp import FastMCP` instead; the decorator and `run()` call below are the same. The swarms client works with both.
+</Note>
 
 ## Build it
 
 <Steps>
   <Step title="Write the server">
-    A `FastMCP` server is a Python module with decorated functions. The decorator's `name` and `description` are what the model sees, so write them for a reader who has no other context.
+    An `MCPServer` is a Python module with decorated functions. The decorator's `name` and `description` are what the model sees, so write them for a reader who has no other context.
 
     ```python
     # crypto_price_server.py
     import requests
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
-    mcp = FastMCP("CryptoPrice")
+    mcp = MCPServer("CryptoPrice")
 
 
     @mcp.tool(
@@ -84,7 +88,7 @@ export OPENAI_API_KEY="sk-..."
     python crypto_price_server.py
     ```
 
-    It serves on `http://localhost:8000/mcp`. Leave it running.
+    It serves on `http://127.0.0.1:8000/mcp`. Leave it running.
   </Step>
 
   <Step title="Point an agent at it">
@@ -180,35 +184,24 @@ agent = Agent(
 
 ## An agent as a tool
 
-The most interesting server in the examples folder wraps a whole swarms `Agent` as a single MCP tool, so another agent — or any MCP client — can spawn and run it remotely:
+To serve a swarms `Agent`, or a whole swarm, as an MCP tool, you do not need to write a server by hand. [`MCPDeployer`](/api/mcp-deployer) wraps it, puts an auth layer in front, and serves it:
 
 ```python
-from mcp.server.fastmcp import FastMCP
-from swarms import Agent
+from swarms import Agent, MCPDeployer
 
-mcp = FastMCP("MCPAgentTool")
-
-
-@mcp.tool(
-    name="create_agent",
-    description="Create an agent with the specified name, system prompt, and model, then run a task.",
+analyst = Agent(
+    agent_name="Market-Analyst",
+    agent_description="Answers questions about markets and companies.",
+    model_name="gpt-5.4-mini",
+    max_loops=1,
+    print_on=False,
 )
-def create_agent(
-    agent_name: str, system_prompt: str, model_name: str, task: str
-) -> str:
-    agent = Agent(
-        agent_name=agent_name,
-        system_prompt=system_prompt,
-        model_name=model_name,
-    )
-    return agent.run(task)
-
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    MCPDeployer(analyst, api_keys=["sk-local-dev"], port=8000).run()
 ```
 
-That is how you compose swarms across process or machine boundaries: the calling agent does not know or care that the tool it invoked is itself an agent.
+That is how you compose swarms across process or machine boundaries: the calling agent does not know or care that the tool it invoked is itself an agent. See [Serve an agent over MCP](/examples/mcp/mcp-deployer-serve-agent) for the full walkthrough.
 
 ## Writing tools an agent can use well
 
@@ -216,7 +209,7 @@ That is how you compose swarms across process or machine boundaries: the calling
 |---|---|
 | One job per tool | The model picks by description; overlapping tools produce wrong picks. |
 | Describe the arguments, with an example value | `coin_id` is ambiguous; "e.g. 'bitcoin', 'ethereum'" is not. |
-| Return strings, including for errors | The model can recover from a readable error; an exception ends the call. |
+| Return strings, including for errors | The model can recover from a readable error; an exception reaches it only as `Error executing tool ...` with the exception text. |
 | Keep outputs small | Every result is re-sent in the history on each later call of the run. |
 | Name for search | With [dynamic loading](/examples/mcp/dynamic-tool-loading) the name and description are what the search matches. |
 

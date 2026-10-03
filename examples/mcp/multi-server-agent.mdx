@@ -38,7 +38,7 @@ Pass a list to `mcp_urls` and the agent loads the tools from *every* server and 
     )
     ```
 
-    `mcp_urls` is the only change from the single-server examples. Routing, transport selection, and name collisions are handled for you.
+    `mcp_urls` is the only change from the single-server examples. Routing is handled for you: each call goes back to the server that advertised the tool. If two servers expose a tool with the same name, the first server's tool is kept and a warning is logged.
   </Step>
 
   <Step title="Give it more than one loop">

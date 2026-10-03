@@ -12,17 +12,20 @@ Deploying multi-agent systems in production requires careful attention to error 
 
 ### Agent Error Hierarchy
 
-Swarms provides a comprehensive exception hierarchy for different failure modes:
+Swarms defines an exception hierarchy under `AgentError`. Every class is exported from the top-level `swarms` package:
+
+| Exception | When `Agent` raises it |
+|---|---|
+| `AgentInitializationError` | The constructor rejects the configuration, for example `max_loops` that is neither a positive integer nor `"auto"` |
+| `AgentLLMError` | Every one of the `retry_attempts` LLM calls failed, on the primary model and on every fallback model |
+| `AgentToolExecutionError` | A tool batch failed `tool_retry_attempts` times. The agent catches this itself and shows the failure to the model, so it does not escape `run()` |
+| `AgentRunError`, `AgentLLMInitializationError` | Part of the hierarchy for your own code; the `Agent` run path does not raise them |
+
+`run()` raises `ValueError` before any LLM call when the task is empty and `interactive` is `False`.
 
 ```python
-from swarms.schemas.agent_errors import (
-    AgentError,  # Base exception
-    AgentInitializationError,  # Initialization failures
-    AgentRunError,  # Runtime failures
-    AgentLLMError,  # LLM-related errors
-    AgentLLMInitializationError,  # LLM initialization failures
-    AgentToolExecutionError,  # Tool execution failures
-)
+from loguru import logger
+from swarms import Agent, AgentInitializationError, AgentLLMError
 
 try:
     agent = Agent(
@@ -32,27 +35,25 @@ try:
     )
     result = agent.run("Process this task")
 except AgentInitializationError as e:
-    logger.error(f"Failed to initialize agent: {e}")
-    # Handle initialization failure (e.g., retry with different config)
+    logger.error(f"Invalid agent configuration: {e}")
 except AgentLLMError as e:
-    logger.error(f"LLM error: {e}")
-    # Handle LLM failures (e.g., switch to fallback model)
-except AgentToolExecutionError as e:
-    logger.error(f"Tool error: {e}")
-    # Handle tool failures (e.g., disable problematic tool)
-except AgentRunError as e:
-    logger.error(f"Runtime error: {e}")
-    # Handle general runtime errors
-except Exception as e:
-    logger.error(f"Unexpected error: {e}")
-    # Catch-all for unexpected errors
+    # The original provider error is chained as e.__cause__
+    logger.error(f"Every model and retry failed: {e}")
 ```
+
+<Note>
+  In 15.0.3 and earlier, an agent whose retries were all exhausted logged the failure and returned an empty string, and `fallback_models` were never tried. `run()` now raises `AgentLLMError`, after first handing the task to each fallback model. The agent also removes the turns the failed run added to its memory, so a fallback model does not see the task twice.
+</Note>
 
 ### Graceful Error Recovery
 
 ```python
+import time
 import traceback
+
 from loguru import logger
+from swarms import AgentLLMError
+
 
 def run_agent_with_recovery(agent, task, max_retries=3):
     """
@@ -62,7 +63,7 @@ def run_agent_with_recovery(agent, task, max_retries=3):
         try:
             result = agent.run(task)
             return result
-        except (AgentLLMError, AgentRunError) as e:
+        except AgentLLMError as e:
             logger.warning(f"Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 logger.info(f"Retrying in {2 ** attempt} seconds...")
@@ -86,10 +87,13 @@ from swarms import Agent
 agent = Agent(
     agent_name="Resilient-Agent",
     model_name="claude-sonnet-4-6",
-    retry_attempts=5,  # Number of retry attempts
+    retry_attempts=5,        # LLM call attempts per loop (default 3)
+    tool_retry_attempts=3,   # attempts per tool batch (default 3)
     max_loops=3,
 )
 ```
+
+Retries run back to back, with no delay between attempts. Wrap `run()` in your own backoff, as below, when you need to wait out rate limits.
 
 ### Exponential Backoff
 
@@ -152,11 +156,44 @@ agent = Agent(
 result = agent.run("Generate a report")
 ```
 
+Each model gets the full `retry_attempts` before the agent moves to the next one. When the last model fails, `run()` raises `AgentLLMError`.
+
+### Fallback swarms
+
+`SwarmRouter` can fall back across swarm architectures. When the primary `swarm_type` raises, during construction or during `run()`, the router builds the next type in `fallback_swarms` from the same agents and configuration and gives it the same task. The first one to complete wins:
+
+```python
+from swarms import Agent, SwarmRouter
+from swarms.structs.swarm_router import SwarmRouterRunError
+
+agents = [
+    Agent(agent_name="Researcher", model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Analyst", model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Writer", model_name="gpt-5.4", max_loops=1),
+]
+
+router = SwarmRouter(
+    agents=agents,
+    swarm_type="HierarchicalSwarm",
+    fallback_swarms=["SequentialWorkflow", "ConcurrentWorkflow"],
+)
+
+try:
+    result = router.run("Assess whether we should adopt usage-based pricing.")
+    print(f"Served by: {router.active_swarm_type}")
+    for attempt in router.fallback_attempts:
+        print(f"Failed first: {attempt['swarm_type']} -> {attempt['error']}")
+except SwarmRouterRunError as e:
+    print(f"Every swarm type failed: {e}")
+```
+
+Without `fallback_swarms`, the original exception propagates unchanged. Including `"AgentRearrange"` in the list requires `rearrange_flow`. See [SwarmRouter](/api/swarm-router) for details.
+
 ## Logging
 
 ### Structured Logging with Loguru
 
-Swarms uses Loguru for powerful, structured logging:
+Swarms uses Loguru. Out of the box it logs to the console and to `{WORKSPACE_DIR}/logs/`: a combined `swarms_YYYY-MM-DD.log` rotated daily and kept for 10 days, plus one `<module>.log` per Swarms module that logs. Calling `logger.remove()` drops those handlers too, so add back any file sinks you still want:
 
 ```python
 from loguru import logger
@@ -235,6 +272,25 @@ def process_request(request_id, task):
 
 ## Monitoring
 
+### Tracing
+
+Swarms emits OpenTelemetry spans for every agent and swarm run by default. See [Telemetry](/deployment/telemetry) for what is captured, where it is sent, and how to opt out with `SWARMS_TELEMETRY_ON=false`.
+
+### Token usage
+
+Every `Agent` keeps a running total of the token counts its provider reports, and `SwarmRouter` sums them across its agents:
+
+```python
+result = agent.run("Summarize the quarterly report.")
+print(agent.usage)
+# {'input_tokens': ..., 'output_tokens': ..., 'cached_tokens': ..., 'reasoning_tokens': ..., 'total_tokens': ...}
+
+router.run("Assess the market.")
+print(router.usage)
+```
+
+Totals are lifetime totals for the instance, so record the difference between two readings to cost a single request. See [Token usage](/agents/token-usage) for the structures that report usage and how streaming calls are counted.
+
 ### Performance Metrics
 
 ```python
@@ -298,11 +354,10 @@ def monitored_agent_run(agent, task):
 ```python
 def health_check(agent):
     """
-    Perform health check on agent.
+    Perform health check on a lightweight agent configured with max_loops=1.
     """
     try:
-        # Quick test run
-        result = agent.run("Hello", max_loops=1)
+        agent.run("Reply with OK.")
         return {
             "status": "healthy",
             "agent_name": agent.agent_name,
@@ -347,7 +402,6 @@ PROD_CONFIG = {
     "model_name": os.getenv("MODEL_NAME", "claude-sonnet-4-6"),
     "max_loops": int(os.getenv("MAX_LOOPS", "3")),
     "retry_attempts": int(os.getenv("RETRY_ATTEMPTS", "5")),
-    "timeout": int(os.getenv("TIMEOUT", "120")),
     "verbose": os.getenv("VERBOSE", "false").lower() == "true",
 }
 
@@ -366,13 +420,12 @@ class AgentConfig(BaseModel):
     agent_name: str = Field(..., min_length=1)
     model_name: str
     max_loops: int = Field(default=3, ge=1, le=100)
-    retry_attempts: int = Field(default=3, ge=0, le=10)
-    timeout: int = Field(default=120, ge=1)
+    retry_attempts: int = Field(default=3, ge=1, le=10)
     
     @field_validator('model_name')
     @classmethod
     def validate_model(cls, v):
-        allowed_models = ["claude-sonnet-4-6", "gpt-5.4", "claude-sonnet-3.5"]
+        allowed_models = ["claude-sonnet-4-6", "gpt-5.4", "gpt-5.4-mini"]
         if v not in allowed_models:
             raise ValueError(f"Model must be one of {allowed_models}")
         return v
@@ -393,18 +446,20 @@ agent = Agent(**config.model_dump())
 
 ```python
 import os
-from cryptography.fernet import Fernet
+
+from swarms import Agent
 
 # Never hardcode API keys
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# Use environment variables or secure vaults
+# Pass a key explicitly when it does not come from the provider's standard env var
 agent = Agent(
     model_name="claude-sonnet-4-6",
-    llm_api_key=OPENAI_API_KEY,
+    llm_api_key=ANTHROPIC_API_KEY,
 )
 ```
+
+When the provider's standard variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) is set, you can omit `llm_api_key`.
 
 ### Input Validation
 
@@ -458,20 +513,29 @@ agent = Agent(
 agent.short_memory.compact(summary="Summary of the conversation so far.")
 ```
 
-### Connection Pooling
+### Concurrent Requests
+
+An `Agent` instance keeps one conversation. If several threads call `run()` on the same instance, their turns land in the same history. For independent requests, give each request its own agent:
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
 
-# Use thread pool for concurrent requests
+from swarms import Agent
+
+
+def make_agent() -> Agent:
+    return Agent(
+        agent_name="Request-Worker",
+        model_name="claude-sonnet-4-6",
+        max_loops=1,
+        print_on=False,
+    )
+
+
 executor = ThreadPoolExecutor(max_workers=10)
 
 def process_tasks(tasks):
-    futures = []
-    for task in tasks:
-        future = executor.submit(agent.run, task)
-        futures.append(future)
-    
+    futures = [executor.submit(make_agent().run, task) for task in tasks]
     return [f.result() for f in futures]
 ```
 
@@ -484,25 +548,29 @@ agent = Agent(
     agent_name="Stateful-Agent",
     model_name="claude-sonnet-4-6",
     autosave=True,  # Auto-save state after each run
-    saved_state_path="./agent_states/stateful_agent.json",
+    saved_state_path="stateful_agent.json",
 )
 ```
+
+A relative `saved_state_path` is written inside the agent's own workspace directory, `{WORKSPACE_DIR}/agents/<agent-name>-<id>/`. An absolute path is used as given.
 
 ### Manual State Management
 
 ```python
-# Save state
-agent.save()
-
-# Load state
 from swarms import Agent
 
-agent = Agent(
+# Save state to an explicit path
+agent.save("/var/lib/myapp/agent_states/agent_state.json")
+
+# Restore it into a new agent
+restored = Agent(
     agent_name="Restored-Agent",
     model_name="claude-sonnet-4-6",
-    load_state_path="./agent_states/agent_state.json",
 )
+restored.load("/var/lib/myapp/agent_states/agent_state.json")
 ```
+
+`load()` opens the path exactly as given, so use absolute paths for state you plan to restore. Passing `load_state_path` to the constructor only sets the default path for a later `load()` call; it does not load anything by itself.
 
 ## Testing
 
@@ -525,9 +593,9 @@ class TestAgent(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("hello", result.lower())
     
-    def test_error_handling(self):
-        with self.assertRaises(AgentRunError):
-            self.agent.run("")  # Empty task should fail
+    def test_empty_task(self):
+        with self.assertRaises(ValueError):
+            self.agent.run("")  # Rejected before any LLM call
 ```
 
 ### Integration Testing
@@ -558,4 +626,6 @@ def test_agent_integration():
 
 - [Scaling Guide](/deployment/scaling)
 - [Monitoring Guide](/deployment/monitoring)
+- [Telemetry](/deployment/telemetry)
+- [Token usage](/agents/token-usage)
 - [Agent API Reference](/api/agent)

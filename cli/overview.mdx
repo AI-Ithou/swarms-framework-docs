@@ -77,20 +77,20 @@ The Swarms CLI provides the following command categories:
 - `init` - Scaffold a new project with .env, workspace directory, and validation
 - `onboarding` - Run environment setup check
 - `setup-check` - Comprehensive environment diagnostics
-- `get-api-key` - Retrieve API keys from the platform
-- `check-login` - Verify authentication status
+- `get-api-key` - Open the Swarms API key page in your browser
+- `check-login` - Write a local login marker (no credentials are checked)
 
 ### Agent Operations
 
 - `agent` - Create and run custom agents
-- `chat` - Interactive chat agent with optimized defaults
+- `chat` - Interactive chat agent with optimized defaults (default model `gpt-5.1`)
 - `run-agents` - Execute agents from YAML configuration
 - `load-markdown` - Load agents from markdown files
 
 ### Swarm Operations
 
 - `autoswarm` - Generate and execute autonomous swarms
-- `heavy-swarm` - Run HeavySwarm for complex task analysis
+- `heavy-swarm` - Run HeavySwarm for complex task analysis (currently broken in 15.0.3; see [heavy-swarm](/cli/commands#heavy-swarm))
 - `llm-council` - Run LLM Council with collaborative agents
 
 ### Discovery
@@ -110,6 +110,8 @@ For the full command and flag reference:
 swarms --help
 ```
 
+The `--help` table omits the `tips` and `models` commands and shows some stale defaults. The [Commands Reference](/cli/commands) reflects the actual parser.
+
 ## Environment Variables
 
 The CLI uses several environment variables for configuration:
@@ -123,14 +125,18 @@ The CLI uses several environment variables for configuration:
 - `TOGETHER_API_KEY` - Together AI API key
 - `XAI_API_KEY` - xAI / Grok API key (offered by `swarms init`)
 - `OPENROUTER_API_KEY` - OpenRouter API key (offered by `swarms init`)
-- `WORKSPACE_DIR` - Directory for agent workspaces and outputs
+- `SWARMS_API_KEY` - Swarms platform key, required for `--marketplace-prompt-id`
+- `WORKSPACE_DIR` - Directory for agent state and logs (default: `./agent_workspace`)
+- `SWARMS_TELEMETRY_ON` - Set to `false` to opt out of [OpenTelemetry tracing](/deployment/telemetry), which is on by default
 
-Set these in your `.env` file or export them directly:
+Set these in your `.env` file or export them directly. The CLI loads the nearest `.env`, searching upward from the current directory, and never overrides a variable you already exported:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 export WORKSPACE_DIR="./agent_workspace"
 ```
+
+Where things are stored: conversations save to `./conversations/`, agent state and logs go to `WORKSPACE_DIR`, and `~/.swarms/` only caches MCP OAuth tokens.
 
 ## Next Steps
 

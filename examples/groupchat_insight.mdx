@@ -129,12 +129,19 @@ client is regenerated. If `auto_equip=False` and an agent never receives
 `RESPOND_TOOL` some other way, its replies won't parse as a tool call and it
 will bid `(0.0, "")` — silent — every turn (see `_extract_args` below).
 
-The decision prompt, `GROUPCHAT_DECIDE_PROMPT`, is deliberately biased toward
-silence: "Silence is the default — most messages do NOT warrant a reply from
-you." It scores high only for direct expertise, being addressed by name, a
-correctable error, or a concrete next step, and scores low for
-off-topic remarks, redundant points, filler agreement, or speaking again
-right after having just spoken.
+The decision prompt, `GROUPCHAT_DECIDE_PROMPT`, asks for a calibrated score
+rather than a default of silence: "You are not required to speak every turn,"
+and the score "measures how important and useful it is for you to respond
+right now. Do not inflate it to keep the conversation active." It lists
+reasons to respond strongly (being addressed or assigned work, correcting a
+consequential error, supplying decisive evidence, resolving a disagreement,
+unsticking a stalled group), reasons for moderate interest (a complementary
+caveat, turning an idea into a plan, one focused clarifying question,
+synthesizing views), and reasons for a low score (outside your expertise,
+filler agreement, a point already made, speculation, a message that needs no
+reply). It also gives a calibration scale, from `0.0` (no response warranted)
+through `0.4 - 0.6` (a useful contribution) to `0.9 - 1.0` (urgent or
+decisive), and tells the agent not to repeat its own earlier contributions.
 
 ### One decision call per agent, with full typed history
 
@@ -255,6 +262,7 @@ signature used by `SequentialWorkflow` and `AgentRearrange`.
 
 ```python
 async def _run_async(self, task, streaming_callback=None):
+    self.conversation.clear()
     self._post(sender="User", content=task, score=None,
                streaming_callback=streaming_callback)
     last_sender, last_message = "User", task
@@ -340,9 +348,9 @@ approximately
 E[|H|] ≈ min(1 / (1 - q), max_loops)
 ```
 
-A room tuned so `q` is small (a high `threshold`, or a decide prompt biased
-toward silence, which `GROUPCHAT_DECIDE_PROMPT` already is) ends quickly on
-its own via a lull. A room tuned so `q` is close to `1` will tend to run all
+A room tuned so `q` is small (a high `threshold`, or agents with little
+distinct to add, which `GROUPCHAT_DECIDE_PROMPT` tells them to score low)
+ends quickly on its own via a lull. A room tuned so `q` is close to `1` will tend to run all
 the way to `max_loops`, since a lull becomes rare. This matches the two real
 termination conditions exactly — it's just a way to reason about which one
 is likely to fire first for a given configuration.
@@ -373,15 +381,13 @@ per `output_type`.
 
 `run_batch(tasks)` calls `batched_run(self.run, tasks)`, which — with no
 `max_workers` passed — runs the tasks **sequentially**, one full `run()` call
-after another. This matters beyond throughput: `self.conversation` is
-created once in `__init__` and is never reset between calls to `run()`.
-Every task in a batch is posted into the *same* growing `Conversation`
-object, so agents deciding on task 2 will see the full transcript of task 1
-in their history (via `messages_for`) as well. `message_count` itself is a
-local variable that resets to `1` on every `_run_async` call, so `max_loops`
-still caps each task's own turns — but the conversational context is not
-isolated between tasks. Construct a fresh `GroupChat` per task if isolation
-is required.
+after another. `self.conversation` is created once in `__init__`, but
+`_run_async` clears it before posting the seed, so every `run()` (and so
+every task in a batch) starts from an empty transcript. Agents deciding on
+task 2 do not see task 1's discussion, and `message_count` resets to `1`, so
+`max_loops` caps each task's own turns. The flip side is that
+`chat.conversation` only holds the most recent run's transcript; read it
+before the next `run()` if you need it.
 
 ---
 
@@ -401,9 +407,9 @@ is required.
   `recency_penalty` to force rotation** — but know that a high
   `recency_penalty` can itself end the chat early by turning a would-be
   winner into a lull.
-- **`run_batch` shares one conversation across tasks.** Build a new
-  `GroupChat` per independent task unless carrying context between tasks is
-  intended.
+- **Each `run()` starts from an empty conversation.** Tasks in a
+  `run_batch` are isolated from one another, and `chat.conversation` keeps
+  only the latest run's transcript.
 - **A silent room on the very first turn usually means misconfiguration, not
   a design choice.** `_run_async` specifically logs a loud warning if no
   agent produces any reply on turn one, calling out a bad `model_name`, a
@@ -431,8 +437,7 @@ Prereqs:
     export OPENAI_API_KEY="sk-..."   # or any LiteLLM-supported provider
 """
 
-from swarms import Agent
-from swarms.structs.groupchat import GroupChat, RESPOND_TOOL
+from swarms import Agent, GroupChat, RESPOND_TOOL
 
 
 def build_panel():
@@ -520,8 +525,7 @@ def main():
     print("=" * 70)
     print(transcript)
 
-    # Inspect structured history directly off the conversation object. Each
-    # posted turn stores the winning agent's raw bid score in its metadata.
+    # Each posted turn stores the winning agent's raw bid score in its metadata.
     print("\n" + "=" * 70)
     print("PER-MESSAGE SCORES")
     print("=" * 70)
@@ -539,10 +543,8 @@ def batch_example():
     """Run several discussions via run_batch.
 
     run_batch calls batched_run(self.run, tasks) with no max_workers, so
-    tasks run sequentially. GroupChat never resets self.conversation between
-    calls to run(), so both tasks below are appended to the SAME transcript —
-    agents answering the second task will see the first task's discussion
-    too. Build a new GroupChat per task if that isolation matters to you.
+    tasks run sequentially. Each run() clears the conversation first, so the
+    two discussions below are independent.
     """
     agents = build_panel()
     chat = GroupChat(agents=agents, max_loops=10, threshold=0.6)
@@ -567,7 +569,8 @@ The seed task is posted as `User`. Every turn, all four agents privately bid
 through the forced `respond` call; `_select_speaker` picks the single highest
 recency-adjusted bidder above `0.6` and posts only that reply, which then
 becomes the "latest message" the next turn's bids are formed around. Because
-the decide prompt defaults to silence and `recency_penalty=0.3` discourages
+the decide prompt asks for calibrated scores that are not inflated to keep the
+chat going, and `recency_penalty=0.3` discourages
 back-to-back turns from the same agent, expect the floor to move between two
 or three of the four agents over a handful of turns before the room hits a
 lull — no bid clears `0.6` — and `run()` returns. If the panel stays
@@ -588,6 +591,5 @@ where no adjusted score clears `threshold`; `idle_timeout` is accepted for
 compatibility but does nothing. `threshold` and `recency_penalty` jointly
 shape both who gets to speak and how likely a lull is on any given turn,
 including the case where the penalty alone turns a would-be winner into a
-lull. `run_batch` runs tasks sequentially against the same unreset
-`self.conversation`, so batched tasks share transcript context unless a new
-`GroupChat` is constructed per task.
+lull. `run_batch` runs tasks sequentially, and each run clears
+`self.conversation` first, so batched tasks never share transcript context.

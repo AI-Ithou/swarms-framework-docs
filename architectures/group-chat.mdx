@@ -1,6 +1,6 @@
 ---
 title: Group Chat
-description: An asynchronous, self-selecting multi-agent conversation for debate, brainstorming, and decision-making
+description: A turn-based, self-selecting multi-agent conversation for debate, brainstorming, and decision-making
 ---
 
 `GroupChat` runs a **turn-based, self-selecting** conversation: there is no fixed speaking order and no speaker-selection function, but exactly one agent speaks per turn. Each turn, every agent privately "bids" — via a forced `respond(score, message)` tool call — on how much it wants the floor; the single highest (recency-adjusted) bidder above `threshold` speaks, and only that reply is posted. A `recency_penalty` discourages the same agent from speaking twice in a row, so the floor moves around the room even though there's no explicit rotation.
@@ -19,8 +19,8 @@ description: An asynchronous, self-selecting multi-agent conversation for debate
 
 ## How It Works
 
-1. **Seed** — the task is posted to the shared conversation as the first message; every agent sees it.
-2. **Bid (in parallel)** — each turn, every agent is asked concurrently (via a forced `respond(score, message)` tool call) how much it wants to speak, on a `0..1` scale, along with the reply it would give.
+1. **Seed** — the conversation is cleared and the task is posted as the first message; every agent sees it. Each `run` starts fresh, so a reused instance never carries an earlier transcript.
+2. **Bid (in parallel)** — each turn, every agent is asked concurrently (via a forced `respond(score, message)` tool call) how much it wants to speak, on a `0..1` scale, along with the reply it would give. Agents read the shared conversation as typed turns: the task as a `user` turn, their own replies as `assistant` turns, and peers' replies as `user` turns labelled with the speaker's name.
 3. **Select one speaker** — the single highest *recency-adjusted* bidder that clears `threshold` and has a non-empty reply takes the floor. Only that one reply is posted to the conversation for this turn.
 4. **Recency penalty** — an agent that spoke within the last `recency_window` turns has `recency_penalty` subtracted from its bid, so the floor tends to move around the room instead of one agent monologuing.
 5. **Stop** — the chat ends when `max_loops` total messages have been posted, or a turn arrives where no agent's adjusted bid clears `threshold` (a conversational lull).
@@ -32,7 +32,7 @@ description: An asynchronous, self-selecting multi-agent conversation for debate
 ## Key Features
 
 - Turn-based self-selection: bids are collected in parallel, but exactly one agent speaks per turn (no fixed speaking order)
-- Self-selection: silence is the default; agents speak only when they add value
+- Calibrated self-selection: the decision prompt asks each agent for an honest score of how useful its reply would be right now, rather than defaulting to silence
 - Forced `respond(score, message)` decision via `RESPOND_TOOL`
 - Threshold-based speaker selection with a recency penalty to rotate the floor
 - Auto-equips the `respond` tool into agents (`auto_equip=True`)
@@ -89,10 +89,10 @@ There is no speaker function — you steer the room with three parameters.
 ### Threshold
 
 ```python
-# Livelier: more agents chime in on each message.
+# Livelier: more turns produce a winning bid, so the chat runs longer.
 lively = GroupChat(agents=agents, max_loops=20, threshold=0.4)
 
-# More selective: only strongly-motivated, high-value replies are published.
+# More selective: only high-value replies win the floor.
 focused = GroupChat(agents=agents, max_loops=12, threshold=0.75)
 ```
 
@@ -126,7 +126,7 @@ quick = GroupChat(agents=[proponent, opponent], max_loops=6)
 </ParamField>
 
 <ParamField path="agents" type="List[Agent]" required>
-  Participating agents. **At least two are required** — each message is broadcast to the other agents.
+  Participating agents. **At least two are required**; fewer raises `ValueError`. Every agent reads the same shared conversation.
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="20">
@@ -150,7 +150,7 @@ quick = GroupChat(agents=[proponent, opponent], max_loops=6)
 </ParamField>
 
 <ParamField path="output_type" type="str" default="str-all-except-first">
-  History format. Use `"list"` or `"dict"` to iterate individual messages.
+  History format. The default joins the replies without speaker names. Use `"str"` for a `Name: message` transcript, or `"list"` / `"dict"` to iterate individual messages.
 </ParamField>
 
 <ParamField path="auto_equip" type="bool" default="True">
@@ -171,6 +171,8 @@ Run the group chat until no agent's bid clears `threshold` (a lull) or `max_loop
 result = chat.run("Discuss the future of quantum computing")
 ```
 
+Pass `streaming_callback=fn` to receive each posted message as `(agent_name, chunk, is_final)` chunks. The reply is complete before it is posted, so the chunks are a word-by-word replay rather than live tokens.
+
 By default the result is a formatted string. For per-message iteration, set `output_type="list"` and read `role` / `content`:
 
 ```python
@@ -181,7 +183,7 @@ for message in chat.run("Discuss the tradeoffs of multi-agent systems."):
 
 ### run_batch()
 
-Run several independent group chats sequentially, one per task.
+Run several independent group chats sequentially, one per task. Each starts from an empty conversation.
 
 ```python
 results = chat.run_batch([
@@ -195,8 +197,7 @@ results = chat.run_batch([
 Every agent must carry `RESPOND_TOOL` so the chat can force a structured speaking decision. With `auto_equip=True` this is automatic; otherwise add it yourself:
 
 ```python
-from swarms import Agent
-from swarms.structs.groupchat import GroupChat, RESPOND_TOOL
+from swarms import Agent, GroupChat, RESPOND_TOOL
 
 agents = [
     Agent(

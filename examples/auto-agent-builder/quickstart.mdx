@@ -140,8 +140,7 @@ TASK = (
 
 builder = AutoAgentBuilder(model_name="gpt-5.4", max_agents=3)
 
-# One call to the builder. Reuse the result — calling again designs a
-# fresh roster, so what you printed might not be what you ran.
+# Reuse this result: calling the builder again designs a different roster.
 configs = builder.build_configs(TASK)
 
 print(f"\nDesigned {len(configs)} agents:\n")

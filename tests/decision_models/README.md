@@ -23,7 +23,8 @@ Environments using a SOCKS proxy also need `python -m pip install "httpx[socks]"
 The checks cover:
 
 - Exact parity between runnable files and guide snippets
-- Python syntax, current constructor signature, navigation, and internal page links
+- Executable Python syntax and the reference's display-only API signatures
+- Unique navigation entries and internal page links, including heading anchors
 - Triage and routing boundary policies, declined and escalated paths
 - One batched request and selected-agent-only execution
 - Custom request/response normalization, validation, URLs, and cleanup

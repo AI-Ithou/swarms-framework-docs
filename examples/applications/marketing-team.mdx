@@ -25,8 +25,7 @@ OPENAI_API_KEY=""
 ## Code
 
 ```python
-from swarms import Agent
-from swarms.structs.hiearchical_swarm import HierarchicalSwarm
+from swarms import Agent, HierarchicalSwarm
 
 # =============================================================================
 # HEAD OF CONTENT AGENT
@@ -276,12 +275,13 @@ brand_strategist_agent = Agent(
 )
 
 # =============================================================================
-# MARKETING DIRECTOR AGENT (COORDINATOR)
+# MARKETING DIRECTOR SETTINGS (COORDINATOR)
 # =============================================================================
-marketing_director_agent = Agent(
-    agent_name="Marketing-Director",
-    agent_description="Senior marketing director who orchestrates comprehensive marketing strategies across all specialized teams",
-    system_prompt="""You are the Marketing Director, the senior executive responsible for orchestrating comprehensive marketing strategies and coordinating a team of specialized marketing experts. Your role is to:
+# director_settings configures the director HierarchicalSwarm builds, which keeps the OrderBatch tool it delegates with.
+marketing_director_settings = {
+    "agent_name": "Marketing-Director",
+    "agent_description": "Senior marketing director who orchestrates comprehensive marketing strategies across all specialized teams",
+    "system_prompt": """You are the Marketing Director, the senior executive responsible for orchestrating comprehensive marketing strategies and coordinating a team of specialized marketing experts. Your role is to:
 
     STRATEGIC COORDINATION:
     - Analyze complex marketing challenges and break them down into specialized tasks
@@ -323,14 +323,14 @@ marketing_director_agent = Agent(
     - Budget management and resource allocation
     - Stakeholder communication and executive reporting
 
-    You deliver comprehensive marketing strategies that leverage the full expertise of your specialized team, ensuring all marketing efforts work together to drive business growth, brand awareness, and customer acquisition.""",
-    model_name="claude-sonnet-4-6",
-    max_loops=1,
-    temperature=0.7,
-    dynamic_temperature_enabled=True,
-    streaming_on=True,
-    print_on=True,
-)
+    You deliver comprehensive marketing strategies that leverage the full expertise of your specialized team, ensuring all marketing efforts work together to drive business growth, brand awareness, and customer acquisition.
+
+    Return only an OrderBatch containing the worker orders.""",
+    "model_name": "claude-sonnet-4-6",
+    "temperature": 0.7,
+    # Claude rejects temperature and top_p together, and the director sends top_p=0.9 by default.
+    "top_p": None,
+}
 
 # =============================================================================
 # HIERARCHICAL MARKETING SWARM
@@ -347,7 +347,7 @@ marketing_agents = [
 marketing_swarm = HierarchicalSwarm(
     name="Hierarchical-Marketing-Swarm",
     description="A comprehensive marketing team with specialized agents for content, creative, SEO, and brand strategy, coordinated by a marketing director",
-    director=marketing_director_agent,
+    director_settings=marketing_director_settings,
     agents=marketing_agents,
     max_loops=2,
     verbose=True,

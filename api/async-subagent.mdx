@@ -27,14 +27,14 @@ pip install -U swarms
 ```python
 from swarms import TaskStatus
 
-TaskStatus.PENDING     # spawned but not yet started
-TaskStatus.RUNNING     # currently executing
+TaskStatus.PENDING     # created, not yet submitted
+TaskStatus.RUNNING     # submitted to the pool, queued or executing
 TaskStatus.COMPLETED   # finished successfully
 TaskStatus.FAILED      # exhausted retries
 TaskStatus.CANCELLED   # cancelled before completion
 ```
 
-Backed by `(str, Enum)`, so the values compare equal to plain strings (`TaskStatus.PENDING == "pending"`).
+Backed by `(str, Enum)`, so the values compare equal to plain strings (`TaskStatus.PENDING == "pending"`). `spawn()` sets a task to `RUNNING` as soon as it submits it, so a task waiting for a free worker thread also reports `RUNNING`.
 
 ## SubagentTask
 
@@ -85,7 +85,7 @@ Dataclass describing a single in-flight or completed task. Populated by `Subagen
 </ParamField>
 
 <ParamField path="retry_on" type="List[Type[Exception]] | None" default="None">
-  Whitelist of exception classes that trigger retries. `None` retries on any exception.
+  Whitelist of exception classes that trigger retries. `spawn()` stores `[]` when you pass `None`; an empty list retries on any exception.
 </ParamField>
 
 <ParamField path="created_at" type="float">
@@ -158,7 +158,7 @@ def spawn(
 </ParamField>
 
 <ParamField path="fail_fast" type="bool" default="True">
-  When `True`, the underlying thread re-raises on final failure (the exception surfaces when you call `future.result()`). When `False`, the failure is captured on the `SubagentTask` and the thread returns `None`.
+  When `True`, the underlying thread re-raises on final failure (the exception surfaces when you call `future.result()` or `gather()`). When `False`, the failure is captured on the `SubagentTask.error` and the thread returns `None`. Either way the task's `status` becomes `FAILED`.
 </ParamField>
 
 **Raises:** `ValueError` if `depth > max_depth`.
@@ -175,7 +175,7 @@ def get_task(self, task_id: str) -> SubagentTask
 
 #### get_results()
 
-Return a `Dict[task_id, Any]` for every completed or failed task. Failed tasks map to their exception object.
+Return a `Dict[task_id, Any]` for every completed or failed task. Failed tasks map to their exception object. Running and cancelled tasks are left out. It does not wait, so call `gather()` first if you need every result.
 
 ```python
 def get_results(self) -> Dict[str, Any]
@@ -183,11 +183,13 @@ def get_results(self) -> Dict[str, Any]
 
 #### cancel()
 
-Attempt to cancel a not-yet-started task. Returns `True` if the underlying `Future` accepted the cancellation.
+Attempt to cancel a task that is still queued. Returns `True` and sets the status to `CANCELLED` if the underlying `Future` accepted the cancellation. A task that has started running cannot be cancelled.
 
 ```python
 def cancel(self, task_id: str) -> bool
 ```
+
+**Raises:** `KeyError` if the ID is not in the registry.
 
 #### gather()
 
@@ -209,11 +211,15 @@ def gather(
   Max seconds to wait. `None` blocks indefinitely.
 </ParamField>
 
-**Returns:** Mixed list — successful tasks contribute their result, failed tasks contribute their exception object.
+**Returns:** Mixed list. Tasks that had already finished when you called `gather()` come first, in spawn order: a completed task contributes its result and a failed task its exception. Tasks that finish during the wait follow in no guaranteed order, contributing their return value or the exception their future raised (a cancelled task contributes a `CancelledError`). Tasks still running when `timeout` expires, or when `"wait_first"` returns, are left out.
+
+<Note>
+`gather()` results are not keyed by task. When you need to know which result belongs to which task, keep the IDs from `spawn()` and read `get_task(task_id).result` (or `get_results()`) after `gather()` returns. A task spawned with `fail_fast=False` that fails during the wait contributes `None` here; its exception is on `get_task(task_id).error`.
+</Note>
 
 #### shutdown()
 
-Tear down the thread pool without waiting for outstanding tasks.
+Shut down the thread pool without waiting. Tasks already spawned still run in the background; calling `spawn()` afterwards raises `RuntimeError`.
 
 ```python
 def shutdown(self) -> None
@@ -253,29 +259,29 @@ task_ids = [
     for agent, topic in zip(researchers, topics)
 ]
 
-results = registry.gather(strategy="wait_all")
+registry.gather(strategy="wait_all")
 for tid in task_ids:
-    print(registry.get_task(tid).status, registry.get_task(tid).result[:80])
+    task = registry.get_task(tid)
+    print(task.status, str(task.result)[:80])
 
 registry.shutdown()
 ```
 
 ### Retries on Specific Exceptions
 
-Retry only on transient network errors; surface anything else immediately.
+Retry only when the model call fails; surface anything else immediately. `Agent.run()` raises `AgentLLMError` once its own retries and any `fallback_models` are exhausted.
 
 ```python
-import httpx
-from swarms import Agent, SubagentRegistry
+from swarms import Agent, AgentLLMError, SubagentRegistry
 
 registry = SubagentRegistry()
-agent = Agent(agent_name="Crawler", model_name="claude-sonnet-4-6", max_loops=1)
+agent = Agent(agent_name="Summarizer", model_name="claude-sonnet-4-6", max_loops=1)
 
 task_id = registry.spawn(
     agent=agent,
-    task="Fetch and summarize https://example.com/whitepaper",
+    task="Summarize the trade-offs between RAG and long-context models",
     max_retries=3,
-    retry_on=[httpx.TimeoutException, httpx.NetworkError],
+    retry_on=[AgentLLMError],
     fail_fast=False,
 )
 
@@ -293,7 +299,7 @@ registry = SubagentRegistry()
 candidates = [
     Agent(agent_name="GPT", model_name="gpt-5.4", max_loops=1),
     Agent(agent_name="Claude", model_name="claude-sonnet-4-6", max_loops=1),
-    Agent(agent_name="Mistral", model_name="mistral-large", max_loops=1),
+    Agent(agent_name="Gemini", model_name="gemini/gemini-2.5-pro", max_loops=1),
 ]
 
 for agent in candidates:
@@ -317,6 +323,16 @@ root_id = registry.spawn(root, "Plan a research project", depth=0)
 # child_id = registry.spawn(child_agent, "Investigate sub-topic", parent_id=root_id, depth=1)
 # Spawning at depth=3 would raise ValueError because max_depth=2.
 ```
+
+## How autonomous agents use the registry
+
+An `Agent` running with `max_loops="auto"` delegates through the same registry. Its sub-agent tools work like this:
+
+- `create_sub_agent` builds each sub-agent with the parent's `model_name` and `tools`. A sub-agent with tools gets `max_loops=5` so it can call a tool and read the result; one without tools gets `max_loops=1`. The budget stays finite even when the parent runs with `max_loops="auto"`.
+- `assign_task` spawns each assignment on a `SubagentRegistry` stored on the parent agent (created on first use with `max_depth=3`), with `fail_fast=False` and no retries. By default it waits for every task and returns one result or error per assignment.
+- `check_sub_agent_status` and `cancel_sub_agent_tasks` read and cancel tasks on that registry.
+
+See [Autonomous mode](/agents/autonomous-mode) for the full tool set.
 
 ## Source Code
 

@@ -5,7 +5,7 @@ description: Use a single SwarmRouter to switch between any multi-agent architec
 
 The `SwarmRouter` is the universal entry point for multi-agent orchestration in Swarms. Instead of importing and configuring different swarm classes, you keep the same `agents` list and just change the `swarm_type` to switch between Sequential, Concurrent, AgentRearrange, MixtureOfAgents, HierarchicalSwarm, and more.
 
-This page walks through one runnable example per common `swarm_type`, plus a strategy-comparison pattern and a production-ready configuration.
+This page walks through one runnable example per common `swarm_type`, plus strategy comparison, fallback, token-usage, and production-ready patterns.
 
 ## How SwarmRouter Works
 
@@ -19,8 +19,7 @@ This page walks through one runnable example per common `swarm_type`, plus a str
 Define your agents once, then run the same task through three different architectures by changing only `swarm_type`.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 # Define your agents once
 researcher = Agent(
@@ -61,8 +60,7 @@ print(concurrent.run(task))
 Each agent's output flows into the next. Ideal for ordered pipelines like research → write → edit.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 researcher = Agent(
     agent_name="Researcher",
@@ -96,8 +94,7 @@ print(result)
 All agents see the same task and run in parallel. Use for independent perspectives, redundancy, or fan-out queries.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 bull = Agent(
     agent_name="Bull",
@@ -130,8 +127,7 @@ print(result)
 Mix sequential and parallel execution in one flow using the DSL. `->` chains agents; `,` runs them in parallel.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 planner = Agent(agent_name="Planner",  model_name="gpt-5.4")
 coder   = Agent(agent_name="Coder",    model_name="gpt-5.4")
@@ -152,11 +148,10 @@ print(result)
 
 ## Example: Mixture of Agents via SwarmRouter
 
-Workers respond independently, then an aggregator agent synthesizes a final answer. With `SwarmRouter`, the aggregator is **not** a separate kwarg — it is the **last agent** in the `agents` list.
+Workers respond independently, then an aggregator agent synthesizes a final answer. With `SwarmRouter`, the aggregator is **not** a separate kwarg — it is the **last agent** in the `agents` list. The router passes the full list as workers too, so the aggregator also answers in each layer before it synthesizes.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 worker_gpt = Agent(
     agent_name="Worker-GPT",
@@ -201,8 +196,7 @@ print(result)
 A director agent decomposes the task and delegates subtasks to worker agents.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 data_worker = Agent(
     agent_name="DataWorker",
@@ -238,8 +232,7 @@ print(result)
 Run the same task through multiple architectures and compare outputs. Useful when you don't know which architecture suits your task best.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 analyst = Agent(agent_name="Analyst",  model_name="gpt-5.4")
 writer  = Agent(agent_name="Writer",   model_name="gpt-5.4")
@@ -268,8 +261,7 @@ for strategy, output in results.items():
 Pick the architecture at runtime based on task characteristics. This is a common production pattern when one server handles tasks of varying complexity.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 
 def pick_swarm_type(task: str) -> str:
@@ -308,8 +300,7 @@ print(route_task("Decompose and delegate: build a fintech compliance checklist."
 Combine `autosave`, the multi-agent collaboration prompt, and an explicit `output_type` for a deployable router. The router will save its config, state, and metadata after every run.
 
 ```python
-from swarms import Agent
-from swarms.structs.swarm_router import SwarmRouter
+from swarms import Agent, SwarmRouter
 
 # Apply global guardrails through each agent's system prompt.
 SHARED_RULES = (
@@ -341,6 +332,63 @@ print(result)
 #   - config.json (on init)
 #   - state.json + metadata.json (after each run)
 ```
+
+## Pattern: Fallback Architectures
+
+Give the router an ordered list of backup swarm types. If the primary swarm raises, the next one is built from the same agents and runs the same task.
+
+```python
+from swarms import Agent, SwarmRouter
+
+agents = [
+    Agent(agent_name="Researcher", model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Analyst",    model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Writer",     model_name="gpt-5.4", max_loops=1),
+]
+
+router = SwarmRouter(
+    name="resilient-router",
+    agents=agents,
+    swarm_type="HierarchicalSwarm",
+    fallback_swarms=["SequentialWorkflow", "ConcurrentWorkflow"],
+    max_loops=1,
+)
+
+result = router.run("Assess whether a mid-size SaaS company should adopt usage-based pricing.")
+
+print(f"Served by: {router.active_swarm_type}")
+for attempt in router.fallback_attempts:
+    print(f"Failed first: {attempt['swarm_type']} -> {attempt['error']}")
+```
+
+If every swarm in the chain fails, `run()` raises `SwarmRouterRunError` (from `swarms.structs.swarm_router`) naming each attempt.
+
+## Pattern: Tracking Token Usage
+
+`router.usage` sums token usage over every agent the swarm ran, including agents the swarm builds for itself, such as the `HierarchicalSwarm` director. See [Token usage](/agents/token-usage).
+
+```python
+from swarms import Agent, SwarmRouter
+
+router = SwarmRouter(
+    name="usage-hierarchical",
+    agents=[
+        Agent(agent_name="Researcher", model_name="gpt-5.4", max_loops=1),
+        Agent(agent_name="Writer",     model_name="gpt-5.4", max_loops=1),
+    ],
+    swarm_type="HierarchicalSwarm",
+    max_loops=1,
+)
+
+before = router.usage
+router.run("Should a small team adopt a monorepo? Give a recommendation.")
+after = router.usage
+
+this_run = {key: after[key] - before[key] for key in after}
+print(this_run)  # input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens
+```
+
+Agent totals are lifetime totals, so take the difference between two reads to get the cost of one run.
 
 ## Batch and Concurrent Execution
 
@@ -380,6 +428,7 @@ threaded_results = router.concurrent_run(
 | Round-robin task distribution | `"RoundRobin"` |
 | LLM-driven council decisions | `"LLMCouncil"` |
 | Task-aware routing to one agent | `"MultiAgentRouter"` |
+| Planner breaks work into tasks for workers | `"PlannerWorkerSwarm"` |
 
 ## What to Avoid
 
@@ -392,6 +441,7 @@ threaded_results = router.concurrent_run(
 
 - [SwarmRouter architecture overview](/architectures/swarm-router)
 - [SwarmRouter API reference](/api/swarm-router)
+- [Token usage](/agents/token-usage)
 - [Sequential Workflow](/examples/sequential-workflow-example)
 - [Concurrent Workflow](/examples/concurrent-workflow-example)
 - [Mixture of Agents](/examples/mixture-of-agents-example)

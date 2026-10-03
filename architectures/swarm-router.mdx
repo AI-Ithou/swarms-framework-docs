@@ -20,9 +20,10 @@ The underlying swarm is built lazily on the first `run()` call and cached on the
 - 14 concrete swarm types (see the note below on `"auto"`)
 - Factory pattern with O(1) lookup and per-instance swarm cache
 - Pre-flight reliability checks
+- Ordered fallback to other swarm types when one fails (`fallback_swarms`)
+- Token usage summed across the whole swarm (`router.usage`)
 - Optional autosave of `config.json` / `state.json` / `metadata.json`
-- Shared memory injection across agents
-- Multi-agent collaboration prompt injection
+- Multi-agent collaboration prompt injection (`SequentialWorkflow` and `AgentRearrange`)
 - Per-swarm-type specialized parameters (HeavySwarm, AgentRearrange, GroupChat, etc.)
 - Inherits `SerializableMixin` — `to_dict()` is available for telemetry / persistence
 
@@ -133,20 +134,24 @@ moa_result = moa.run(task)
   Required when `swarm_type="AgentRearrange"`. Flow DSL like `"A -> B, C -> D"`.
 </ParamField>
 
+<ParamField path="fallback_swarms" type="List[SwarmType]">
+  Swarm types to try, in order, when the primary `swarm_type` fails. See [Fallback swarms](#fallback-swarms).
+</ParamField>
+
 <ParamField path="multi_agent_collab_prompt" type="bool" default="False">
-  Append the multi-agent collaboration preamble to every agent's system prompt.
+  Deliver the multi-agent collaboration preamble to every agent as a system turn at run time. Your `Agent` objects are not modified. Only `SequentialWorkflow` and `AgentRearrange` deliver it; other swarm types log a warning and ignore it.
 </ParamField>
 
 <ParamField path="list_all_agents" type="bool" default="False">
-  When `True`, every agent is told about every other agent at the start of a run.
+  When `True`, every agent is told about every other agent at the start of a run. Delivered the same way as the collaboration preamble, so only `SequentialWorkflow` and `AgentRearrange` honor it.
 </ParamField>
 
 <ParamField path="conversation" type="Any">
-  Pre-existing conversation object to seed the swarm with.
+  Stored on the router but not passed to the swarm. After each run, `router.conversation` points at the swarm's own conversation.
 </ParamField>
 
 <ParamField path="agents_config" type="Dict[Any, Any]">
-  Optional per-agent config overrides.
+  Stored on the router. No swarm factory reads it.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -217,9 +222,9 @@ router = SwarmRouter(
 </ParamField>
 
 <ParamField path="director_settings" type="Dict[str, Any]">
-  Extra `Agent` keyword arguments for the auto-created director. Recognised keys are
-  `agent_name`, `model_name`, `system_prompt`, `temperature`, and `top_p`; each one
-  overrides the corresponding `HierarchicalSwarm` default (including
+  Extra `Agent` keyword arguments for the auto-created director. Every key is forwarded
+  to the director's `Agent`; `agent_name`, `model_name`, `system_prompt`, `temperature`,
+  and `top_p` override the corresponding `HierarchicalSwarm` defaults (including
   `director_model_name`).
 </ParamField>
 
@@ -244,7 +249,7 @@ router = SwarmRouter(
 ### `CouncilAsAJudge`
 
 <ParamField path="council_judge_model_name" type="str" default='"gpt-5.4"'>
-  Model used as the council judge.
+  Passed to `CouncilAsAJudge` as `model_name`, so it sets the model for every dimension judge. The aggregator keeps its own `aggregation_model_name` default (`"gpt-5.4"`).
 </ParamField>
 
 ### `LLMCouncil`
@@ -311,9 +316,22 @@ tasks = ["Task 1", "Task 2", "Task 3"]
 results = router.batch_run(tasks)
 ```
 
-### `concurrent_run(...)`
+### `concurrent_run(tasks, imgs=None, ...)`
 
-Run multiple tasks concurrently.
+Run multiple tasks through `run()` in parallel. Results come back in task order. `imgs`, if given, pairs one image with each task.
+
+```python
+results = router.concurrent_run(["Task 1", "Task 2", "Task 3"])
+```
+
+### `usage`
+
+Read-only property. Sums `Agent.usage` over every agent the router's swarms have run, including agents a swarm builds for itself, such as a `HierarchicalSwarm` director. Keys: `input_tokens`, `output_tokens`, `cached_tokens`, `reasoning_tokens`, `total_tokens`. See [Token usage](/agents/token-usage).
+
+```python
+router.run("Analyze market trends")
+print(router.usage["total_tokens"])
+```
 
 ### `to_dict()`
 
@@ -362,29 +380,30 @@ router = SwarmRouter(
 result = router.run(task)
 ```
 
-### Production Pipeline with Fallback
+### Fallback Swarms
+
+Pass `fallback_swarms` instead of writing your own retry. When the primary swarm raises, while being built or while running, the router builds the next type from the same agents and gives it the same task. The first swarm to complete wins.
 
 ```python
-class ProductionSwarmRouter:
-    def __init__(self, agents):
-        self.router = SwarmRouter(
-            swarm_type="HierarchicalSwarm",
-            agents=agents,
-            autosave=True,
-            verbose=True,
-        )
+from swarms.structs.swarm_router import SwarmRouterRunError
 
-    def process(self, task):
-        try:
-            return self.router.run(task)
-        except Exception as e:
-            print(f"Error with HierarchicalSwarm: {e}")
-            fallback = SwarmRouter(
-                swarm_type="SequentialWorkflow",
-                agents=self.router.agents,
-            )
-            return fallback.run(task)
+router = SwarmRouter(
+    swarm_type="HierarchicalSwarm",
+    fallback_swarms=["SequentialWorkflow", "ConcurrentWorkflow"],
+    agents=agents,
+    autosave=True,
+)
+
+try:
+    result = router.run(task)
+    print(f"Served by {router.active_swarm_type}")
+    for attempt in router.fallback_attempts:
+        print(f"Failed first: {attempt['swarm_type']}: {attempt['error']}")
+except SwarmRouterRunError as e:
+    print(f"Every swarm failed: {e}")
 ```
+
+`fallback_swarms` is validated at construction like `swarm_type`. If it includes `"AgentRearrange"`, `rearrange_flow` must be set. With autosave on, `metadata.json` records which swarm served the run and every failed attempt.
 
 ## Factory Pattern
 
@@ -420,7 +439,8 @@ self._swarm_cache[cache_key] = swarm
 # - swarm_type is a string
 # - swarm_type is one of the valid SwarmType values
 # - rearrange_flow is set when swarm_type="AgentRearrange"
-# - max_loops > 0
+# - max_loops != 0
+# - fallback_swarms, if set, is a list of valid swarm types
 
 try:
     router = SwarmRouter(
@@ -434,6 +454,8 @@ except SwarmRouterConfigError as e:
 
 ## Error Handling
 
+`SwarmRouterConfigError` is raised at construction. At run time, a router without `fallback_swarms` re-raises the underlying swarm's own exception unchanged. With `fallback_swarms`, `SwarmRouterRunError` is raised only after every swarm in the chain has failed; its message names each attempt and its `__cause__` is the last error.
+
 ```python
 from swarms.structs.swarm_router import (
     SwarmRouterConfigError,
@@ -441,16 +463,18 @@ from swarms.structs.swarm_router import (
 )
 
 try:
-    result = router.run("Task")
-except SwarmRouterRunError as e:
-    print(f"Execution failed: {e}")
-    # The exception body includes:
-    # - The reason for failure
-    # - A formatted traceback
-    # - Troubleshooting hints
+    router = SwarmRouter(
+        swarm_type="HierarchicalSwarm",
+        fallback_swarms=["SequentialWorkflow"],
+        agents=agents,
+    )
 except SwarmRouterConfigError as e:
     print(f"Configuration error: {e}")
-    # Invalid swarm_type, missing required params, etc.
+
+try:
+    result = router.run("Task")
+except SwarmRouterRunError as e:
+    print(f"Every swarm failed: {e}")
 ```
 
 ## Best Practices
@@ -461,7 +485,7 @@ except SwarmRouterConfigError as e:
 
 1. **Match `swarm_type` to the task** — pipelines for known shapes, ensembles for quality, hierarchies for decomposition.
 2. **Validate required params** — e.g. `AgentRearrange` needs `rearrange_flow`; `HeavySwarm` honors the `heavy_swarm_*` knobs.
-3. **Wrap `run()` in try/except** — catch `SwarmRouterRunError` and `SwarmRouterConfigError` explicitly in production.
+3. **Plan for failure** — set `fallback_swarms` for a cheaper backup architecture, and catch `SwarmRouterRunError` around `run()` and `SwarmRouterConfigError` around construction.
 4. **Test with simple types first** — confirm agents and tools work, then swap in heavier swarms.
 5. **Enable autosave for production** — durable `config.json` / `state.json` / `metadata.json` make incident analysis far cheaper.
 
@@ -482,10 +506,9 @@ router = SwarmRouter(
     agents=agents,
     max_loops=2,
     output_type="dict",
+    fallback_swarms=["SequentialWorkflow"],
     autosave=True,
     autosave_use_timestamp=True,
-    multi_agent_collab_prompt=True,
-    list_all_agents=True,
     director_model_name="gpt-5.4",
     verbose=True,
 )
@@ -498,5 +521,7 @@ router = SwarmRouter(
 - [Agent Rearrange](/architectures/agent-rearrange)
 - [Heavy Swarm](/architectures/heavy-swarm)
 - [Hierarchical Swarm](/architectures/hierarchical-swarm)
+- [SwarmRouter API reference](/api/swarm-router)
+- [Token usage](/agents/token-usage)
 - [Structures Catalog](/architectures/structures-catalog) — full enumeration of every multi-agent structure
 - [All Architectures Overview](/architectures/overview)

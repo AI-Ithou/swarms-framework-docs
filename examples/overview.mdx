@@ -11,7 +11,8 @@ This page is the master catalog of every runnable example in the Swarms document
 | Category | What it covers |
 |----------|----------------|
 | [Basics](#basics) | Your first agent, tools, vision, and streaming |
-| [Single-Agent Capabilities](#single-agent-capabilities) | Memory, autonomy, context management, research |
+| [Single-Agent Capabilities](#single-agent-capabilities) | Memory, autonomy, context management, token usage, scheduling |
+| [Reasoning Agents](#reasoning-agents) | Tree of Thoughts search over reasoning steps |
 | [Multi-Agent Architectures](#multi-agent-architectures) | Sequential, concurrent, hierarchical, group chat, routing |
 | [Model Providers](#model-providers) | Run agents on any LLM provider |
 | [Voice Agents](#voice-agents) | Speech-enabled agents with TTS and STT |
@@ -51,6 +52,24 @@ Advanced patterns for a single agent — persistence, autonomy, and large-contex
 | **Autonomous Looper with Tools** | An autonomous looping agent that uses tools to iteratively reach a goal | [View Example](/examples/agents/autonomous-looper-tools) |
 | **Persistent Memory** | Persist interaction history to disk and resume across restarts | [View Example](/examples/agents/persistent-memory) |
 | **Context Compression** | Summarize memory near the context limit while archiving the full transcript | [View Example](/examples/agents/context-compression) |
+| **Prompt Caching** | Cache a large, stable system prompt so repeat calls are billed at a discount | [View Example](/examples/agents/prompt-caching) |
+| **Autonomous Mode** | How `max_loops="auto"` plans, executes subtasks, and summarizes | [View Guide](/agents/autonomous-mode) |
+| **Token Usage** | Read provider token counts with `agent.usage` and size the next request with `agent.input_tokens` | [View Guide](/agents/token-usage) |
+| **CronJob Quickstart** | Put one agent on a schedule and keep it running | [View Example](/examples/cron-job/quickstart) |
+| **CronJob: Multiple Agents** | Run several agents together, each on its own cadence | [View Example](/examples/cron-job/multiple-agents) |
+| **CronJob: Failure Handling** | Keep a long-running schedule alive through failures | [View Example](/examples/cron-job/resilience) |
+
+---
+
+## Reasoning Agents
+
+`TreeOfThoughts` searches a tree of reasoning steps with BFS or DFS. See the [Tree of Thoughts reference](/agents/tree-of-thoughts).
+
+| Example | Description | Link |
+|---------|-------------|------|
+| **Number Theory with a BFS Beam** | Count solutions with a breadth-first beam and averaged ratings per step | [View Example](/examples/tree-of-thoughts/number-theory-counting) |
+| **Fermi Estimate with Sampling and Votes** | Independently sampled steps compared by vote | [View Example](/examples/tree-of-thoughts/fermi-estimation) |
+| **Knights and Knaves with DFS** | Assume a case, follow it, and backtrack on a contradiction | [View Example](/examples/tree-of-thoughts/knights-and-knaves) |
 
 ---
 
@@ -65,12 +84,15 @@ Coordinate many agents. These map directly to the core Swarms multi-agent struct
 | **Concurrent Workflow** | Run multiple agents simultaneously for maximum efficiency | [View Example](/examples/concurrent-workflow-example) |
 | **Mixture of Agents (MoA)** | Run expert agents in parallel and synthesize their outputs | [View Example](/examples/mixture-of-agents-example) |
 | **Hierarchical Swarm** | Director-worker pattern for complex project coordination | [View Example](/examples/hierarchical-swarm-example) |
-| **Group Chat** | Asynchronous, self-selecting agent group chat for debate and reasoning | [View Example](/examples/group-chat-example) |
+| **Group Chat** | Turn-based, self-selecting agent group chat for debate and reasoning | [View Example](/examples/group-chat-example) |
 | **Swarm Router** | Switch between any multi-agent architecture by changing one parameter | [View Example](/examples/swarm-router-example) |
 | **Social Swarm Patterns** | Broadcast, circular, mesh, grid, star, pyramid, and aggregate patterns | [View Example](/examples/social-swarm-patterns) |
 | **Advisor Swarm** | Pair a cheap executor model with a powerful advisor consulted on-demand | [View Example](/examples/multi-agent/advisor-swarm-example) |
 | **Debate Swarm Quickstart** | Specialized agents argue and converge on conclusions | [View Example](/examples/multi-agent/debate-quickstart) |
-| **GroupChat Internals** | Deep technical analysis of the async self-selecting GroupChat module | [View Example](/examples/groupchat_insight) |
+| **GroupChat Internals** | Deep technical analysis of the turn-based, self-selecting GroupChat module | [View Example](/examples/groupchat_insight) |
+| **Auto Agent Builder Quickstart** | Turn a plain-English task into a working team of agents | [View Example](/examples/auto-agent-builder/quickstart) |
+| **Auto Agent Builder: Triage** | Build a fresh team of specialists for every incoming ticket | [View Example](/examples/auto-agent-builder/triage) |
+| **Auto Agent Builder: Reproducible Rosters** | Design a team once, then version and rerun it | [View Example](/examples/auto-agent-builder/reproducible) |
 
 ---
 
@@ -122,6 +144,10 @@ Connect agents to the outside world — browsers, search, MCP servers, and payme
 | **Firecrawl Tool** | Crawl entire websites and extract structured content | [View Example](/examples/integrations/firecrawl) |
 | **MCP with DataStax** | Connect agents to Astra DB through the Model Context Protocol | [View Example](/examples/integrations/mcp-datastax) |
 | **MCP tool integrations** | Connect agents to real MCP servers: DeepWiki, Exa, Firecrawl, Hugging Face, Semgrep | [View Examples](/examples/mcp/overview) |
+| **Serve an Agent over MCP** | Put one agent behind an API key with `MCPDeployer` and call it from another agent | [View Example](/examples/mcp/mcp-deployer-serve-agent) |
+| **Serve a Team over MCP** | Expose several agents, a workflow, and a function as tools on one MCP server | [View Example](/examples/mcp/mcp-deployer-serve-team) |
+| **Dynamic Tool Usage** | Defer tool schemas behind a searchable catalog with `dynamic_tools=True` | [View Example](/examples/tools/dynamic-tool-usage) |
+| **DecisionModel** | Ask a decision model (TypeSafe Jev, Cloudflare Clef) typed questions about a state | [View Reference](/api/decision-model) |
 | **x402 Discovery Query** | Discover and query x402-enabled services | [View Example](/examples/integrations/x402-discovery) |
 | **x402 Payment Integration** | Let agents transact natively for paid services | [View Example](/examples/integrations/x402-payment) |
 
@@ -191,6 +217,7 @@ Ship your agents to production.
 | **Google Cloud Run** | Deploy a containerized agent REST API with automatic scaling | [View Example](/examples/cloud-run) |
 | **Cloudflare Workers** | Deploy cron-driven agents on Cloudflare's global edge network | [View Example](/examples/cloudflare-workers) |
 | **Phala TEE Deployment** | Deploy inside a Trusted Execution Environment with on-chain attestation | [View Example](/examples/phala-deploy) |
+| **MCPDeployer** | Serve agents and swarms as an authenticated MCP server | [View Reference](/api/mcp-deployer) |
 
 ---
 

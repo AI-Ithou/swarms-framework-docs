@@ -33,12 +33,12 @@ agent = Agent(
     max_loops=1,
 )
 
-# The system prompt is automatically loaded from the marketplace
+# The marketplace prompt is appended to the system prompt
 result = agent.run("Execute the task")
 ```
 
 <Info>
-When you provide a `marketplace_prompt_id`, the agent automatically fetches the prompt from the marketplace and sets it as the system prompt.
+When you provide a `marketplace_prompt_id`, the agent fetches the prompt from the marketplace at construction and appends it to its `system_prompt`. If `agent_name` or `agent_description` were left at their defaults, they are filled in from the marketplace prompt. If no prompt with that ID exists, construction raises `ValueError`.
 </Info>
 
 ## Fetching Prompts Programmatically
@@ -200,7 +200,7 @@ Make sure to set the `SWARMS_API_KEY` environment variable before publishing. Ge
 </Warning>
 
 <Note>
-When publishing via `publish_to_marketplace=True`, use the Agent's real constructor parameters: `agent_description` (not `description`) and `tags` as a `List[str]`. There is currently no `category` parameter on `Agent` — auto-published agents are always filed under the `"research"` category server-side, regardless of the agent's actual domain. `tags` and `capabilities` are merged into a single comma-separated string when publishing; either may be set on its own, or neither. To control the category, call `AgentMarketplaceHandler.add_prompt` directly instead.
+When publishing via `publish_to_marketplace=True`, use the Agent's real constructor parameters: `agent_description` (not `description`) and `tags` as a `List[str]`. There is currently no `category` parameter on `Agent` — auto-published agents are always filed under the `"research"` category server-side, regardless of the agent's actual domain. `tags` and `capabilities` are merged into a single comma-separated string when publishing; either may be set on its own, or neither. `use_cases` is required: publishing without it raises `AgentInitializationError`. The prompt that gets published is `short_memory.get_str()`, the agent's conversation history as one string, not the raw `system_prompt` you passed in. To control the category or publish exactly the prompt text you wrote, call `AgentMarketplaceHandler.add_prompt` directly instead.
 </Note>
 
 ## API Configuration
@@ -388,7 +388,7 @@ print(f"Research agent published: {response}")
 
 ## Marketplace Categories
 
-Organize your prompts by category:
+Organize your prompts by category. The SDK only defines the default, `research`, and sends whatever string you pass; the accepted set is decided by the marketplace server, so treat this list as examples:
 
 - `research` - Research and analysis
 - `content` - Content creation and writing
@@ -469,7 +469,7 @@ except Exception as e:
 
 ## API Reference
 
-### fetch_prompts_from_marketplace
+### AgentMarketplaceHandler.fetch
 
 ```python
 AgentMarketplaceHandler.fetch(
@@ -481,12 +481,12 @@ AgentMarketplaceHandler.fetch(
 ```
 
 **Parameters:**
-- `prompt_id`: UUID of the prompt to fetch
-- `name`: Name of the prompt (alternative to prompt_id)
+- `prompt_id`: UUID of the prompt to fetch. Takes precedence over `name`
+- `name`: Name of the prompt (alternative to prompt_id). One of the two is required, or `ValueError` is raised
 - `timeout`: Request timeout in seconds
-- `return_params_on`: If True, returns (name, description, prompt) tuple; if False, returns full dict
+- `return_params_on`: If True, returns (name, description, prompt) tuple; if False, returns full dict. Returns `None` when the prompt does not exist (404)
 
-### add_prompt_to_marketplace
+### AgentMarketplaceHandler.add_prompt
 
 ```python
 AgentMarketplaceHandler.add_prompt(
@@ -509,8 +509,8 @@ AgentMarketplaceHandler.add_prompt(
 - `use_cases`: List of dicts with 'title' and 'description' keys
 - `tags`: Comma-separated tags
 - `is_free`: Whether the prompt is free or paid
-- `price_usd`: Price in USD (for paid prompts)
-- `category`: Category for organization
+- `price_usd`: Price in USD (ignored when `is_free` is True)
+- `category`: Category for organization (defaults to `"research"`)
 - `timeout`: Request timeout in seconds
 
 ## Next Steps

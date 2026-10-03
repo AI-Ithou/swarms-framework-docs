@@ -114,7 +114,7 @@ print(result)
 
 ## What happens when you call `run()`
 
-1. **Transport is detected from the URL scheme.** An `https://` URL uses streamable HTTP; you never configure this by hand.
+1. **The agent connects over streamable HTTP**, the default transport. You never configure it for this server.
 2. **Tools are discovered.** The agent asks the server what it exposes and converts each tool to an OpenAI-format function schema.
 3. **The model chooses.** It typically calls `read_wiki_structure` to see what exists, then `read_wiki_contents` or `ask_question` for the parts that matter.
 4. **Results come back into the conversation**, and the model writes its answer from them.
@@ -144,10 +144,10 @@ print(agent.run("Use your tools to explain what the kyegomez/swarms repository d
     Two fixes, in order: say "use your tools" in the task, and put the instruction to retrieve before answering in the system prompt. Weaker models need both.
   </Accordion>
   <Accordion title="Timeouts on large repositories">
-    `read_wiki_contents` can return a lot of text. Raise the ceiling with `mcp_timeout=120` on the `Agent`.
+    `read_wiki_contents` can take a while on a big repository. One tool call may run for `tool_timeout` seconds, 120 by default; raise it with `mcp_config=MCPConnection(url="https://mcp.deepwiki.com/mcp", tool_timeout=300)`. `mcp_timeout` only bounds connecting and sending requests.
   </Accordion>
   <Accordion title="`cannot import name 'streamablehttp_client'`">
-    You are on `mcp` 2.x, which renamed it. Pin the 1.x line: `pip install 'mcp>=1.28.1,<2.0.0'`.
+    Your `swarms` predates `mcp` 2.x support, which renamed that function. Upgrade with `pip install -U swarms`; 15.0.1 and later work with both `mcp` 1.x and 2.x.
   </Accordion>
 </AccordionGroup>
 

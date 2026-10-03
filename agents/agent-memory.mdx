@@ -15,7 +15,7 @@ Use this page to understand:
 - How to give an agent external knowledge with a retrieval tool
 
 <Note>
-  Persistent memory is keyed by `agent_name`. Reusing the same `agent_name` (with `persistent_memory=True`) resumes the same memory across process restarts. Changing the name starts a separate memory folder. Leaving `persistent_memory` at its default of `False` keeps the agent fully ephemeral.
+  Persistent memory is keyed by `agent_name`. Reusing the same `agent_name` (with `persistent_memory=True`) reuses the same `MEMORY.md` across process restarts. Changing the name starts a separate memory folder. Leaving `persistent_memory` at its default of `False` keeps the agent fully ephemeral.
 </Note>
 
 ## The `persistent_memory` flag
@@ -23,15 +23,12 @@ Use this page to understand:
 `persistent_memory` is the top-level switch that controls whether the agent reads from and writes to `MEMORY.md`.
 
 <ParamField path="persistent_memory" type="bool" default="False">
-  Enables disk-backed persistent memory. When `True`, the agent creates `MEMORY.md` on first run, preloads it on subsequent runs, and writes new turns through to disk. When `False` (the default), the agent runs fully in-process — no `MEMORY.md`, no `archive/`, fresh state every run.
+  Enables disk-backed persistent memory. When `True`, the agent creates `MEMORY.md` when it is first constructed, preloads it into `agent.short_memory` on later constructions, and writes new turns through to disk. When `False` (the default), the agent runs fully in-process — no `MEMORY.md`, no `archive/`, fresh state every run.
 
   ```python
   from swarms import Agent
 
-  # Persistent agent — opt in explicitly.
-  # On first run it creates MEMORY.md. On subsequent runs it picks up
-  # where it left off — the model sees the prior conversation as a
-  # system preamble.
+  # Writes every turn to MEMORY.md and reloads it on the next construction.
   persistent_agent = Agent(
       agent_name="ResearchAssistant",
       agent_description="Remembers context across sessions",
@@ -40,7 +37,7 @@ Use this page to understand:
       persistent_memory=True,  # state survives restarts
   )
 
-  # Ephemeral agent (default) — no disk writes, no preload, fresh every run.
+  # The default: no disk writes and no preload.
   ephemeral_agent = Agent(
       agent_name="OneShotAgent",
       model_name="gpt-5.4",
@@ -66,7 +63,7 @@ An agent can use several memory layers at the same time:
 
 ## Disk layout
 
-Agent memory lives under the workspace directory:
+Agent memory lives under the workspace directory. When `WORKSPACE_DIR` is not set, it falls back to `./agent_workspace` under the current working directory.
 
 ```text
 $WORKSPACE_DIR/agents/{agent_name}/
@@ -76,6 +73,8 @@ $WORKSPACE_DIR/agents/{agent_name}/
     |-- history_2026-04-20_16-12-08.md
     `-- ...
 ```
+
+This folder is separate from the agent's working folder, `$WORKSPACE_DIR/agents/{agent-name}-{id12}/`, which changes with every agent instance. See [Where files are written](#where-files-are-written).
 
 <ParamField path="agent_name" type="str" default="swarm-worker-01">
   Stable name used to identify the agent's memory folder.
@@ -125,7 +124,7 @@ The file starts with a small header and an interaction log section:
 ```markdown
 # Agent Memory
 
-**Conversation:** ResearchAgent_id_<uuid>_conversation
+**Conversation:** ResearchAgent_id_agent-<uuid>_conversation
 **Created:** 2026-04-20T18:33:12
 
 ---
@@ -137,19 +136,23 @@ If the file already exists, Swarms leaves it in place.
 
 ### 2. Preload on construction
 
-During `Conversation.__init__`, Swarms reads the existing `MEMORY.md` and injects it into `conversation_history` as a single `System` message.
+During `Conversation.__init__`, Swarms reads the existing `MEMORY.md` and adds it to `conversation_history` as a single `System` message. A file that holds only the header is skipped.
 
-The resulting prompt order is:
+The resulting history order is:
 
 ```text
 [0] System: <system_prompt>
-[1] User: <rules>                       # if provided
-[2] User: <custom_rules_prompt>         # if provided
-[3] System: [Persistent Memory — MEMORY.md]
+[1] Human: <rules>                      # if provided; the role is the agent's user_name
+[2] System: [Persistent Memory — MEMORY.md]
             ... full MEMORY.md contents ...
+[3] ...                                 # the constructor's messages, if provided
 ```
 
-The preload is added directly to memory, so it is not written back to disk again. When `return_history_as_string()` builds the prompt, the model sees the system prompt, rules, persistent memory, and current task in order.
+The preload is added directly to memory, so it is not written back to disk again.
+
+<Warning>
+  The preload is stored in `agent.short_memory`, but `agent.run()` does not currently send it to the model. With an integer `max_loops`, requests are built from the conversation's non-`System` turns. With `max_loops="auto"`, they start from the task and `run(messages=...)`. The preload is a `System` message, so neither path includes it. To give the model what the agent remembered, pass that context yourself, for example in `system_prompt` or in the task.
+</Warning>
 
 ### 3. Write-through on new messages
 
@@ -201,7 +204,7 @@ Compression can run when all of these are true:
 - `context_compression=True`
 - `context_length` is set to a non-zero value
 - The token usage of `short_memory.return_history_as_string()` is greater than or equal to `threshold * context_length`
-- The agent is at the top of a loop iteration
+- The agent is at a check point: the top of each loop iteration with an integer `max_loops`, or the top of each subtask iteration with `max_loops="auto"`
 
 The default threshold is `0.9`, so compression starts when the active prompt reaches about 90% of the context window.
 
@@ -209,7 +212,13 @@ The default threshold is `0.9`, so compression starts when the active prompt rea
   `context_length` accepts `None` as its constructor default, but the agent never runs with an actual `None` value: during `__init__`, an unset `context_length` is resolved to a model-derived value (or `16000` as a fallback), so compression always has a real denominator to measure against. Pass `context_length` explicitly only to override that resolved default — for example, to match a larger context window.
 </Note>
 
-Compression works for both `max_loops="auto"` and integer `max_loops` runs. The `context_compression` flag is the gate.
+The compressor is checked for both `max_loops="auto"` and integer `max_loops` runs. The `context_compression` flag is the gate.
+
+In autonomous runs it is checked before every model call in the subtask phase, but not during planning or the final summary. When it fires, the loop rebuilds its request as the summary plus the prompt for the subtask in progress, so the next request really is smaller. See [Autonomous Mode](/agents/autonomous-mode#context-compression-between-subtasks).
+
+<Warning>
+  With an integer `max_loops`, compression currently compacts `agent.short_memory` and `MEMORY.md` but does not shrink what is sent. Each run builds its request once, from the conversation's non-`System` turns, when it starts, so a compaction later in the run leaves that request unchanged. A compaction at the start of a run replaces the new task along with the rest of the history, and the `System` summary is not sent, so that request carries only the system prompt.
+</Warning>
 
 ### What compression does
 
@@ -276,8 +285,7 @@ agent = Agent(
 When compression is enabled, the agent attaches a `ContextCompressor(threshold=0.9)`. You can replace it after construction to tune the threshold, summarizer model, temperature, or summary length:
 
 ```python
-from swarms import Agent
-from swarms.agents.context_compressor import ContextCompressor
+from swarms import Agent, ContextCompressor
 
 agent = Agent(
     agent_name="ResearchAgent",
@@ -294,6 +302,8 @@ agent._context_compressor = ContextCompressor(
     summarizer_max_tokens=3000,
 )
 ```
+
+`summarizer_model` defaults to the agent's own `model_name`. The summary call goes straight to LiteLLM, so it is not counted in `agent.usage`.
 
 ## Access memory in code
 
@@ -343,17 +353,18 @@ Manual compaction follows the same archive, wipe, and re-seed flow as automatic 
 
 ### Export and load conversations
 
-`MEMORY.md` is the active persistent memory file. You can also export or load conversation history in other formats:
+`MEMORY.md` is the active persistent memory file. You can also export the conversation history to JSON and load it back:
 
 ```python
-# Save conversation snapshots
-agent.short_memory.export(force=True)
-agent.short_memory.save_as_json(force=True)
-agent.short_memory.save_as_yaml(force=True)
+# Writes ./conversations/conversation_<conversation name>.json
+agent.short_memory.export()
+print(agent.short_memory.save_filepath)
 
-# Load a prior exported conversation
-agent.short_memory.load("conversation_agent-123.json")
+# Replace the history with a saved export
+agent.short_memory.load(agent.short_memory.save_filepath)
 ```
+
+Exports go to `save_filepath`. Unless you pass `save_filepath` or `conversations_dir` to a `Conversation`, that is `./conversations/conversation_{name}.json` under the current working directory, and the folder is created only when something is saved. An agent's conversation is named `{agent_name}_id_{agent id}_conversation`. `save_as_json()` and `save_as_yaml()` both write to `save_filepath` as it is, so `save_as_yaml()` on a default path writes YAML into a `.json` file. Use `export()`, which matches the extension to `export_method`.
 
 ### Search memory
 
@@ -387,6 +398,18 @@ agent.short_memory.memory_md_path = None
 ```
 
 This stops future writes but does not retroactively delete `MEMORY.md`. Neither approach disables `conversation_history` — that always tracks the current run in memory.
+
+## Where files are written
+
+| What | Path | Written when |
+| --- | --- | --- |
+| `MEMORY.md` and `archive/` | `$WORKSPACE_DIR/agents/{agent_name}/` | `persistent_memory=True` |
+| Agent working folder: autonomous-loop files, saved state, `config.json` | `$WORKSPACE_DIR/agents/{agent-name}-{id12}/` | On first use, for example a file tool, `agent.save()`, or `autosave=True` |
+| Conversation exports | `./conversations/conversation_{name}.json` | `export()` or `save_as_json()` on a `Conversation` |
+| Multi-agent autosave: `conversation_history.json`, `config.json` | `$WORKSPACE_DIR/swarms/{ClassName}/{name}-{timestamp}/` | `autosave=True` on structures such as `SequentialWorkflow`, `ConcurrentWorkflow` and `SwarmRouter` |
+| MCP OAuth tokens | `~/.swarms/mcp_auth/` | An MCP server's OAuth flow |
+
+`WORKSPACE_DIR` defaults to `./agent_workspace` when it is not set. The working folder's name is the lowercased, hyphenated `agent_name` plus the last 12 characters of the agent's `id`, which is new for every instance unless you pass `id`. Folders are created on first use, and constructing an `Agent` or a `Conversation` creates nothing under `~/.swarms`.
 
 ## External knowledge
 
@@ -434,7 +457,7 @@ Swap the dictionary lookup for a real vector store, SQL query, or HTTP call and 
   An arbitrary object attached to the agent and stored on `agent.long_term_memory`.
 
   <Warning>
-    `agent.run()` never queries this object. The only method Swarms calls on it is `.save(path)`, and only when `autosave` writes agent state to disk. There is no automatic retrieval in the run loop and no built-in vector database ships with Swarms. Use a retrieval tool, as shown above, for anything the agent must actually read during a run.
+    `agent.run()` never queries this object. The only method Swarms calls on it is `.save(path)`, and only when `agent.save()` writes agent state to disk, which `autosave=True` also triggers. There is no automatic retrieval in the run loop and no built-in vector database ships with Swarms. Use a retrieval tool, as shown above, for anything the agent must actually read during a run.
   </Warning>
 </ParamField>
 
@@ -469,5 +492,8 @@ If compaction only appended a summary, the next run would load both the summary 
   </Card>
   <Card title="Conversation API" icon="comments" href="/api/conversation">
     Explore the underlying `Conversation` class and its export, load, and search helpers.
+  </Card>
+  <Card title="Autonomous Mode" icon="robot" href="/agents/autonomous-mode">
+    How compression and output caps keep `max_loops="auto"` runs inside the context window.
   </Card>
 </CardGroup>

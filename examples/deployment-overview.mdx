@@ -12,11 +12,13 @@ This page maps the most common ways to ship a Swarms agent to production and hel
 |---|---|---|---|---|---|
 | **FastAPI + Uvicorn** | REST API endpoints | Low | Medium | Low | Quick prototypes, internal tools, real-time agent calls |
 | **Cron Jobs** | Scheduled tasks | Low | Low | Very low | Batch processing, periodic agents (digest, daily reports) |
+| **MCP server (`MCPDeployer`)** | Agents and swarms as MCP tools | Low | Medium | Low | Letting MCP clients and other agents call your agents behind an API key |
 
 Detailed walkthroughs:
 
 - [FastAPI Agent API](/examples/fastapi-agent-api) — full guide with code, auth, rate limiting, Docker, Gunicorn.
-- Cron jobs: see the runnable examples in the repo at `examples/guides/deployment/cron_job_examples/`.
+- Cron jobs: the [CronJob quickstart](/examples/cron-job/quickstart), plus runnable examples in the repo at `examples/guides/deployment/cron_job_examples/`.
+- MCP server: [Serve an agent over MCP](/examples/mcp/mcp-deployer-serve-agent) and the [MCPDeployer reference](/api/mcp-deployer).
 
 ## Quick-start
 
@@ -31,7 +33,14 @@ Detailed walkthroughs:
 
 - **Best for:** running agents on a schedule (every hour, daily summary, weekly report).
 - **Setup time:** 2–5 minutes.
+- **Walkthrough:** [CronJob quickstart](/examples/cron-job/quickstart), [multiple agents](/examples/cron-job/multiple-agents), and [failure handling](/examples/cron-job/resilience).
 - **Reference code:** [cron_job_examples/](https://github.com/kyegomez/swarms/tree/master/examples/guides/deployment/cron_job_examples)
+
+### 3. MCP server (agents as tools)
+
+- **Best for:** exposing agents, workflows, and plain functions as tools that MCP clients (and other Swarms agents via `mcp_url`) can call.
+- **Walkthrough:** [Serve an agent over MCP](/examples/mcp/mcp-deployer-serve-agent) and [Serve a team from one MCP server](/examples/mcp/mcp-deployer-serve-team).
+- **Reference:** [MCPDeployer](/api/mcp-deployer).
 
 ## Choosing a target
 
@@ -68,6 +77,7 @@ Detailed walkthroughs:
 | You are… | Pick |
 |---|---|
 | Building an API for your agents | **FastAPI + Uvicorn** |
+| Letting MCP clients or other agents call your agents as tools | **MCPDeployer** |
 | Running batch jobs / scheduled agents | **Cron jobs** |
 | Shipping to production with consistency requirements | **FastAPI + Docker** |
 | Auto-scaling under variable load | **Cloud Run** or **Kubernetes** |

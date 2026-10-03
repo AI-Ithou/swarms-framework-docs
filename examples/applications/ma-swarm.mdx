@@ -44,7 +44,7 @@ To set up and run the M&A Advisory Swarm, follow these steps:
     pip install httpx swarms_tools
     ```
 2.  **Set up API Keys:**
-    The `Property Research Agent` utilizes the `exa_search` tool, which requires an `EXA_API_KEY`.
+    The Market & Strategic Analysis agent (Marcus) utilizes the `exa_search` tool, which requires an `EXA_API_KEY`.
     Create a `.env` file in the root directory of your project (or wherever your application loads environment variables) and add your API keys:
     ```
     EXA_API_KEY="YOUR_EXA_API_KEY"
@@ -57,9 +57,7 @@ To set up and run the M&A Advisory Swarm, follow these steps:
 ```python
 from typing import List
 from loguru import logger
-from swarms.structs.agent import Agent
-from swarms.structs.conversation import Conversation
-from swarms.utils.history_output_formatter import history_output_formatter
+from swarms import Agent, Conversation, history_output_formatter
 from swarms_tools import exa_search
 
 # System prompts for each agent

@@ -34,7 +34,7 @@ from swarms.structs.agent_router import AgentRouter
 </ParamField>
 
 <ParamField path="n_agents" type="int" default="1">
-  Number of agents to return in queries (currently supports returning the best match)
+  Stored as `router.n_agents` but not read. `find_best_agent()` always returns the single best match.
 </ParamField>
 
 <ParamField path="api_key" type="Optional[str]" default="None">
@@ -63,7 +63,7 @@ def add_agent(self, agent: AgentType) -> None
 - `agent` (AgentType): The agent to add. Must have `name`, `description`, and `system_prompt` attributes.
 
 **Raises:**
-- `Exception`: If there's an error generating the embedding or adding the agent.
+- `tenacity.RetryError`: The call is retried up to 3 times with exponential backoff (4 to 10 seconds). If every attempt fails, tenacity raises `RetryError` wrapping the last error.
 
 ---
 
@@ -91,7 +91,9 @@ def find_best_agent(self, task: str, *args, **kwargs) -> Optional[AgentType]
 **Parameters:**
 - `task` (str): The task description to match against agents.
 
-**Returns:** The best matching agent if found, `None` otherwise.
+**Returns:** The best matching agent if found, `None` when the router has no agents.
+
+Like `add_agent()`, this call is retried up to 3 times and raises `tenacity.RetryError` if every attempt fails.
 
 ---
 
@@ -119,7 +121,9 @@ def update_agent_history(self, agent_name: str) -> None
 ```
 
 **Parameters:**
-- `agent_name` (str): The name of the agent to update.
+- `agent_name` (str): The `agent_name` of the agent to update.
+
+**Raises:** `ValueError` if no routed agent has that name.
 
 <Note>
 This method updates the agent's embedding to include its conversation history, which can improve future routing decisions based on what the agent has learned or discussed.

@@ -28,7 +28,7 @@ graph TD
 
 The swarm follows this workflow:
 
-1. User task goes into the shared conversation
+1. The shared conversation is cleared, then the user task is added to it
 2. Before each executor turn, the advisor reads the full shared context and provides guidance (if budget allows)
 3. The executor reads the full shared context (including any advisor guidance) and produces output
 4. Both advisor guidance and executor output are added to the shared conversation
@@ -90,7 +90,7 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict-all-except-first">
-  Format for output (dict, str, list, final, json, yaml)
+  Format for the returned conversation history, such as `"dict"`, `"str"`, `"list"`, `"final"`, `"json"` or `"yaml"`
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -98,15 +98,15 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="executor_agent" type="Agent" default="None">
-  Pre-configured Agent for execution (e.g., with tools or MCP)
+  Pre-configured Agent for execution (e.g., with tools or MCP). When set, `executor_model_name`, `executor_system_prompt` and `tools` are not applied to it
 </ParamField>
 
 <ParamField path="advisor_agent" type="Agent" default="None">
-  Pre-configured Agent for advising
+  Pre-configured Agent for advising. When set, `advisor_model_name` and `advisor_system_prompt` are not applied to it
 </ParamField>
 
 <ParamField path="tools" type="List[Callable]" default="None">
-  Tools available to the executor agent only
+  Tools for the built-in executor agent only. The built-in advisor never gets tools
 </ParamField>
 
 **Raises:**
@@ -122,28 +122,45 @@ pip install -U swarms
 Execute the advisor-executor orchestration flow.
 
 ```python
-def run(self, task: str, img: str = None, imgs: List[str] = None) -> Any
+def run(
+    self,
+    task: Optional[str] = None,
+    img: Optional[str] = None,
+    imgs: Optional[List[str]] = None,
+    *args,
+    **kwargs,
+) -> Any
 ```
 
 **Parameters:**
-- `task` (str): The task to accomplish
-- `img` (str, optional): Optional single image input
-- `imgs` (List[str], optional): Optional list of image inputs
+- `task` (str): The task to accomplish. Required; an empty or missing task raises `ValueError("A task is required")`
+- `img` (str, optional): Optional single image input, passed to the executor
+- `imgs` (List[str], optional): Optional list of image inputs, passed to the executor
 
 **Returns:** Formatted conversation history according to `output_type`
 
+Each call clears the shared conversation first, so reusing one swarm for several tasks does not carry the previous task's transcript forward.
+
 ### batched_run()
 
-Run the swarm on multiple tasks sequentially.
+Run the swarm on multiple tasks, one after another.
 
 ```python
-def batched_run(self, tasks: List[str]) -> List[Any]
+def batched_run(self, tasks: List[str], *args, **kwargs) -> List[Any]
 ```
 
 **Parameters:**
 - `tasks` (List[str]): List of task strings
 
-**Returns:** List of results, one per task
+**Returns:** List of results, one per task, in task order
+
+### `__call__()`
+
+Calling the swarm instance runs `run(task=task)`.
+
+```python
+result = swarm("Write a Python function to merge two sorted lists")
+```
 
 ## Usage Examples
 
@@ -256,12 +273,14 @@ swarm = AdvisorSwarm(
 
 ### Shared Context
 
-Both agents read from and write to the same `Conversation` object. This mirrors the Anthropic diagram where the advisor reads the same context as the executor. On each turn:
+Both agents read from and write to the same `Conversation` object. This mirrors the Anthropic diagram where the advisor reads the same context as the executor. The conversation reaches each agent as typed chat turns, not as one pasted string: the agent's own earlier messages arrive as `assistant` turns, and everyone else's arrive as `user` turns labelled with the speaker's name (for example `Executor: ...`). On each turn:
 
-1. The advisor reads `conversation.get_str()` -- sees everything so far
-2. The advisor's guidance is added to the conversation
-3. The executor reads `conversation.get_str()` -- sees the task, any prior output, and the advisor's guidance
-4. The executor's output is added to the conversation
+1. The advisor receives the shared conversation as turns -- it sees everything so far
+2. The advisor's final answer is added to the conversation under the `Advisor` role
+3. The executor receives the shared conversation as turns -- the task, any prior output, and the advisor's guidance
+4. The executor's final answer is added to the conversation under the `Executor` role
+
+Only each agent's final message is recorded, not the full transcript that `Agent.run` returns for its `output_type`.
 
 ### Advisor Budget
 

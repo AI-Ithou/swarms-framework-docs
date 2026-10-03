@@ -166,6 +166,7 @@ def on_token(token: str) -> None:
 agent = Agent(
     agent_name="Callback-GPT",
     model_name="gpt-5.4",
+    streaming_on=True,  # the callback only fires while streaming
     streaming_callback=on_token,
     max_loops=1,
 )

@@ -14,7 +14,8 @@ The Social Algorithms framework provides a flexible system for defining custom s
 | Complex Multi-Agent Workflows | Implement complex multi-agent workflows |
 | Emergent Behaviors | Create emergent behaviors through agent interactions |
 | Communication Logging | Log and track all communication between agents |
-| Timeout & Error Handling | Execute algorithms with timeout protection and error handling |
+| Timeout & Error Handling | Execute algorithms with timeout protection; errors are logged and re-raised |
+| Tracing | Construction and each `run` are captured as OpenTelemetry spans when [telemetry](/deployment/telemetry) is on |
 
 ## Installation
 
@@ -43,7 +44,7 @@ from swarms import SocialAlgorithms
 </ParamField>
 
 <ParamField path="agents" type="List[AgentType]" default="None">
-  List of agents that will participate in the algorithm.
+  List of agents that will participate in the algorithm. Required: every element must be an `Agent` instance.
 </ParamField>
 
 <ParamField path="social_algorithm" type="Callable" default="None">
@@ -55,7 +56,7 @@ from swarms import SocialAlgorithms
 </ParamField>
 
 <ParamField path="output_type" type="OutputType" default="dict">
-  Format of the output from the algorithm.
+  Shape of `final_outputs`. `"dict"` wraps a non-dict result as `{"result": ...}`, `"list"` wraps a non-list result as `[...]`, and `"str"` converts a non-string result with `str()`. Any other value returns the result unchanged.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -68,7 +69,7 @@ from swarms import SocialAlgorithms
   were stored but never used. Passing them is accepted and ignored.
 </Note>
 
-## Attributes
+## Instance attributes
 
 <ParamField path="conversation" type="Conversation">
   The transcript of every agent message, kept across runs. Read it with the
@@ -97,13 +98,23 @@ def run(self, task: str, algorithm_args: Optional[Dict[str, Any]] = None, **kwar
 
 **Parameters:**
 - `task` (str): The task to execute using the social algorithm.
-- `algorithm_args` (Dict[str, Any]): Additional arguments for the algorithm.
+- `algorithm_args` (Dict[str, Any]): Additional keyword arguments for the algorithm. The dict is never mutated.
+- `**kwargs`: More keyword arguments for the algorithm. They win over `algorithm_args` on a name conflict.
+
+The algorithm is called as `social_algorithm(agents, task, **algorithm_args, **kwargs)`.
 
 **Returns:** `SocialAlgorithmResult` — The result of executing the social algorithm.
 
 **Raises:**
 - `InvalidAlgorithmError`: If no social algorithm is defined.
 - `TimeoutError`: If the algorithm execution exceeds max_execution_time.
+- Any exception the algorithm raises, after it is logged.
+
+**Process flow:**
+1. Records the task as a `User` message. The conversation is not cleared between runs
+2. Patches each agent's `run` and `talk_to` for the duration of the call, so every agent message is recorded under the agent's name
+3. Calls the algorithm under the timeout and restores the agents afterwards, even on failure
+4. Records the algorithm's return value under the algorithm's `name` and returns a `SocialAlgorithmResult`
 
 ---
 
@@ -181,12 +192,12 @@ Result of executing a social algorithm.
 |-----------|------|-------------|
 | `algorithm_id` | `str` | Unique identifier for the algorithm |
 | `execution_time` | `float` | Time taken to execute the algorithm in seconds |
-| `total_steps` | `int` | Total number of communication steps |
-| `successful_steps` | `int` | Number of successful communication steps |
-| `failed_steps` | `int` | Number of failed communication steps |
-| `communication_history` | `List[Dict[str, Any]]` | Every agent message, as conversation dicts |
-| `final_outputs` | `Any` | The final output, shaped by `output_type` |
-| `metadata` | `Dict[str, Any]` | Additional metadata about the execution |
+| `total_steps` | `int` | Number of agent messages recorded during this run |
+| `successful_steps` | `int` | Same as `total_steps` |
+| `failed_steps` | `int` | Always `0` in a returned result. A failing algorithm raises instead of returning |
+| `communication_history` | `List[Dict[str, Any]]` | Every message in the conversation, including earlier runs, as conversation dicts |
+| `final_outputs` | `Any` | The algorithm's return value, shaped by `output_type` |
+| `metadata` | `Dict[str, Any]` | Reserved; currently always an empty dict |
 
 <Note>
 Only the `SocialAlgorithms` class itself is exported from the top-level `swarms` package. `SocialAlgorithmResult` and the exception classes below must be imported from the submodule:
@@ -349,6 +360,7 @@ result = rd_algorithm.run("Develop a sustainable energy management system for sm
 ```python
 from swarms import Agent, SocialAlgorithms
 
+
 def competitive_evaluation_algorithm(agents, task, **kwargs):
     """Agents compete and are evaluated by a judge."""
     if len(agents) < 3:
@@ -376,6 +388,10 @@ def competitive_evaluation_algorithm(agents, task, **kwargs):
         "judge_evaluation": evaluation,
         "task": task,
     }
+
+competitor1 = Agent(agent_name="Competitor-1", model_name="gpt-5.4", max_loops=1)
+competitor2 = Agent(agent_name="Competitor-2", model_name="claude-sonnet-4-6", max_loops=1)
+judge = Agent(agent_name="Judge", model_name="gpt-5.4", max_loops=1)
 
 social_alg = SocialAlgorithms(
     name="Competitive-Evaluation",
@@ -446,7 +462,7 @@ def negotiation_algorithm(agents, task, **kwargs):
 
 ### Communication Logging
 
-Every `agent.run()` and `agent.talk_to()` call made while the algorithm runs is recorded into `conversation`, under the calling agent's own name. This is always on; the algorithm does not have to report anything itself.
+Every `agent.run()` and `agent.talk_to()` call made while the algorithm runs is recorded into `conversation`, under the calling agent's own name. For `run`, the recorded content is whatever `run` returns. For `talk_to`, the outgoing message is recorded with the receiver's name in the message metadata. This is always on; the algorithm does not have to report anything itself.
 
 ### Timeout Protection
 
@@ -462,7 +478,11 @@ Algorithms are executed with timeout protection to prevent infinite loops. The d
 
 ### Error Handling
 
-Comprehensive error handling with `InvalidAlgorithmError`, `AgentNotFoundError`, `TimeoutError`, and graceful handling of agent execution failures.
+`run` raises `InvalidAlgorithmError` when no algorithm is set and `TimeoutError` when the limit is hit. Any other exception from the algorithm or an agent is logged and re-raised, so handle agent failures inside your algorithm if you want the run to continue. `remove_agent` raises `AgentNotFoundError` for an unknown name.
+
+### Tracing
+
+The constructor captures its configuration and each `run` call is recorded as a `SocialAlgorithms.run` span when [telemetry](/deployment/telemetry) is on. Agent runs inside the algorithm nest under that span.
 
 ### Output Formatting
 
@@ -476,7 +496,7 @@ Results can be formatted as `"dict"` (default), `"list"`, or `"str"`.
 | **Tools** | Agents can use tools within social algorithms |
 | **Memory** | Agents can access long-term memory during execution |
 | **Workflows** | Social algorithms can be used as steps in larger workflows |
-| **Routers** | Social algorithms can be used with SwarmRouter for dynamic selection |
+| **Routers** | `SocialAlgorithms` is not a `SwarmRouter` swarm type; call it directly |
 
 ## Best Practices
 

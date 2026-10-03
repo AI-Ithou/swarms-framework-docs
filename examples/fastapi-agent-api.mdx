@@ -63,7 +63,7 @@ def create_agent(agent_name: str = "default", max_loops: int = 1) -> Agent:
         system_prompt=(
             "You are a helpful AI assistant. Be clear, accurate, and concise."
         ),
-        model_name="claude-sonnet-4-20250514",
+        model_name="claude-sonnet-4-6",
         dynamic_temperature_enabled=True,
         max_loops=max_loops,
         dynamic_context_window=True,
@@ -84,8 +84,7 @@ async def health_check():
 async def run_agent(request: AgentRequest):
     try:
         start_time = time.time()
-        # max_loops only takes effect at Agent construction time, not on
-        # agent.run(), so the requested value must be passed to create_agent().
+        # max_loops is a constructor setting, so pass it to create_agent(), not run().
         agent = create_agent(request.agent_name, request.max_loops)
         result = agent.run(task=request.task)
         return AgentResponse(
@@ -159,7 +158,7 @@ async def run_quant_agent(request: AgentRequest):
                 "algorithmic trading, statistical arbitrage, risk management, and "
                 "machine learning applications in trading."
             ),
-            model_name="claude-sonnet-4-20250514",
+            model_name="claude-sonnet-4-6",
             dynamic_temperature_enabled=True,
             max_loops=request.max_loops,
             dynamic_context_window=True,
@@ -191,19 +190,19 @@ class AgentFactory:
             "agent_name": "Default-Agent",
             "agent_description": "Versatile AI agent for various tasks",
             "system_prompt": "You are a helpful AI assistant...",
-            "model_name": "claude-sonnet-4-20250514",
+            "model_name": "claude-sonnet-4-6",
         },
         "quantitative-trading": {
             "agent_name": "Quantitative-Trading-Agent",
             "agent_description": "Advanced quantitative trading agent",
             "system_prompt": "You are an expert quantitative trading agent...",
-            "model_name": "claude-sonnet-4-20250514",
+            "model_name": "claude-sonnet-4-6",
         },
         "research": {
             "agent_name": "Research-Agent",
             "agent_description": "Academic research and analysis agent",
             "system_prompt": "You are an expert research agent...",
-            "model_name": "claude-sonnet-4-20250514",
+            "model_name": "claude-sonnet-4-6",
         },
     }
 
@@ -278,7 +277,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - AGENT_MODEL_NAME=claude-sonnet-4-20250514
+      - AGENT_MODEL_NAME=claude-sonnet-4-6
     volumes:
       - ./logs:/app/logs
 ```

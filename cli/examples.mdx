@@ -18,7 +18,7 @@ swarms check-login
 swarms setup-check
 ```
 
-`setup-check` validates Python version, package install, API keys, dependencies, and workspace configuration.
+`setup-check` validates Python version, package install, API keys, dependencies, and workspace configuration. The checks are local: they confirm a key is set, not that the provider accepts it. `check-login` only writes a local marker file and always reports success.
 
 ## Single-agent examples
 
@@ -40,6 +40,7 @@ swarms agent \
 ```bash
 swarms agent \
   --name "Code Reviewer" \
+  --description "Reviews code for security issues" \
   --system-prompt "You are a senior engineer focused on security and best practices." \
   --task "Review this code for vulnerabilities: def process(data): return eval(data)" \
   --model-name "claude-sonnet-4-6" \
@@ -53,6 +54,7 @@ swarms agent \
 ```bash
 swarms agent \
   --name "MCP Agent" \
+  --description "Answers questions with MCP tools" \
   --system-prompt "Use MCP tools when they help answer the task." \
   --task "Find recent news about climate policy and summarize findings" \
   --model-name "claude-sonnet-4-6" \
@@ -98,10 +100,18 @@ swarms run-agents --yaml-file research_team.yaml
 ## Load agents from Markdown
 
 ```bash
-swarms load-markdown --markdown-path ./agents/ --concurrent
+swarms load-markdown --markdown-path ./agents/researcher.md
 ```
 
-Each `.md` file uses frontmatter for `name`, `model_name`, `temperature`, `max_loops`, and a body used as the system prompt.
+Each `.md` file uses frontmatter for `name`, `description`, `model_name`, `temperature`, `max_loops`, `mcp_url`, and `streaming_on`, and a body used as the system prompt. The command builds and lists the agents without running them.
+
+<Warning>
+  In Swarms 15.0.3, passing a directory to `--markdown-path` fails with `Unsupported file type`. Load one file at a time.
+</Warning>
+
+## Deep analysis
+
+`swarms heavy-swarm` currently fails on every run with a `TypeError`, because the CLI passes `loops_per_agent` and `random_loops_per_agent` to a `HeavySwarm` constructor that no longer accepts them. Use the [Python API](/api/heavy-swarm) instead. `swarms llm-council --task "..."` works, and needs OpenAI, Google, Anthropic, and xAI keys for its default members.
 
 ## Configuration templates
 
@@ -125,7 +135,7 @@ swarm_architecture:
 
 | Issue | What to try |
 | --- | --- |
-| Auth errors | `swarms check-login`, verify `.env` API keys |
+| Auth errors | `swarms setup-check` to see which keys are set, then verify them in `.env` |
 | Missing workspace | `export WORKSPACE_DIR=/path/to/workspace` |
 | Command not found | `pip install -U swarms` and confirm CLI on `PATH` |
 

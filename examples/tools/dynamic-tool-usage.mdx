@@ -6,6 +6,8 @@ icon: 'magnifying-glass-arrow-right'
 
 Every example on this page is a complete script. They show `dynamic_tools` working across the three situations that trigger it: local Python tools, MCP servers, and `max_loops="auto"`.
 
+`dynamic_tools` defaults to `False`, so every schema ships eagerly unless you opt in. Each example below that defers tools sets `dynamic_tools=True` explicitly.
+
 For the concepts behind these examples — the search algorithm, pre-warming, and prompt-cache interaction — see [Dynamic Tool Loading](/agents/dynamic-tools).
 
 ## Install
@@ -23,7 +25,7 @@ ANTHROPIC_API_KEY=""
 
 ## Deferring Local Tools
 
-The default. Both tools are registered and executable, but neither schema is sent until the model searches for it.
+Opt in with `dynamic_tools=True`. Both tools are registered and executable, but neither schema is sent until the model searches for it.
 
 ```python
 from swarms import Agent
@@ -439,7 +441,7 @@ print(out)
 
 ## Registering Extra Schemas
 
-Schemas appended to `tools_list_dictionary` after construction are clobbered the next time a search refreshes the tool array. Register them with `defer_tool_schemas` instead.
+Schemas appended to `tools_list_dictionary` after construction are clobbered the next time a search refreshes the tool array. Register them with `agent.tool_manager.defer_tool_schemas` instead. Tool handling lives on [ToolManager](/api/tool-manager).
 
 ```python
 from swarms import Agent
@@ -473,7 +475,7 @@ custom = {
     },
 }
 
-agent.defer_tool_schemas([custom])
+agent.tool_manager.defer_tool_schemas([custom])
 
 print(agent.tool_loader.deferred_names)
 # ['get_weather', 'lookup_timezone']
@@ -485,7 +487,7 @@ A schema registered this way is searchable and advertised once loaded, but it ha
 
 ## Turning Deferral Off
 
-For two or three tools, or when the tool must be callable on turn one, eager registration is the better trade.
+Eager registration is the default (`dynamic_tools=False`), and it is the better trade for two or three tools, or when the tool must be callable on turn one. Passing `dynamic_tools=False` explicitly, as below, is the same as leaving it out.
 
 ```python
 from swarms import Agent
@@ -515,7 +517,7 @@ print(agent.run("What is Apple trading at?"))
 | One or two tools, single loop | `dynamic_tools=False` |
 | Ten or more tools | `dynamic_tools=True` |
 | Any MCP server | `dynamic_tools=True` |
-| `max_loops="auto"` | `dynamic_tools=True` (the default) |
+| `max_loops="auto"` | `dynamic_tools=True` |
 | Tool must fire on turn one | `dynamic_tools=False` |
 | Latency matters more than token cost | `dynamic_tools=False` |
 

@@ -26,9 +26,9 @@ Fable 5 is automatically routed through LiteLLM by Swarms. As long as your `ANTH
 **Two important limitations:**
 
 - **Tools / function calling are not supported on Fable 5.** Leave `tools=None` and `tools_list_dictionary=None` on every Fable 5 agent. If you need tool use, route those calls to a different model (e.g. `claude-sonnet-4-6` or `gpt-5.4`) and use Fable 5 as the reasoning/synthesis layer.
-- **`temperature` is not supported.** Always pass `temperature=None`. Setting a numeric value will be ignored at best and rejected at worst — the model uses its own internal sampling.
+- **`temperature` is not supported.** Leave it unset. `Agent` defaults `temperature` and `top_p` to `None`, and Swarms leaves unset values out of the request, so the model uses its own sampling.
 
-`top_p` should likewise be left as `None`.
+When reasoning is on (`reasoning_effort` or `reasoning_enabled=True`), Swarms itself sends `temperature=1` and drops `top_p` for Claude models, as Anthropic's extended thinking requires.
 </Warning>
 
 ## Installation
@@ -68,7 +68,7 @@ agent = Agent(
 print(agent.run("Explain how transformer attention works in three paragraphs."))
 ```
 
-That's it. Every Swarms feature — tools, streaming, multi-agent orchestration, MCP, vision — works against Fable 5 with no additional setup.
+That's it. Streaming, multi-agent orchestration, autonomous loops, and vision work against Fable 5 with no additional setup. Tool calling (including MCP tools) does not; see [Tools](#tools-not-supported).
 
 ## Complete Example: Quantitative Trading Agent
 
@@ -97,11 +97,9 @@ agent = Agent(
     system_prompt=system_prompt,
     model_name="anthropic/claude-fable-5",
     max_loops=1,
-    top_p=None,
+    reasoning_enabled=True,
     thinking_tokens=1024,
     reasoning_effort="high",
-    temperature=None,
-    tools_list_dictionary=None,
 )
 
 out = agent.run(
@@ -120,38 +118,40 @@ print(out)
 |---|---|---|
 | `model_name` | `"anthropic/claude-fable-5"` | The LiteLLM-prefixed name for Fable 5. |
 | `max_loops` | `1` | One LLM call per `run()`. Bump to `"auto"` for autonomous loops. |
-| `thinking_tokens` | `1024` | Enables Anthropic extended thinking; gives the model a private scratchpad before responding. |
+| `reasoning_enabled` | `True` | Sends an explicit thinking block. Without it, `thinking_tokens` is ignored. |
+| `thinking_tokens` | `1024` | The thinking budget: a private scratchpad before responding. |
 | `reasoning_effort` | `"high"` | Tells the model to favor depth over speed. Use `"low"`/`"medium"` for cheaper, faster runs. |
-| `temperature` | `None` | **Required.** Fable 5 does not support `temperature` — the model uses its own internal sampling. Always pass `None`. |
-| `top_p` | `None` | **Required.** Same as `temperature` — leave as `None`. |
-| `tools_list_dictionary` | `None` | **Required.** Tool / function calling is not supported on Fable 5. Always pass `None`. |
+
+`temperature`, `top_p`, and `tools_list_dictionary` are left at their `None` defaults: Fable 5 supports neither `temperature` nor tool calling.
 
 ## Extended Thinking & Reasoning Effort
 
-Fable 5 supports Anthropic's extended thinking. Swarms exposes this through two parameters:
+Fable 5 supports Anthropic's extended thinking. Swarms exposes this through three parameters:
 
 ```python
 agent = Agent(
     agent_name="Deep-Thinker",
     model_name="anthropic/claude-fable-5",
+    reasoning_enabled=True,
     thinking_tokens=4096,        # private thinking budget per response
     reasoning_effort="high",     # "low" | "medium" | "high"
     max_loops=1,
 )
 ```
 
+- **`reasoning_enabled`** — turns on the explicit thinking block. `thinking_tokens` (default `1024`) only takes effect when this is `True`.
 - **`thinking_tokens`** — the maximum number of tokens the model can spend on internal reasoning before producing its final answer. Larger budgets help on multi-step problems (proofs, code refactors, deep research) at the cost of latency and tokens.
-- **`reasoning_effort`** — a coarse dial. `"low"` is roughly chat-quality, `"medium"` is the default for analytical work, `"high"` is best for hard problems where you want the model to think before answering.
+- **`reasoning_effort`** — a coarse dial, forwarded on its own (LiteLLM maps it to a thinking budget). `"low"` is roughly chat-quality, `"medium"` suits analytical work, `"high"` is best for hard problems where you want the model to think before answering.
 
 <Note>
-When `thinking_tokens` is set, Swarms automatically filters the redundant `think` tool out of its planning tools list (the model is already reasoning). You don't need to configure anything to get this behavior.
+The autonomous loop's `think` tool is off by default (`think_tool=False`), so a model that already reasons natively doesn't spend an extra round-trip on it. Leave it off for Fable 5.
 </Note>
 
 ### Choosing budgets
 
 | Task class | `thinking_tokens` | `reasoning_effort` |
 |---|---|---|
-| Casual chat / short Q&A | not set | `"low"` or unset |
+| Casual chat / short Q&A | unset (`reasoning_enabled=False`) | `"low"` or unset |
 | Standard analytical work | `1024` | `"medium"` |
 | Long-form research, multi-file code review, hard math | `4096`–`16000` | `"high"` |
 | Multi-hour autonomous loops | `8192`+ | `"high"` |
@@ -182,6 +182,7 @@ def on_token(token: str) -> None:
 agent = Agent(
     agent_name="Callback-Fable-5",
     model_name="anthropic/claude-fable-5",
+    streaming_on=True,  # the callback only fires while streaming
     streaming_callback=on_token,
     max_loops=1,
 )
@@ -236,11 +237,9 @@ data_collector = Agent(
 analyst = Agent(
     agent_name="Fable-5-Analyst",
     model_name="anthropic/claude-fable-5",
+    reasoning_enabled=True,
     thinking_tokens=4096,
     reasoning_effort="high",
-    temperature=None,
-    top_p=None,
-    tools_list_dictionary=None,
     max_loops=1,
 )
 
@@ -281,6 +280,7 @@ agent = Agent(
     agent_name="Autonomous-Fable-5",
     model_name="anthropic/claude-fable-5",
     max_loops="auto",
+    reasoning_enabled=True,
     thinking_tokens=4096,
     reasoning_effort="high",
     persistent_memory=True,
@@ -301,7 +301,7 @@ Fable 5 is particularly well-suited to autonomous loops — the longer the task,
 Every Swarms multi-agent structure works with Fable 5 the same way it works with any other model — just set `model_name="anthropic/claude-fable-5"` on the agents.
 
 <Note>
-The examples below omit `temperature=None`, `top_p=None`, and `tools_list_dictionary=None` for readability, but every Fable 5 agent you create still needs them. If you want a tool-calling agent in the mix, give that role to a different model (e.g. `claude-sonnet-4-6`) and let Fable 5 do the reasoning.
+The examples below leave `temperature`, `top_p`, and `tools_list_dictionary` at their `None` defaults, which is what Fable 5 needs. If you want a tool-calling agent in the mix, give that role to a different model (e.g. `claude-sonnet-4-6`) and let Fable 5 do the reasoning.
 </Note>
 
 ### Sequential Workflow
@@ -313,6 +313,7 @@ researcher = Agent(
     agent_name="Researcher",
     model_name="anthropic/claude-fable-5",
     system_prompt="You research topics thoroughly with citations.",
+    reasoning_enabled=True,
     thinking_tokens=2048,
     max_loops=1,
 )
@@ -321,6 +322,7 @@ analyst = Agent(
     agent_name="Analyst",
     model_name="anthropic/claude-fable-5",
     system_prompt="You analyze research and identify key insights.",
+    reasoning_enabled=True,
     thinking_tokens=2048,
     max_loops=1,
 )
@@ -348,6 +350,7 @@ agents = [
         agent_name=f"Expert-{topic}",
         model_name="anthropic/claude-fable-5",
         system_prompt=f"You are an expert on {topic}.",
+        reasoning_enabled=True,
         thinking_tokens=1024,
         max_loops=1,
     )
@@ -357,8 +360,8 @@ agents = [
 workflow = ConcurrentWorkflow(agents=agents)
 results = workflow.run("How will export controls reshape the global AI chip market?")
 
-for name, response in results.items():
-    print(f"\n=== {name} ===\n{response}")
+for entry in results:
+    print(f"\n=== {entry['role']} ===\n{entry['content']}")
 ```
 
 ### Mixture of Agents
@@ -390,6 +393,7 @@ aggregator = Agent(
     agent_name="Fable-5-Aggregator",
     model_name="anthropic/claude-fable-5",
     system_prompt="Synthesize the worker responses into one coherent answer.",
+    reasoning_enabled=True,
     thinking_tokens=4096,
     reasoning_effort="high",
     max_loops=1,
@@ -415,6 +419,7 @@ director = Agent(
     agent_name="Fable-5-Director",
     model_name="anthropic/claude-fable-5",
     system_prompt="You break complex tasks into subtasks and delegate them.",
+    reasoning_enabled=True,
     thinking_tokens=4096,
     reasoning_effort="high",
     max_loops=1,
@@ -451,11 +456,10 @@ from swarms import Agent
 agent = Agent(
     agent_name="Mythos-5-Agent",
     model_name="anthropic/claude-mythos-5",
+    reasoning_enabled=True,
     thinking_tokens=4096,
     reasoning_effort="high",
-    temperature=None,
-    top_p=None,
-    tools_list_dictionary=None,    # tools are not supported on Mythos 5 either
+    # tools are not supported on Mythos 5 either; leave tools unset
     max_loops=1,
 )
 
@@ -473,11 +477,9 @@ agent = Agent(
     agent_name="Production-Fable-5",
     model_name="anthropic/claude-fable-5",
     max_loops=1,
+    reasoning_enabled=True,
     thinking_tokens=2048,
     reasoning_effort="medium",
-    temperature=None,              # required — Fable 5 does not support temperature
-    top_p=None,                    # required — leave as None
-    tools_list_dictionary=None,    # required — tools are not supported on Fable 5
     persistent_memory=True,        # survive process restarts
     context_compression=True,      # auto-summarize at 90% of context
     context_length=200_000,

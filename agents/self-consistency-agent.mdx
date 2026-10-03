@@ -20,20 +20,21 @@ Based on the research paper: [Self-Consistency Improves Chain of Thought Reasoni
 | `model_name` | `str` | `"gpt-5.4"` | The underlying language model to use |
 | `num_samples` | `int` | `5` | Number of independent responses to generate |
 | `max_loops` | `int` | `1` | Maximum number of reasoning loops per sample |
-| `majority_voting_prompt` | `Optional[str]` | `majority_voting_prompt` | Custom prompt for majority voting aggregation |
+| `majority_voting_prompt` | `Optional[str]` | `majority_voting_prompt` | Stored on the instance. `run()` does not pass it to the aggregator, which always uses the module's default majority voting prompt |
 | `eval` | `bool` | `False` | Enable evaluation mode for answer validation |
 | `output_type` | `OutputType` | `"dict"` | Format of the output |
 | `random_models_on` | `bool` | `False` | Enable random model selection for diversity |
+| `**kwargs` | | | Extra `Agent` arguments applied to every sample's reasoning agent |
 
 ### Methods
 
 | Method | Description | Returns |
 |--------|-------------|---------|
-| `run(task, img?, answer?)` | Generates multiple responses and aggregates them | `Union[str, Dict[str, Any]]` |
-| `check_responses_for_answer(responses, answer)` | Checks if an answer appears in any response | `bool` |
-| `batched_run(tasks)` | Run the agent on multiple tasks in batch | `List[Union[str, Dict[str, Any]]]` |
+| `run(task, img=None, answer=None, *args, **kwargs)` | Generates `num_samples` responses concurrently and aggregates them. Extra arguments are forwarded to each sample agent's `run()` | The conversation formatted by `output_type`, or `None` when evaluation mode rejects the samples |
+| `check_responses_for_answer(responses, answer)` | Checks if `answer` appears as a substring of any response | `bool` |
+| `batched_run(tasks, *args, **kwargs)` | Calls `run` on each task in order | `list` of `run` results |
 
-`aggregation_agent(responses, prompt?, model_name?)` is a module-level helper function (not a method on `SelfConsistencyAgent`) used internally to synthesize the final answer via majority voting. Import it separately as `from swarms.agents.consistency_agent import aggregation_agent` if you need it directly.
+`aggregation_agent(responses, prompt?, model_name?)` is a module-level helper function (not a method on `SelfConsistencyAgent`) used internally to synthesize the final answer via majority voting. Import it separately as `from swarms.agents.consistency_agent import aggregation_agent` if you need it directly. `run()` calls it with its defaults, so the aggregator always runs on `"gpt-5.4"`, whatever `model_name` you set.
 
 ## Examples
 
@@ -66,7 +67,7 @@ agent = SelfConsistencyAgent(
     eval=True
 )
 
-result = agent.run("What is 2 + 2?", answer="4", eval=True)
+result = agent.run("What is 2 + 2?", answer="4")
 if result is not None:
     print("Validation passed:", result)
 else:
@@ -97,7 +98,8 @@ from swarms import SelfConsistencyAgent
 agent = SelfConsistencyAgent(
     name="Batch-Processing-Agent",
     model_name="claude-sonnet-4-6",
-    num_samples=3
+    num_samples=3,
+    output_type="final",
 )
 
 tasks = [
@@ -118,19 +120,25 @@ for i, result in enumerate(results):
 3. **Aggregates Results**: Uses majority voting or consensus building
 4. **Produces Reliable Output**: Delivers a final answer reflecting the most reliable consensus
 
-The agent uses `ThreadPoolExecutor` to generate multiple responses concurrently, improving performance while maintaining independence between reasoning paths.
+The agent uses `ThreadPoolExecutor` to generate the responses concurrently. Each sample gets its own freshly built reasoning `Agent`, so no sample sees another sample's answer and the draws stay independent. Responses are collected in the order they finish.
+
+When `eval=True` and you pass `answer`, `run()` checks whether `answer` appears in any response. If none contains it, `run()` returns `None` and skips aggregation. Without `answer`, the check is skipped.
+
+`run()` records the task, the list of responses, and the aggregated answer (as `"Majority Voting Agent"`) in `agent.conversation`. That conversation is not cleared between calls, so a second `run()` or `batched_run()` returns the earlier tasks' messages too. Create a new `SelfConsistencyAgent`, or read only the last message, when you need one task's result on its own.
 
 ## Output Formats
 
-- `"dict"`: Dictionary format with conversation history
-- `"str"`: Simple string output
-- `"list"`: List format
-- `"json"`: JSON formatted output
+`output_type` takes any value listed in [output types](/agents/structured-outputs#output-types). Common choices:
+
+- `"dict"`: The conversation as a list of message dicts
+- `"final"`: Only the aggregated answer, as a string
+- `"str"`: The conversation as a string
+- `"json"`: The conversation as a JSON string
 
 ## Best Practices
 
 1. **Sample Size**: Use 3-7 samples for most tasks; increase for critical decisions
 2. **Model Selection**: Choose models with strong reasoning capabilities
 3. **Evaluation Mode**: Enable for tasks with known correct answers
-4. **Custom Prompts**: Tailor majority voting prompts for specific domains
-5. **Batch Processing**: Use `batched_run` for multiple related tasks
+4. **Final Answer Only**: Set `output_type="final"` to get just the aggregated answer
+5. **Batch Processing**: Use `batched_run` for multiple related tasks, and remember that results accumulate in one conversation

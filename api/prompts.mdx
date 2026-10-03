@@ -1,18 +1,21 @@
 ---
 title: Prompts
 description: Complete reference for the Swarms prompts module including the Prompt class and pre-built prompt templates
+icon: "message"
 ---
 
 ## Overview
 
 The `swarms.prompts` module provides tools for creating, managing, and versioning prompts with comprehensive history tracking, autosaving capabilities, and integration with agent systems.
 
+`swarms.prompts` exports 12 names: the `Prompt` class, eight prompt strings (`AUTO_AGENT_BUILDER_SYSTEM_PROMPT`, `CODE_INTERPRETER`, `DOCUMENTATION_WRITER_SOP`, `FINANCE_AGENT_PROMPT`, `GROWTH_AGENT_PROMPT`, `LEGAL_AGENT_PROMPT`, `OPERATIONS_AGENT_PROMPT`, `PRODUCT_AGENT_PROMPT`), and three autonomous-prompt functions. All of them are re-exported from the top-level `swarms` package. The prompts that framework structures use internally live in their own modules; see [Prompts used by framework structures](#prompts-used-by-framework-structures).
+
 ## Prompt Class
 
-A powerful class for managing prompts with version control, edit history, and autosaving features.
+A Pydantic model for managing prompts with version control, edit history, and autosaving features.
 
 ```python
-from swarms.prompts import Prompt
+from swarms import Prompt
 
 prompt = Prompt(
     name="analysis_prompt",
@@ -26,8 +29,12 @@ prompt = Prompt(
 ### Constructor
 
 <ParamField path="id" type="str" default="uuid.uuid4().hex">
-  Unique identifier for the prompt
+  Identifier for the prompt, also used in the autosave file name
 </ParamField>
+
+<Warning>
+The default `id` is generated once, when the module is imported, so every `Prompt` created without an explicit `id` shares the same value. With `autosave=True` those prompts overwrite each other's file. Pass your own `id` (for example `uuid.uuid4().hex`) for each prompt you autosave.
+</Warning>
 
 <ParamField path="name" type="str" default="prompt">
   Name of your prompt
@@ -38,7 +45,7 @@ prompt = Prompt(
 </ParamField>
 
 <ParamField path="content" type="str" required>
-  The main content of the prompt (minimum 1 character)
+  The main content of the prompt. Leading and trailing whitespace is stripped, and at least 1 character must remain
 </ParamField>
 
 <ParamField path="created_at" type="str" default="current_time">
@@ -58,7 +65,7 @@ prompt = Prompt(
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="False">
-  Enable automatic saving of the prompt
+  Save the prompt to disk on creation and after every edit or rollback
 </ParamField>
 
 <ParamField path="autosave_folder" type="str" default="prompts">
@@ -66,15 +73,15 @@ prompt = Prompt(
 </ParamField>
 
 <ParamField path="auto_generate_prompt" type="bool" default="False">
-  Enable auto-generation of prompts
+  Stored on the model but not used by any `Prompt` method
 </ParamField>
 
-<ParamField path="parent_folder" type="str" default="workspace_dir">
-  Parent folder for the autosave folder
+<ParamField path="parent_folder" type="str" default="WORKSPACE_DIR">
+  Defaults to the workspace directory. Stored only; autosave always writes under `WORKSPACE_DIR`
 </ParamField>
 
 <ParamField path="llm" type="Any" default="None">
-  Optional LLM instance for prompt generation
+  Stored on the model but not used by any `Prompt` method
 </ParamField>
 
 ### Methods
@@ -91,14 +98,14 @@ prompt.edit_prompt("Updated prompt content here")
   The updated content of the prompt
 </ParamField>
 
+It appends the new content to `edit_history`, increments `edit_count`, and updates `last_modified_at`.
+
 **Raises:**
 - `ValueError`: If the new content is identical to the current content
 
-**Thread-safe**: This method is safe for concurrent access.
-
 #### rollback
 
-Roll back the prompt to a previous version.
+Roll back the prompt to a previous version. The content becomes `edit_history[version]` and `edit_count` is set to `version`. `edit_history` is not trimmed, so you can roll forward again.
 
 ```python
 # Rollback to the first version
@@ -140,21 +147,39 @@ print(json_data)
 
 #### add_tools
 
-Add tool schemas to the prompt content.
-
-```python
-from swarms.tools import BaseTool
-
-def my_tool(x: int) -> int:
-    """Double the input."""
-    return x * 2
-
-prompt.add_tools([my_tool])
-```
+Intended to append the OpenAI schemas of a list of functions to the prompt content.
 
 <ParamField path="tools" type="List[Callable]" required>
   List of callable functions to add as tools
 </ParamField>
+
+<Warning>
+`add_tools()` currently raises `TypeError`, because it concatenates the schema dict to the content string. It appends two newlines to `content` before it fails. Until it is fixed, build the schema yourself and pass it to `edit_prompt()`:
+
+```python
+import json
+
+from swarms import BaseTool
+
+def double(x: int) -> int:
+    """Double the input.
+
+    Args:
+        x: The number to double.
+
+    Returns:
+        Twice the input.
+    """
+    return x * 2
+
+schema = BaseTool(tools=[double]).convert_tool_into_openai_schema()
+prompt.edit_prompt(prompt.get_prompt() + "\n\n" + json.dumps(schema, indent=2))
+```
+</Warning>
+
+#### save_to_storage and load_from_storage
+
+Placeholders for a storage backend. Both raise `NotImplementedError`; use `autosave` or `return_json()` to persist a prompt.
 
 ## Pre-built Prompt Templates
 
@@ -167,12 +192,12 @@ The module includes numerous pre-built prompt templates for common agent roles:
 Comprehensive prompt for financial analysis agents.
 
 ```python
-from swarms.prompts import FINANCE_AGENT_PROMPT
+from swarms import FINANCE_AGENT_PROMPT, Agent
 
 agent = Agent(
     agent_name="Financial-Analyst",
     system_prompt=FINANCE_AGENT_PROMPT,
-    # ... other config
+    model_name="gpt-5.4",
 )
 ```
 
@@ -183,12 +208,12 @@ agent = Agent(
 Prompt template for legal analysis and research agents.
 
 ```python
-from swarms.prompts import LEGAL_AGENT_PROMPT
+from swarms import LEGAL_AGENT_PROMPT, Agent
 
 agent = Agent(
     agent_name="Legal-Advisor",
     system_prompt=LEGAL_AGENT_PROMPT,
-    # ... other config
+    model_name="gpt-5.4",
 )
 ```
 
@@ -199,7 +224,7 @@ agent = Agent(
 Prompt for product management agents.
 
 ```python
-from swarms.prompts import PRODUCT_AGENT_PROMPT
+from swarms import PRODUCT_AGENT_PROMPT
 ```
 
 #### OPERATIONS_AGENT_PROMPT
@@ -207,7 +232,7 @@ from swarms.prompts import PRODUCT_AGENT_PROMPT
 Prompt for operations management agents.
 
 ```python
-from swarms.prompts import OPERATIONS_AGENT_PROMPT
+from swarms import OPERATIONS_AGENT_PROMPT
 ```
 
 #### GROWTH_AGENT_PROMPT
@@ -215,7 +240,7 @@ from swarms.prompts import OPERATIONS_AGENT_PROMPT
 Prompt for growth and marketing agents.
 
 ```python
-from swarms.prompts import GROWTH_AGENT_PROMPT
+from swarms import GROWTH_AGENT_PROMPT
 ```
 
 ### Development Prompts
@@ -225,12 +250,12 @@ from swarms.prompts import GROWTH_AGENT_PROMPT
 Prompt for code interpretation and execution agents.
 
 ```python
-from swarms.prompts import CODE_INTERPRETER
+from swarms import CODE_INTERPRETER, Agent
 
 agent = Agent(
     agent_name="Code-Interpreter",
     system_prompt=CODE_INTERPRETER,
-    # ... other config
+    model_name="gpt-5.4",
 )
 ```
 
@@ -239,35 +264,55 @@ agent = Agent(
 Standard operating procedure for documentation writing agents.
 
 ```python
-from swarms.prompts import DOCUMENTATION_WRITER_SOP
+from swarms import DOCUMENTATION_WRITER_SOP
+```
+
+#### AUTO_AGENT_BUILDER_SYSTEM_PROMPT
+
+System prompt for an architect agent that designs a small team of specialized agents for a task. It is the default system prompt of [AutoAgentBuilder](/api/auto-agent-builder).
+
+```python
+from swarms import AUTO_AGENT_BUILDER_SYSTEM_PROMPT
 ```
 
 ### Autonomous Agent Prompts
 
-#### AUTONOMOUS_AGENT_SYSTEM_PROMPT
+These build the system prompt an agent uses with `max_loops="auto"`. See [Autonomous mode](/agents/autonomous-mode).
 
-Base system prompt for autonomous agents.
+#### autonomous_agent_system_prompt
+
+Return the base autonomous agent system prompt. Its `Time:` line holds the date and time when you call it.
 
 ```python
-from swarms.prompts import AUTONOMOUS_AGENT_SYSTEM_PROMPT
+from swarms import autonomous_agent_system_prompt
+
+prompt = autonomous_agent_system_prompt()
 ```
+
+<Warning>
+The `AUTONOMOUS_AGENT_SYSTEM_PROMPT` constant has been removed. As a module-level string, it froze the time at import, so long-running processes told every agent the process start time. Call `autonomous_agent_system_prompt()` instead.
+</Warning>
 
 #### get_autonomous_agent_prompt
 
-Generate an autonomous agent prompt.
+Return the autonomous agent prompt, matched to whether the agent has the `think` tool.
 
 ```python
-from swarms.prompts import get_autonomous_agent_prompt
+from swarms import get_autonomous_agent_prompt
 
-prompt = get_autonomous_agent_prompt()
+prompt = get_autonomous_agent_prompt(include_think_tool=True)
 ```
+
+<ParamField path="include_think_tool" type="bool" default="False">
+  Whether the agent has the `think` tool. When `False`, a section is appended telling the model the tool is unavailable and to reason inline instead
+</ParamField>
 
 #### get_autonomous_agent_prompt_with_context
 
 Generate an autonomous agent prompt customized with agent identity and available tools.
 
 ```python
-from swarms.prompts import get_autonomous_agent_prompt_with_context
+from swarms import get_autonomous_agent_prompt_with_context
 
 prompt = get_autonomous_agent_prompt_with_context(
     agent_name="MarketAnalyst",
@@ -285,21 +330,66 @@ prompt = get_autonomous_agent_prompt_with_context(
 </ParamField>
 
 <ParamField path="available_tools" type="list" default="None">
-  List of tool names available to the agent
+  List of tool names available to the agent. The first 20 are listed, followed by a count of the rest
 </ParamField>
+
+The agent name replaces the opening "You are an elite autonomous agent" line, and the description and tools are appended as `## AGENT ROLE` and `## AVAILABLE TOOLS` sections. This function always keeps the `think` tool instructions.
+
+## Prompts used by framework structures
+
+Framework structures keep their prompts in dedicated modules under `swarms/prompts`. They are not exported from `swarms.prompts`, so import them from the module path. Read them to see what a structure tells its agents, or to build a variant.
+
+| Module | Names | Used by |
+|---|---|---|
+| `swarms.prompts.agent_system_prompts` | `AGENT_SYSTEM_PROMPT_3`, `build_agent_system_prompt()` | `Agent`, when you do not pass `system_prompt` |
+| `swarms.prompts.autonomous_agent_prompt` | `autonomous_agent_system_prompt()`, `get_autonomous_agent_prompt()`, `get_autonomous_agent_prompt_with_context()` | `Agent` with `max_loops="auto"` |
+| `swarms.prompts.groupchat_prompt` | `GROUPCHAT_DECIDE_PROMPT` | [GroupChat](/api/group-chat), to ask each agent whether to speak |
+| `swarms.prompts.llm_council_prompts` | `get_gpt_councilor_prompt()`, `get_gemini_councilor_prompt()`, `get_claude_councilor_prompt()`, `get_grok_councilor_prompt()`, `get_chairman_prompt()`, `get_evaluation_prompt(query, responses, evaluator_name)`, `get_synthesis_prompt(query, original_responses, evaluations, id_to_member)` | [LLMCouncil](/api/llm-council) |
+| `swarms.prompts.tree_of_thoughts_prompts` | `TREE_OF_THOUGHTS_SYSTEM_PROMPT` and the `TOT_*` templates | [Tree of Thoughts](/agents/tree-of-thoughts) |
+
+### Default agent system prompt
+
+`AGENT_SYSTEM_PROMPT_3` is the default agent persona without a timestamp. `build_agent_system_prompt()` returns the same text with a `Time:` line for the current date and time. `Agent` calls it in `__init__` when `system_prompt` is `None`, so each agent gets the time it was created, not the time the module was imported.
+
+```python
+from swarms.prompts.agent_system_prompts import build_agent_system_prompt
+
+prompt = build_agent_system_prompt()
+```
+
+### Groupchat decision prompt
+
+`GROUPCHAT_DECIDE_PROMPT` is formatted with `agent_name`, `other_agents`, `sender` and `message`. It asks the agent to assess the discussion, then call `respond` once with a calibrated score from 0.0 to 1.0 and its reply. It says what deserves a high, moderate or low score, gives a calibration scale, and says to answer 0.0 with an empty message when there is nothing distinct to add. It also tells the agent not to inflate the score to keep the conversation going.
+
+### LLM council prompts
+
+The four councilor personas, the chairman prompt, and the peer-evaluation and synthesis builders live in `swarms.prompts.llm_council_prompts`. `swarms.structs.llm_council` imports them back, so existing imports from the struct module keep working.
+
+```python
+from swarms.prompts.llm_council_prompts import get_evaluation_prompt
+
+prompt = get_evaluation_prompt(
+    query="Which database should we use?",
+    responses={"A": "Postgres, because...", "B": "SQLite, because..."},
+    evaluator_name="Claude-Councilor",
+)
+```
 
 ## Example: Complete Prompt Management
 
 ```python
-from swarms.prompts import Prompt
-from swarms.tools import BaseTool
+import json
 import os
+import uuid
 
-# Set workspace directory
+# Set before importing swarms, which resolves WORKSPACE_DIR on import
 os.environ["WORKSPACE_DIR"] = "./workspace"
+
+from swarms import BaseTool, Prompt
 
 # Create a prompt with autosave
 prompt = Prompt(
+    id=uuid.uuid4().hex,
     name="market_analysis",
     description="Financial market analysis prompt",
     content="""You are a financial analyst. Analyze the following:
@@ -327,12 +417,22 @@ Provide detailed analysis with supporting data.
 print(f"Edit count: {prompt.edit_count}")  # 1
 print(f"Total versions: {len(prompt.edit_history)}")  # 2
 
-# Add tools to the prompt
+# Append a tool schema to the prompt
 def calculate_sharpe_ratio(returns: float, risk_free_rate: float, std_dev: float) -> float:
-    """Calculate Sharpe ratio for investment analysis."""
+    """Calculate Sharpe ratio for investment analysis.
+
+    Args:
+        returns: Portfolio return.
+        risk_free_rate: Risk-free rate.
+        std_dev: Standard deviation of returns.
+
+    Returns:
+        The Sharpe ratio.
+    """
     return (returns - risk_free_rate) / std_dev
 
-prompt.add_tools([calculate_sharpe_ratio])
+schema = BaseTool(tools=[calculate_sharpe_ratio]).convert_tool_into_openai_schema()
+prompt.edit_prompt(prompt.get_prompt() + "\n\n" + json.dumps(schema, indent=2))
 
 # Rollback if needed
 prompt.rollback(version=0)  # Back to original version
@@ -354,36 +454,31 @@ print(json_export)
 4. **Add context**: Include detailed descriptions to document the prompt's purpose
 5. **Organize by folder**: Use the `autosave_folder` parameter to organize prompts by category
 6. **Regular rollbacks**: Test different prompt versions using rollback functionality
-7. **Tool integration**: Use `add_tools()` to seamlessly integrate function calling
+7. **Unique IDs**: Pass an explicit `id` to every prompt you autosave
 
-## Thread Safety
+## Thread safety
 
-The Prompt class implements thread-safe operations for:
-- Edit operations
-- Rollback operations
-- Autosaving
-
-This makes it safe to use in concurrent environments and multi-agent systems.
+`Prompt` does not lock. Edits, rollbacks and autosaves are plain attribute updates and file writes, so guard a `Prompt` shared across threads with your own `threading.Lock`.
 
 ## Autosave Behavior
 
 When autosave is enabled:
-1. Prompts are saved to `{WORKSPACE_DIR}/{autosave_folder}/prompt-id-{id}.json`
-2. Each edit automatically triggers a save
-3. Rollback operations also trigger saves
-4. The entire prompt state (including history) is preserved
+1. Prompts are saved to `{WORKSPACE_DIR}/{autosave_folder}/prompt-id-{id}.json`. When `WORKSPACE_DIR` is unset, importing `swarms` sets it to `./agent_workspace`
+2. Creating the prompt triggers a save
+3. Each edit automatically triggers a save
+4. Rollback operations also trigger saves
+5. The entire prompt state (including history) is preserved
 
 ## Integration with Agents
 
 ```python
-from swarms import Agent
-from swarms.prompts import Prompt, FINANCE_AGENT_PROMPT
+from swarms import FINANCE_AGENT_PROMPT, Agent, Prompt
 
 # Using pre-built prompts
 agent1 = Agent(
     agent_name="Financial-Analyst",
     system_prompt=FINANCE_AGENT_PROMPT,
-    model_name="gpt-4"
+    model_name="gpt-5.4"
 )
 
 # Using custom Prompt class
@@ -396,6 +491,6 @@ custom_prompt = Prompt(
 agent2 = Agent(
     agent_name="Quant-Analyst",
     system_prompt=custom_prompt.get_prompt(),
-    model_name="gpt-4"
+    model_name="gpt-5.4"
 )
 ```

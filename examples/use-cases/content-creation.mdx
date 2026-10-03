@@ -130,7 +130,7 @@ content_pipeline = SequentialWorkflow(
     description="End-to-end content creation from ideation to publication",
     agents=[ideation_agent, writer_agent, editor_agent, seo_optimizer, quality_reviewer],
     max_loops=1,
-    output_type="final",  # return the final draft as a string
+    output_type="final",  # return the last agent's answer as a string
 )
 
 # Execute content creation
@@ -299,7 +299,7 @@ content_pipeline = SequentialWorkflow(
 Create multiple pieces simultaneously:
 
 ```python
-from swarms import ConcurrentWorkflow
+import asyncio
 
 topics = [
     "AI Agents for Customer Service",
@@ -307,10 +307,12 @@ topics = [
     "AI Agents for Data Analysis",
 ]
 
-# Create multiple pipelines in parallel
-for topic in topics:
-    # Each runs in parallel
-    content = content_pipeline.run(f"Create blog post about: {topic}")
+# Each task runs on its own copy of the pipeline; results come back in completion order.
+contents = asyncio.run(
+    content_pipeline.run_concurrent(
+        [f"Create blog post about: {topic}" for topic in topics]
+    )
+)
 ```
 
 ### Template-Based Content

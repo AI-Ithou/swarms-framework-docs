@@ -8,9 +8,15 @@ icon: "layer-group"
 
 `SelfMoASeq` (Self-MoA-Seq: Sequential Self-Mixture of Agents) is an ensemble method that generates multiple candidate responses from a single high-performing model and synthesizes them sequentially using a sliding window approach. This keeps context within bounds while leveraging diversity across samples for a high-quality final output.
 
-- **Phase 1**: Generate `num_samples` responses using a proposer agent.
-- **Phase 2**: Aggregate responses in windows with an aggregator agent, biasing toward the current best.
+- **Phase 1**: Generate `num_samples` responses using a proposer agent. The proposer's conversation is reset before every sample, so each sample is an independent draw that never sees the earlier ones.
+- **Phase 2**: Aggregate responses in windows with an aggregator agent, biasing toward the current best. The aggregator's conversation is also reset before every window.
 - **Phase 3**: Iterate until all samples are processed or `max_loops` is reached.
+
+Both agents are built with `output_type="final"`, so each sample and each aggregation is the agent's final answer rather than its full transcript.
+
+<Note>
+`SelfMoASeq` emits OpenTelemetry spans when it is constructed and on each `run()` call. See [Telemetry](/deployment/telemetry) to turn tracing off.
+</Note>
 
 ## Installation
 
@@ -21,11 +27,11 @@ pip install -U swarms
 ## Attributes
 
 <ParamField path="name" type="str" default="SelfMoASeq">
-  Human-readable name for this orchestrator
+  Human-readable name for this orchestrator. Accepted but not currently stored on the instance
 </ParamField>
 
 <ParamField path="description" type="str" default="Self-MoA-Seq: Sequential Self-Mixture of Agents">
-  Short description of the orchestrator
+  Short description of the orchestrator. Accepted but not currently stored on the instance
 </ParamField>
 
 <ParamField path="model_name" type="str" default="gpt-5.4">
@@ -33,7 +39,7 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="temperature" type="float" default="0.7">
-  Sampling temperature for the proposer; must be in [0, 2]
+  Sampling temperature for the proposer; must be in [0, 2]. The aggregator always runs at temperature `0.0`
 </ParamField>
 
 <ParamField path="window_size" type="int" default="6">
@@ -41,11 +47,11 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="reserved_slots" type="int" default="3">
-  Number of slots reserved for the current best (and possibly other fixed items) in the window. Must be less than `window_size`.
+  Slots held back from each window. Each aggregation step takes `window_size - reserved_slots` new samples and prepends the current best output. Must be less than `window_size`.
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="10">
-  Maximum aggregation loops. Must be at least 1.
+  Maximum aggregation loops. Must be at least 1. When the limit is hit, any samples not yet aggregated are left out of `final_output`.
 </ParamField>
 
 <ParamField path="max_tokens" type="int" default="2000">
@@ -57,15 +63,15 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="enable_logging" type="bool" default="True">
-  Enable internal logging via `loguru`
+  Stored on the instance but not read. Logging is controlled by `verbose`
 </ParamField>
 
 <ParamField path="log_level" type="str" default="INFO">
-  Log level string
+  Stored on the instance but not read
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="True">
-  If True, prints a run summary after completion
+  When True, logs progress and the final result through `loguru`, and turns on verbose output for the proposer and aggregator agents. When False, nothing is logged
 </ParamField>
 
 <ParamField path="proposer_model_name" type="Optional[str]" default="None">
@@ -97,7 +103,7 @@ pip install -U swarms
 </ParamField>
 
 <ParamField path="top_p" type="Optional[float]" default="None">
-  Top-p (nucleus) sampling parameter passed to the model. Left unset when `None`.
+  Top-p (nucleus) sampling parameter passed to both the proposer and the aggregator. Left unset when `None`.
 </ParamField>
 
 **Raises:**
@@ -123,7 +129,7 @@ def run(self, task: str) -> Dict[str, Any]
 | `final_output` | `str` | The final synthesized best response |
 | `all_samples` | `List[str]` | All generated candidate responses |
 | `aggregation_steps` | `int` | Number of aggregation iterations executed |
-| `metrics` | `Dict[str, Any]` | Snapshot of performance metrics for this run |
+| `metrics` | `Dict[str, Any]` | Copy of the metrics counters: `total_samples_generated`, `total_aggregations`, `total_tokens_used` and `execution_time_seconds` |
 | `task` | `str` | Echoes the original task |
 | `timestamp` | `str` | ISO 8601 timestamp of completion |
 
@@ -140,6 +146,10 @@ def get_metrics(self) -> Dict[str, Any]
 ```
 
 **Returns:** A copy of the current metrics dictionary
+
+<Note>
+`total_samples_generated` and `total_aggregations` accumulate across every `run()` on the same instance. `execution_time_seconds` holds the duration of the latest run. `total_tokens_used` is not updated and stays `0`.
+</Note>
 
 ### to_dict()
 
@@ -159,7 +169,7 @@ Methods prefixed with `_` are internal but documented here for completeness.
 
 ### _generate_samples()
 
-Generate `num_samples` candidate responses using the proposer agent.
+Generate `num_samples` candidate responses using the proposer agent. The proposer's conversation is reset before each sample.
 
 ```python
 def _generate_samples(self, task: str, num_samples: int) -> List[str]
@@ -188,7 +198,7 @@ def _format_aggregation_prompt(self, task: str, samples: List[str], best_so_far:
 
 ### _aggregate_window()
 
-Aggregate a window of samples using the aggregator agent, biased by `best_so_far`.
+Aggregate a window of samples using the aggregator agent, biased by `best_so_far`. The aggregator's conversation is reset before each call.
 
 ```python
 def _aggregate_window(self, task: str, window_samples: List[str], best_so_far: Optional[str] = None) -> str

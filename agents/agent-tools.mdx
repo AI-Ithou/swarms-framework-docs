@@ -7,6 +7,8 @@ icon: 'wrench'
 
 Tools extend agent capabilities by allowing them to call external functions, APIs, and services. Swarms supports OpenAI-style function calling with automatic schema generation.
 
+Each agent runs its tools through a [`ToolManager`](/api/tool-manager), available as `agent.tool_manager`. It builds the schemas, executes each call, retries failures, and prints tool activity.
+
 ## Basic Tool Usage
 
 ### Define a Simple Tool
@@ -49,9 +51,9 @@ print(response)
 
 For reliable tool execution, functions must have:
 
-1. **Type hints** for all parameters and return value
-2. **Docstring** describing the function's purpose
-3. **Parameter descriptions** in the docstring
+1. **Type hints** for every parameter without a default. A missing one raises `TypeError` when the agent is built. A missing return annotation only logs a warning.
+2. **A docstring** describing the function's purpose. A missing one raises `ValueError` when the agent is built.
+3. **Parameter descriptions** the model can read. The whole docstring, `Args:` section included, becomes the tool description.
 
 ```python
 # Good - Complete type hints and docstring
@@ -76,6 +78,31 @@ def search_web(query, max_results=10):  # ❌ No type hints
 # Bad - Missing docstring  
 def search_web(query: str) -> str:  # ❌ No docstring
     return f"Results for: {query}"
+```
+
+### How the schema is built
+
+The agent converts each callable to an OpenAI function schema when it is constructed:
+
+| Schema field | Comes from |
+| --- | --- |
+| `name` | The function's `__name__` |
+| `description` | The full docstring, verbatim |
+| Parameter types | The type annotations |
+| Parameter descriptions | `Annotated[type, "description"]` metadata, or else the parameter name |
+| `required` | Every parameter without a default |
+
+To give a single parameter its own description in the schema, use `Annotated`:
+
+```python
+from typing import Annotated
+
+def get_weather(
+    location: Annotated[str, "City and country, e.g. 'Paris, France'"],
+    units: Annotated[str, "'celsius' or 'fahrenheit'"] = "celsius",
+) -> str:
+    """Get the current weather for a location."""
+    return f"Weather in {location}: 22 {units}"
 ```
 
 ## Multiple Tools
@@ -305,13 +332,13 @@ agent = Agent(
   `tool_choice` is **not** an `Agent` constructor parameter. Whenever `tools` (or MCP tools) are configured, the agent always sends `tool_choice="auto"` to the underlying LLM call — passing `tool_choice=...` to `Agent(...)` is silently absorbed into `**kwargs` and has no effect.
 </Note>
 
-<ParamField path="dynamic_tools" type="bool" default="True">
-  Defer tool schemas behind a searchable `tool_search` tool instead of sending every schema on every request. On by default whenever the agent has `tools`, an MCP connection, or `max_loops="auto"`.
+<ParamField path="dynamic_tools" type="bool" default="False">
+  Defer tool schemas behind a searchable `tool_search` tool instead of sending every schema on every request. Off by default. When on, deferral activates if the agent has `tools`, an MCP connection, or `max_loops="auto"`.
 
   ```python
   agent = Agent(
       tools=[tool1, tool2, tool3],
-      dynamic_tools=False,  # send every schema on every request
+      dynamic_tools=True,  # send only tool_search up front
   )
   ```
 
@@ -319,30 +346,40 @@ agent = Agent(
 </ParamField>
 
 <Warning>
-  With deferral active, a tool costs one extra round trip: the model must call `tool_search` before it can call the tool. With `max_loops=1` it can search but never call what it found — raise `max_loops` or set `dynamic_tools=False`.
+  With deferral active, a tool costs one extra round trip: the model must call `tool_search` before it can call the tool. With `max_loops=1` it can search but never call what it found. Raise `max_loops` or leave `dynamic_tools` off.
 </Warning>
 
 <ParamField path="show_tool_execution_output" type="bool" default="True">
-  Display tool execution results.
+  When `True`, print a `Tool Execution Results` panel with the time, each tool's name and call id, and the full output. When `False`, print a short panel with just the tool names and the time. Nothing is printed when `print_on=False`.
   
   ```python
   agent = Agent(
       tools=[my_tool],
-      show_tool_execution_output=True
+      show_tool_execution_output=False,
   )
   ```
 </ParamField>
 
 <ParamField path="tool_retry_attempts" type="int" default="3">
-  Number of retry attempts for failed tool executions.
+  How many times the batch of tool calls from one reply runs before the agent gives up. Each attempt runs the whole batch once, so calls that succeeded run again with it.
   
   ```python
   agent = Agent(
       tools=[my_tool],
-      tool_retry_attempts=5
+      tool_retry_attempts=5,
   )
   ```
 </ParamField>
+
+<ParamField path="tool_call_summary" type="bool" default="True">
+  After each tool batch, make one extra model call to summarize the output and add the summary to the conversation. Set to `False` to skip the extra call. A plain-text reply that calls no tool is never summarized.
+</ParamField>
+
+When every attempt fails, the agent does not retry the model call. It records `Tool execution failed after N attempts: ...` in the conversation and moves to the next loop, so the model can read the error and try something else. Provider retries (`retry_attempts`) are not used up by a broken tool. See [ToolManager](/api/tool-manager#retries-and-failures) for the details.
+
+### Adding tools after construction
+
+`add_tool`, `add_tools`, `remove_tool`, and `remove_tools` change only `agent.tools`. The schemas, the executor, and the LLM are built once, at construction, so pass every tool to the constructor when you can. To rebuild after a change, see [ToolManager](/api/tool-manager#agent-level-api).
 
 ## Advanced Tool Patterns
 
@@ -434,23 +471,23 @@ agent = Agent(
 
 ## BaseTool API
 
-Swarms uses the `BaseTool` class internally to manage tools:
+Swarms uses the `BaseTool` class internally to convert and run tools. Every agent keeps one as `agent.tool_struct`, and its [`ToolManager`](/api/tool-manager) calls it for each batch of local tool calls. You can also use it on its own:
 
 ```python
 from swarms.tools.base_tool import BaseTool
 
 # Tools are automatically converted to OpenAI function schemas
-tool_manager = BaseTool(
+base_tool = BaseTool(
     tools=[my_function],
     verbose=True,
 )
 
 # Get function schema
-schema = tool_manager.convert_tool_into_openai_schema()
+schema = base_tool.convert_tool_into_openai_schema()
 print(schema)
 
 # Execute a tool
-result = tool_manager.execute_tool(
+result = base_tool.execute_tool(
     response='{"name": "my_function", "parameters": {...}}'
 )
 ```
@@ -463,8 +500,7 @@ Model Context Protocol (MCP) enables connecting to external tool servers:
 from swarms.schemas.mcp_schemas import MCPConnection
 from swarms import Agent
 
-# Connect to MCP server over HTTP (MCPConnection is URL/transport based,
-# not a local command+args launcher)
+# streamable_http is the default transport; stdio servers take command and args instead
 mcp_config = MCPConnection(
     url="http://localhost:8000/mcp",
     transport="streamable_http",
@@ -489,6 +525,14 @@ agent = Agent(
     mcp_url="http://localhost:8000/mcp",
 )
 ```
+
+<Warning>
+In an agent with an integer `max_loops`, keep MCP servers and local `tools` on separate agents. When `tools` is set, every tool call in a reply goes to the local executor first, and an MCP tool name makes that batch fail. With `max_loops="auto"`, MCP calls are routed to the MCP manager separately. See [ToolManager](/api/tool-manager#how-a-tool-call-runs).
+</Warning>
+
+## Sub-agents in autonomous mode
+
+With `max_loops="auto"`, an agent can create sub-agents with the `create_sub_agent` tool. Each sub-agent gets the parent's `model_name`, its `tools` list, and its `print_on` and `verbose` settings. A sub-agent with tools runs up to 5 loops, so it can call a tool and read the result. A sub-agent without tools runs 1 loop. MCP servers and handoffs are not passed down. See [Autonomous mode](/agents/autonomous-mode).
 
 ## Best Practices
 
@@ -589,6 +633,9 @@ def get_user_info(user_id: str) -> str:
 ## Next Steps
 
 <CardGroup cols={2}>
+  <Card title="ToolManager" icon="screwdriver-wrench" href="/api/tool-manager">
+    How the agent sets up, runs, and retries its tools
+  </Card>
   <Card title="Dynamic Tool Loading" icon="magnifying-glass-arrow-right" href="/agents/dynamic-tools">
     Defer tool schemas behind a searchable catalog
   </Card>
@@ -602,6 +649,6 @@ def get_user_info(user_id: str) -> str:
 
 ## Reference
 
-- Tool handling: `swarms/structs/agent.py:887-974` (`tool_handling`)
-- BaseTool class: `swarms/tools/base_tool.py:69`
+- Tool setup, execution, and retries: `swarms/agents/tool_manager.py` (`ToolManager`)
+- BaseTool class: `swarms/tools/base_tool.py`
 - Function schema generation: `swarms/tools/py_func_to_openai_func_str.py`

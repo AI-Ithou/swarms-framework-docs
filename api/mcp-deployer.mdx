@@ -56,12 +56,100 @@ from swarms import MCPDeployer, deploy_as_mcp
 | | |
 |---|---|
 | **Tool name** | The dict key if you passed a dict, otherwise a snake_case form of the target's `agent_name`, `name`, or `__name__`. `Market-Analyst` becomes `market_analyst`. |
-| **Tool description** | The target's `agent_description`, then `description`, then the first line of its docstring. |
+| **Tool description** | The target's `agent_description`, then `description`, then the first line of its docstring, then `Run <tool name> on a task.` An `Agent` always has an `agent_description`, and the default one is generic, so set it to something the calling model can choose by. |
 | **Input schema** | Always `task: str` (required) and `img: str \| None` (optional). |
-| **How it is called** | `target.run(task, img=img)` when `img` is sent and `run` accepts it, otherwise `target.run(task)`. A plain callable is called as `target(task)`. |
-| **Result** | A string is returned as is. `None` becomes `""`. Anything else is serialized with `json.dumps(..., indent=2)`, falling back to `str()`. |
+| **How it is called** | `target.run(task, img=img)` when `img` is sent and `run` accepts it, otherwise `target.run(task)`. A plain callable is called as `target(task)`, and `img` is ignored. |
+| **Result** | A string is returned as is. `None` becomes `""`. Anything else is serialized with `json.dumps(..., indent=2)`, falling back to `str()`. The client always receives one text block. |
 
-The call runs on a worker thread, so a blocking agent does not stall the server. Set `timeout` to cap how long one call may take.
+The call runs on a worker thread, so a blocking agent does not stall the server. Set `timeout` to cap how long one call may take; see [Timeouts](#timeouts).
+
+### What a client sees
+
+A client that lists the tools of a server serving `word_count` gets this schema, shown here as `MCPManager.get_tools()` returns it:
+
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "word_count",
+    "description": "Count the words in the text.",
+    "parameters": {
+      "type": "object",
+      "title": "word_countArguments",
+      "properties": {
+        "task": {"title": "Task", "type": "string"},
+        "img": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Img"}
+      },
+      "required": ["task"]
+    },
+    "strict": false
+  }
+}
+```
+
+The server also sends MCP `instructions` on connect: one `name: description` line per target. Functions passed in `extra_tools` keep their own signatures as their schemas and are listed before the targets. `tool_names`, `tools`, and `/health` cover the targets only.
+
+### Serving several targets
+
+Pass a list to name each tool after its target, or a dict to choose the names yourself. Each entry becomes its own tool on the same server, behind the same auth.
+
+```python
+from swarms import Agent, MCPDeployer
+
+researcher = Agent(agent_name="Researcher", model_name="gpt-5.4", max_loops=1, print_on=False)
+critic = Agent(agent_name="Critic", model_name="gpt-5.4", max_loops=1, print_on=False)
+
+# Tools: researcher, critic
+by_target = MCPDeployer([researcher, critic], api_keys=["sk-local-dev"])
+
+# Tools: research, critique
+by_key = MCPDeployer({"research": researcher, "critique": critic}, api_keys=["sk-local-dev"])
+
+by_key.run()
+```
+
+Two targets that resolve to the same name raise `ValueError`, so use a dict when names could collide. `add_tool()` registers more targets before the server starts.
+
+### Serving swarms
+
+Anything with a `run(task)` method is served the same way as an agent: `SequentialWorkflow`, `ConcurrentWorkflow`, `SwarmRouter`, `HierarchicalSwarm`, and the rest. The tool name comes from the swarm's `name`, and the description from its `description`.
+
+```python
+from swarms import Agent, MCPDeployer, SequentialWorkflow
+
+pipeline = SequentialWorkflow(
+    name="Briefing-Pipeline",
+    description="Researches a topic and writes a three-paragraph briefing.",
+    agents=[
+        Agent(agent_name="Researcher", model_name="gpt-5.4", max_loops=1, print_on=False),
+        Agent(agent_name="Writer", model_name="gpt-5.4", max_loops=1, print_on=False),
+    ],
+    max_loops=1,
+)
+
+MCPDeployer(pipeline, tool_name="write_briefing", api_keys=["sk-local-dev"], timeout=300).run()
+```
+
+A swarm that returns a dict or list reaches the client as indented JSON text.
+
+### State between calls
+
+<Warning>
+One target instance serves every call, from every client. An `Agent` keeps its conversation between `run()` calls, so each task lands in the same history, and calls that arrive together run on separate threads against the same object. When calls must not share context, serve a function that builds a fresh agent per call:
+
+```python
+from swarms import Agent, MCPDeployer
+
+
+def research(task: str) -> str:
+    """Answer a research question in one short paragraph."""
+    agent = Agent(agent_name="Researcher", model_name="gpt-5.4", max_loops=1, print_on=False)
+    return agent.run(task)
+
+
+MCPDeployer(research, api_keys=["sk-local-dev"]).run()
+```
+</Warning>
 
 ## Constructor
 
@@ -125,7 +213,7 @@ MCPDeployer(
 </ParamField>
 
 <ParamField path="transport" type="str" default="streamable-http">
-  `"streamable-http"`, `"sse"`, or `"stdio"`. Anything else raises `ValueError`. Auth applies to the two HTTP transports only.
+  `"streamable-http"`, `"sse"`, or `"stdio"`. Anything else raises `ValueError`. Auth applies to the two HTTP transports only. A swarms client reaching an SSE server must set `transport="sse"` on its `MCPConnection` (or `mcp_transport="sse"` on the agent), because clients default to streamable HTTP.
 </ParamField>
 
 <ParamField path="path" type="Optional[str]" default="None">
@@ -141,7 +229,7 @@ MCPDeployer(
 </ParamField>
 
 <ParamField path="timeout" type="Optional[float]" default="None">
-  Seconds one tool call may run before it fails. `None` means no limit.
+  Seconds one tool call may run before it fails. `None` or `0` means no limit. See [Timeouts](#timeouts).
 </ParamField>
 
 ### Auth
@@ -195,7 +283,7 @@ MCPDeployer(
 1. `allow_anonymous=True` admits everything.
 2. `auth` decides alone. The static keys and token verifier are not consulted.
 3. No credential in either header: refused.
-4. `token_verifier` verifies the token, its expiry, and `required_scopes`.
+4. `token_verifier` verifies the token, its expiry, and `required_scopes`. When a verifier is set, the static keys are not consulted.
 5. The credential is compared against the static keys.
 
 A refused request gets:
@@ -236,6 +324,71 @@ agent = Agent(agent_name="Support", model_name="claude-sonnet-5", max_loops=1)
 MCPDeployer(agent, auth=check).run()
 ```
 
+A swarms client sends the extra header through `MCPConnection(headers={"x-tenant": "acme"}, api_key="sk-acme")`.
+
+### Token verifier
+
+Any object with an async `verify_token(token)` method that returns an `mcp.server.auth.provider.AccessToken`, or `None`, works as a verifier.
+
+```python
+from mcp.server.auth.provider import AccessToken
+
+from swarms import Agent, MCPDeployer
+
+
+class StaticTokenVerifier:
+    async def verify_token(self, token: str):
+        if token == "tok-admin":
+            return AccessToken(token=token, client_id="ops-team", scopes=["agent:run"])
+        return None
+
+
+agent = Agent(agent_name="Summariser", model_name="gpt-5.4", max_loops=1, print_on=False)
+
+MCPDeployer(agent, token_verifier=StaticTokenVerifier(), required_scopes=["agent:run"]).run()
+```
+
+### Who made the request
+
+An admitted request carries an `AuthResult` in its ASGI scope, at `scope["state"]["mcp_auth"]`:
+
+| Field | Value |
+|---|---|
+| `method` | `"anonymous"`, `"custom"`, `"token"`, or `"api_key"` |
+| `subject` | `subject` or `sub` from a custom `auth` dict, or the token's subject or `client_id` |
+| `scopes` | `scopes` from a custom `auth` dict, or the token's scopes |
+| `claims` | The full dict a custom `auth` returned, or the token's claims |
+
+The module-level helper `credential_from_headers(headers, api_key_header="x-api-key")` in `swarms.structs.mcp_deployer` returns the credential exactly as the auth layer reads it, which is handy in tests.
+
+## Timeouts
+
+`timeout` bounds one tool call on the server. When it expires, the client gets a tool result with `is_error` set instead of an answer, even if the target is still blocked inside a model call.
+
+The worker thread running the target is abandoned, not killed: Python cannot stop a thread, so the agent finishes its run in the background and its result is discarded. Budget model spend with that in mind.
+
+The client has its own limit. A swarms client waits `tool_timeout` seconds for one tool call (default `120`, set on `MCPConnection`), so serving a slow swarm with `timeout=300` also needs a client that waits that long:
+
+```python
+from swarms.schemas.mcp_schemas import MCPConnection
+
+MCPConnection(url="http://127.0.0.1:8000/mcp", api_key="sk-local-dev", tool_timeout=320)
+```
+
+## stdio
+
+Desktop MCP hosts launch servers as subprocesses and talk over stdin and stdout. There are no headers, so the host is the security boundary. The constructor still requires an auth setting, so pass `allow_anonymous=True`.
+
+```python
+MCPDeployer(agent, transport="stdio", allow_anonymous=True, show_banner=False).run()
+```
+
+<Tip>
+On stdio, stdout carries the protocol. Set `show_banner=False`, since the banner is printed to stdout, and keep `print_on=False` on served agents so nothing else is written there.
+</Tip>
+
+`start()` and `build_app()` need an HTTP transport and raise `ValueError` on stdio.
+
 ## Methods
 
 ### run
@@ -244,7 +397,7 @@ MCPDeployer(agent, auth=check).run()
 deployer.run(log_level="info")
 ```
 
-Serve until interrupted. Blocks. For the HTTP transports this runs `uvicorn`; for `stdio` it hands stdin/stdout to the MCP server and logs a warning that auth settings are ignored, since stdio carries no headers.
+Serve until interrupted. Blocks. For the HTTP transports this runs `uvicorn`; for `stdio` it hands stdin/stdout to the MCP server and, unless `allow_anonymous=True`, logs a warning that auth settings are ignored, since stdio carries no headers.
 
 ### start
 
@@ -252,7 +405,7 @@ Serve until interrupted. Blocks. For the HTTP transports this runs `uvicorn`; fo
 deployer.start(wait=10.0)
 ```
 
-Serve on a background daemon thread and return once the socket is accepting connections. Returns the deployer. Raises `RuntimeError` if the server has not started within `wait` seconds, and `ValueError` for the `stdio` transport. Calling it again while running is a no-op.
+Serve on a background daemon thread and return once the socket is accepting connections. Returns the deployer. Raises `RuntimeError` if the server has not started within `wait` seconds (a port already in use ends up here), and `ValueError` for the `stdio` transport. Calling it again while running is a no-op. Uvicorn logs at `warning` level here, so per-request access lines are not printed; `run()` logs at `log_level`.
 
 ### stop
 
@@ -313,16 +466,20 @@ The check the auth layer runs on every request. Returns an `AuthResult` when the
 app = deployer.build_app()
 ```
 
-The ASGI app: the MCP transport wrapped in the auth layer. Mount it in your own ASGI server when `run()` and `start()` are not what you need. The `app` property builds it once and caches it. Raises `ValueError` for `stdio`.
+The ASGI app: the MCP transport wrapped in the auth layer. Serve it with your own ASGI server when `run()` and `start()` are not what you need, for example `uvicorn.run(deployer.app, host="0.0.0.0", port=8000)`. Only HTTP requests are checked; lifespan events pass straight through, so the MCP session manager starts normally. If you mount it inside another app, that app must run this app's lifespan. The `app` property builds it once and caches it. Raises `ValueError` for `stdio`.
 
 ### print_banner
 
-Print the startup banner. `run()` and `start()` call it unless `show_banner=False`.
+```python
+deployer.print_banner(console=None)
+```
+
+Print the startup banner: server name, tools, endpoint, transport, and auth mode. Pass a `rich.console.Console` to print somewhere other than stdout. `run()` and `start()` call it unless `show_banner=False`.
 
 ## Properties
 
 <ResponseField name="url" type="str">
-  `http://{host}:{port}{path}`, the address to give a client.
+  `http://{host}:{port}{path}`, the address to give a client. With `host="0.0.0.0"` this shows the bind address, so give remote clients the machine's own hostname instead.
 </ResponseField>
 
 <ResponseField name="tool_names" type="List[str]">
@@ -349,6 +506,14 @@ Print the startup banner. `run()` and `start()` call it unless `show_banner=Fals
   The resolved static keys, from `api_keys` and `api_key_env` together.
 </ResponseField>
 
+<ResponseField name="server" type="mcp.server.mcpserver.MCPServer">
+  The underlying `mcp` server, with every tool already registered.
+</ResponseField>
+
+<ResponseField name="app" type="ASGI app">
+  The cached result of `build_app()`.
+</ResponseField>
+
 ## Health check
 
 `GET /health` is always public and returns:
@@ -371,19 +536,24 @@ from swarms import deploy_as_mcp
 deploy_as_mcp(analyst, api_keys=["sk-local-dev"], port=8000)
 ```
 
-Builds an `MCPDeployer` with the same keyword arguments and calls `run()`. Blocks.
+Builds an `MCPDeployer` from `target` and the same keyword arguments, then calls `run()`. Blocks until the server stops, then returns the deployer. `target` takes the same forms as `targets`: one target, a list, or a dict.
 
 ## Errors
 
 | Raised | When |
 |---|---|
 | `ValueError("MCPDeployer needs a target to serve.")` | `targets` is `None` |
+| `StopIteration` | `targets` is an empty list or dict |
 | `ValueError` | `transport` is not `streamable-http`, `sse`, or `stdio` |
-| `ValueError("No auth configured. ...")` | No keys, `auth`, or `token_verifier`, and `allow_anonymous` is `False` |
+| `ValueError("No auth configured. ...")` | No keys, `auth`, or `token_verifier`, and `allow_anonymous` is `False`. This applies to `stdio` too |
 | `ValueError` | A target is neither callable nor has a `run()` method |
 | `ValueError` | Two targets resolve to the same tool name. Pass a dict to name them |
 | `ValueError` | `tool_name` or `description` passed with a list or dict |
+| `ValueError` | `start()` or `build_app()` on the `stdio` transport |
 | `RuntimeError` | `add_tool()` after `start()`, or the server did not start within `wait` |
+| `ModuleNotFoundError` (`mcp.server.mcpserver`) | Construction with `mcp` 1.x installed. Upgrade to `mcp>=2.0.0` |
+
+Errors inside a tool call never reach the client as exceptions. A target that raises, or a call that passes `timeout`, comes back as a tool result with `is_error` set and the error text as its content.
 
 ## Examples
 
@@ -393,6 +563,9 @@ Builds an `MCPDeployer` with the same keyword arguments and calls `run()`. Block
   </Card>
   <Card title="Serve a team from one server" icon="users" href="/examples/mcp/mcp-deployer-serve-team">
     Several agents, a workflow, and a function as separate tools.
+  </Card>
+  <Card title="MCPManager" icon="plug" href="/api/mcp-manager">
+    The client side: how agents connect to servers like this one.
   </Card>
 </CardGroup>
 

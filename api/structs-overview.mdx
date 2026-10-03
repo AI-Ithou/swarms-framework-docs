@@ -18,23 +18,27 @@ pip install -U swarms
 
 | Architecture | Use Case | Key Functionality |
 |-------------|----------|-------------------|
-| [MajorityVoting](/api/majority-voting) | Decision making through consensus | Combines multiple agent opinions and selects the most common answer |
-| [AgentRearrange](/api/agent-rearrange) | Optimizing agent order | Dynamically reorders agents based on task requirements |
-| [RoundRobin](/api/round-robin-swarm) | Equal task distribution | Cycles through agents in a fixed order |
+| [MajorityVoting](/api/majority-voting) | Decision making through consensus | Agents answer independently; a consensus agent synthesizes the majority view, optionally over several loops |
+| [AgentRearrange](/api/agent-rearrange) | Custom execution order | Runs agents along a flow string such as `"A -> B, C -> D"`, mixing sequential and concurrent steps |
+| [RoundRobinSwarm](/api/round-robin-swarm) | Equal turn distribution | Cycles through agents in a fixed order, once each per loop, on a shared conversation |
 | [Mixture of Agents](/api/mixture-of-agents) | Complex problem solving | Combines diverse expert agents for comprehensive analysis |
-| [GroupChat](/api/group-chat) | Collaborative discussions | Simulates group discussions with multiple agents |
-| [SpreadSheetSwarm](/api/spreadsheet-swarm) | Data processing | Collaborative data processing and analysis |
-| [SwarmRouter](/api/swarm-router) | Task routing | Routes tasks to appropriate agents based on requirements |
-| [MultiAgentRouter](/api/multi-agent-router) | Advanced task routing | Routes tasks to specialized agents based on capabilities |
+| [GroupChat](/api/group-chat) | Collaborative discussions | Agents bid to speak each turn; the highest bid above a threshold takes the floor |
+| [SpreadSheetSwarm](/api/spreadsheet-swarm) | Bulk runs as a table | Runs agents concurrently and saves every output to CSV; can load agents and per-agent tasks from a CSV |
+| [SwarmRouter](/api/swarm-router) | One interface for every architecture | Builds and runs the structure named by `swarm_type`, with optional fallbacks |
+| [MultiAgentRouter](/api/multi-agent-router) | Task routing | A boss agent routes each task to the specialist agent(s) best suited to it |
+| [AgentRouter](/api/agent-router) | Embedding-based routing | Matches a task to the closest agent description by cosine similarity |
+| [ModelRouter](/api/model-router) | Model selection | A function-calling model picks the model and provider for each task |
+| [SocialAlgorithms](/api/social-algorithms) | Custom communication protocols | Runs your own callable that decides how agents talk, and records every agent call |
 
 ## Workflow Architectures
 
 | Architecture | Use Case | Key Functionality |
 |-------------|----------|-------------------|
-| [ConcurrentWorkflow](/api/concurrent-workflow) | Parallel task execution | Executes multiple tasks simultaneously |
-| [SequentialWorkflow](/api/sequential-workflow) | Step-by-step processing | Executes tasks in a specific sequence |
+| [ConcurrentWorkflow](/api/concurrent-workflow) | Parallel task execution | Runs every agent on the same task at once and collects the answers in agent order |
+| [SequentialWorkflow](/api/sequential-workflow) | Step-by-step processing | Runs agents one after another, each building on the previous output |
 | [GraphWorkflow](/api/graph-workflow) | Complex task dependencies | Manages tasks with complex dependencies |
 | [BatchedGridWorkflow](/api/batched-grid-workflow) | Grid-style parallel task distribution | Pairs each agent with a different task and runs them concurrently |
+| [SwarmRearrange](/api/swarm-rearrange) | Pipelines of swarms | Runs whole swarms along an `AgentRearrange`-style flow string |
 
 ## Hierarchical Architectures
 
@@ -43,16 +47,53 @@ pip install -U swarms
 | [HierarchicalSwarm](/api/hierarchical-swarm) | Hierarchical task orchestration | Director agent coordinates specialized worker agents |
 | [Hybrid Hierarchical-Cluster Swarm](/api/hhcs) | Complex organization | Combines hierarchical and cluster-based organization |
 | [Auto Swarm Builder](/api/auto-swarm-builder) | Automated swarm creation | Automatically creates and configures swarms |
-| [PlannerWorkerSwarm](/api/planner-worker-swarm) | Plan-then-delegate execution | A planner agent generates a step-by-step plan that worker agents execute |
+| [Auto Agent Builder](/api/auto-agent-builder) | Automated roster creation | Generates the agent roster for a task and leaves the architecture to you |
+| [PlannerWorkerSwarm](/api/planner-worker-swarm) | Plan-then-delegate execution | A planner emits a dependency-aware task queue that a pool of workers claims and executes concurrently |
+| [PlannerGeneratorEvaluator](/api/planner-generator-evaluator) | Contract-checked generation | A planner sets step contracts, a generator produces, an evaluator scores each step |
+| [HierarchicalStructuredCommunicationFramework](/api/hierarchical-communication-framework) | Structured generate-and-critique | Supervisor, generator, evaluator and refiner roles exchange structured messages |
+| [ForestSwarm](/api/forest-swarm) | Topical routing over large rosters | Organizes agents into trees and routes each task by embedding similarity |
+| [SubagentRegistry](/api/async-subagent) | Background delegation | Spawns async subagent tasks with status tracking, retries and depth limits |
 
 ## Reasoning and Decision Architectures
 
 | Architecture | Use Case | Key Functionality |
 |-------------|----------|-------------------|
-| [HeavySwarm](/api/heavy-swarm) | Deep, research-grade analysis | Runs agents through many reasoning loops for intensive analysis |
-| [CouncilAsAJudge](/api/council-as-judge) | High-stakes rulings with deliberation | A council of agents deliberates, then a judge agent delivers a verdict |
+| [HeavySwarm](/api/heavy-swarm) | Deep, research-grade analysis | A question agent writes role-specific questions for a specialist roster, then the answers are synthesized |
+| [CouncilAsAJudge](/api/council-as-judge) | Multi-criteria evaluation | Judge agents score a response along separate dimensions, then an aggregator writes the report |
 | [DebateWithJudge](/api/debate-with-judge) | Structured adversarial debate | Agents argue opposing positions over multiple rounds; a judge rules |
-| [LLMCouncil](/api/llm-council) | Consensus-based decision making | An LLM-based council deliberates to reach a decision |
+| [LLMCouncil](/api/llm-council) | Consensus-based decision making | Members answer independently, rank each other's anonymized answers, and a chairman synthesizes |
+| [SelfMoASeq](/api/self-moa-seq) | Ensembles from one model | Samples one model many times and aggregates the samples in sliding windows |
+| [AdvisorSwarm](/api/advisor-swarm) | Cheap model with expensive backup | An executor consults a stronger advisor model between turns |
+
+## Communication Topologies
+
+Small, fixed message-passing patterns, all documented on one page.
+
+| Architecture | Use Case | Key Functionality |
+|-------------|----------|-------------------|
+| [OneToOne / one_to_one](/api/swarming-architectures) | Two-agent loops | Sender and receiver alternate for `max_loops` exchanges on a shared conversation |
+| [Broadcast / broadcast](/api/swarming-architectures) | One message, many reactions | The sender speaks, then each receiver replies in turn; `broadcast` is async |
+| [OneToThree / one_to_three](/api/swarming-architectures) | Three-reviewer panels | The sender speaks, then exactly three receivers reply in turn |
+| [circular, grid, star, mesh, pyramid swarms](/api/swarming-architectures) | Topology experiments | Function-only ring, grid, hub-and-spoke, shared-queue and pyramid layouts |
+
+## Serving, Scheduling, and Utilities
+
+These are exported from `swarms.structs` next to the architectures above.
+
+| Component | Use Case | Key Functionality |
+|-------------|----------|-------------------|
+| [MCPDeployer](/api/mcp-deployer) | Serving swarms to other tools | Exposes an agent, swarm, or callable as an authenticated MCP server; `deploy_as_mcp` is the one-call form |
+| [CronJob](/api/cron-job) | Scheduled runs | Runs an agent, swarm, or callable on an interval |
+| [DecisionModel](/api/decision-model) | Typed decisions | Client for decision models that answer typed questions about a state |
+| [check_models](/api/check-models) | Model availability | `get_available_models`, `is_model_available` and `model_count` over LiteLLM and OpenRouter names |
+| [Multi-agent execution utilities](/api/multi-agent-execution-utilities) | Running agents without a structure | `run_agents_concurrently`, `batch_agent_execution` and related helpers |
+| [Multi-agent blocks](/api/ma-blocks) | Small building blocks | `aggregate`, `run_agent` and `find_agent_by_name` |
+
+For single-agent reasoning strategies such as [Tree of Thoughts](/agents/tree-of-thoughts), see the [reasoning agents overview](/agents/reasoning-agents-overview).
+
+<Note>
+`AgentRouter`, `ForestSwarm`, `PlannerWorkerSwarm` and `HierarchicalStructuredCommunicationFramework` are not exported from the top-level `swarms` package. Import them from their modules; the [structures catalog](/architectures/structures-catalog) links each one's source file.
+</Note>
 
 ## Communication Structure
 

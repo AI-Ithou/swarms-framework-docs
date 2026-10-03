@@ -69,11 +69,13 @@
               "agents/creating-agents",
               "agents/agent-configuration",
               "agents/agent-memory",
+              "agents/autonomous-mode",
               "agents/agent-tools",
               "agents/dynamic-tools",
               "agents/agent-skills",
               "agents/structured-outputs",
-              "agents/prompt-caching"
+              "agents/prompt-caching",
+              "agents/token-usage"
             ]
           },
           {
@@ -139,6 +141,8 @@
             "group": "Changelog",
             "pages": [
               "changelog/overview",
+              "changelog/swarms-v15",
+              "changelog/swarms-v14",
               "changelog/swarms-v13",
               "changelog/swarms-v12"
             ]
@@ -152,14 +156,15 @@
             "group": "Core Classes",
             "pages": [
               "api/agent",
-              "api/decision-model",
               "api/llm-manager",
+              "api/tool-manager",
               "api/mcp-manager",
               "api/mcp-deployer",
               "api/skills-manager",
               "api/agent-marketplace-handler",
               "api/conversation",
-              "api/agent-loader"
+              "api/agent-loader",
+              "api/decision-model"
             ]
           },
           {
@@ -211,7 +216,8 @@
               "api/dynamic-tool-loader",
               "api/prompts",
               "api/schemas",
-              "api/utils"
+              "api/utils",
+              "api/check-models"
             ]
           },
           {

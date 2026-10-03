@@ -1,0 +1,252 @@
+---
+title: Swarms v15
+description: Changelog for Swarms v15, from 15.0.0 through 15.0.3, plus the unreleased changes on master
+---
+
+**Releases:** 15.0.0 on 2026-09-01 · 15.0.1 on 2026-09-07 · 15.0.2 on 2026-09-08 · 15.0.3 on 2026-09-16
+
+## Overview
+
+Swarms v15 covers everything merged after 14.0.2, across four releases and 111 commits. A further set of changes has landed on master since 15.0.3 and is listed under [Unreleased](#unreleased).
+
+The headline is how agents talk to each other. Every multi-agent structure now delivers shared context as typed chat turns: each speaker arrives as its own labelled message, instead of the whole room being flattened into one user message. Structures also record each agent's answer rather than its whole transcript, and start each task from an empty conversation. Runs stop leaking earlier tasks into later ones, and requests keep a stable prefix that prompt caching can reuse.
+
+Around that, v15 adds token usage accounting, fallback swarms for `SwarmRouter`, `MCPDeployer` for serving agents as authenticated MCP servers, a model catalogue check, and wider OpenTelemetry coverage. 15.0.0 also removed the deprecated AOP module and the `HierarchicalSwarm` live dashboard.
+
+## Highlights
+
+* **Typed chat turns everywhere (15.0.0)**: shared context arrives as labelled turns, and each agent contributes its answer, not its transcript.
+* **Token usage (15.0.1, 15.0.2)**: `agent.usage` and `router.usage` report provider token counts, including streaming runs and reasoning tokens. `agent.input_tokens` estimates the next request.
+* **Fallback swarms (15.0.1)**: `SwarmRouter(fallback_swarms=[...])` tries the next architecture when one fails.
+* **MCPDeployer (15.0.3)**: serve any agent, swarm or callable as an MCP tool behind API keys, a token verifier or your own auth.
+* **Conversations from prior turns (15.0.3)**: pass chat-format `messages` to `Agent` or `run()`.
+* **Model catalogue (15.0.3)**: `is_model_available`, `model_count` and `get_available_models` check names against LiteLLM and OpenRouter.
+* **Leaner autonomous loop (15.0.1)**: a `glob` tool, tool output capped by token budget, and context compression between subtasks.
+
+## Unreleased
+
+<Note>
+These changes are on master after 15.0.3 and are not in any published release yet. They ship in the next release. To use them now, install from source: `pip install git+https://github.com/kyegomez/swarms.git`. See [Installation](/installation).
+</Note>
+
+### New features
+
+* **TreeOfThoughts**: a reasoning agent that grows a tree of partial solutions, scores and prunes them, and answers from the best path. Every model output is a validated function call. See [Tree of Thoughts](/agents/tree-of-thoughts).
+* **DecisionModel**: a client that asks choice, score and yes/no (`noul`) questions about a state in one request and returns typed answers with calibrated probabilities. It defaults to TypeSafe's `jev-latest`, and `model_name="clef"` or `"clef-flash"` uses Cloudflare Workers AI. `get_decision_models()` lists the available names. See [DecisionModel](/api/decision-model).
+* **More usage totals**: `GraphWorkflow.usage` sums every node and subgraph, and `HeavySwarm.usage` includes question generation. See [Token usage](/agents/token-usage).
+* **Autonomous loop budgets**: `Agent` takes `max_planning_attempts` (default `5`), `max_subtask_iterations` (default `100`) and `max_subtask_loops` (default `20`). Each must be at least 1. See [Autonomous mode](/agents/autonomous-mode).
+* **Several skill directories**: `skills_dir` accepts a list of paths. When two directories hold a skill with the same name, the later one wins.
+* **ToolManager**: tool handling moved out of `agent.py` into a `ToolManager` built once per agent as `agent.tool_manager`. Context compression also stops tokenizing the history while its byte size is under budget, which cuts a tool turn from about 770 µs to 162 µs. See [ToolManager](/api/tool-manager).
+
+### Fixes
+
+* `Agent.run()` raises `AgentLLMError` once every retry has failed, instead of returning an empty string. `fallback_models` are now tried, because the error reaches the fallback chain. See [Production best practices](/deployment/production-best-practices).
+* Selected skills reach the model on every call. They were appended to `system_prompt` after the LLM was built, so the model never saw them.
+* `run_stream` and `arun_stream` with `max_loops="auto"` enter the autonomous loop instead of calling the model without a plan.
+* Interactive follow-up input is sent to the model again.
+* An agent with tools that answers in plain text no longer records `"[] (empty list)"` or a tool summary as its answer.
+* A failing tool batch runs once per `tool_retry_attempts` attempt, not twice.
+* `Agent.run(n=...)` passes every input to each sample.
+* `ConcurrentWorkflow.run`, `GroupChat`'s async run, `ReasoningDuo` and `MajorityVoting.run_concurrently` start each run or task from an empty conversation.
+* `ConcurrentWorkflow` returns results in agent order and records each agent's answer. `RoundRobinSwarm` records answers too.
+* `SelfConsistencyAgent` gives each sample its own agent, so samples are independent.
+* `router(task)` and `router.batch_run(tasks)` work for every swarm type. They passed `imgs=None`, which most swarms rejected.
+* `CouncilAsAJudge` runs its judges on `model_name` when `judge_agent_model_name` is unset.
+* `ModelRouter` parses the routing reply before reading it, and `CronJob` waits for the next interval after a failed run instead of retrying every second.
+* `MCPDeployer` enforces `timeout` for blocking targets.
+* `Conversation` no longer creates `~/.swarms/conversations`, which crashed `Agent()` on a read-only home directory. It seeds the system prompt only when no history was restored.
+* `batch_agent_execution` works again and returns results in agent order. `aggregate()` defaults to a live model.
+* The CLI help states the real HeavySwarm model default, `gpt-5.4`.
+
+### Changed defaults and removals
+
+* `temperature` defaults to `None` (was `0.5`), so it is left out of the request and the provider's default applies. Current Claude models rejected the old default.
+* `dynamic_tools` defaults to `False` (was `True`). Pass `dynamic_tools=True` to keep tool schemas behind `tool_search`.
+* The `"xml"` output type and `swarms/utils/xml_utils.py` were removed. `output_type="xml"` now raises `ValueError`.
+* `LLMCouncil.run()` dropped the `query` alias. Call `run(task)`, which rejects an empty task.
+* `swarms/utils/swarm_autosave.py` was deleted in favor of `WorkspaceManager`, and the unused `HierarchicalOrderRearrange` schema was removed.
+* Tool methods moved from `Agent` to `agent.tool_manager`, including `execute_tools`, `tool_execution_retry`, `setup_tools`, `setup_dynamic_tools`, `mcp_tool_handling` and `parse_llm_output`. `Agent` keeps `add_tool`, `add_tools`, `remove_tool`, `remove_tools` and `mcp_enabled`.
+
+## New features
+
+### Fallback swarms (15.0.1)
+
+`SwarmRouter` used to run exactly one swarm type. Now `fallback_swarms` lists types to try in order when the primary raises, during construction or during `run()`. Each fallback is built from the same agents and configuration. If every type fails, `SwarmRouterRunError` names each attempt.
+
+```python
+from swarms import Agent, SwarmRouter
+
+agents = [
+    Agent(agent_name="Researcher", model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Writer", model_name="gpt-5.4", max_loops=1),
+]
+
+router = SwarmRouter(
+    agents=agents,
+    swarm_type="HierarchicalSwarm",
+    fallback_swarms=["SequentialWorkflow", "ConcurrentWorkflow"],
+)
+result = router.run("Assess whether we should adopt usage-based pricing.")
+print(router.active_swarm_type, router.fallback_attempts)
+```
+
+`SwarmRouterRunError` is importable from `swarms.structs.swarm_router`. See [SwarmRouter](/api/swarm-router) and [Production best practices](/deployment/production-best-practices).
+
+### Token usage (15.0.1, 15.0.2)
+
+`agent.usage` reports the token counts the provider returned, summed over every LLM call the agent has made: `input_tokens`, `output_tokens`, `cached_tokens`, `reasoning_tokens` and `total_tokens`. `router.usage` sums them across a router's agents, including a director, aggregator or judge the built swarm holds. In 15.0.2, streaming runs started counting and `reasoning_tokens` was added. `agent.input_tokens` estimates how many tokens the next request would carry.
+
+```python
+from swarms import Agent
+
+agent = Agent(agent_name="Analyst", model_name="gpt-5.4", max_loops=1)
+print(agent.input_tokens)
+
+agent.run("Summarize the main risks of a rate hike.")
+print(agent.usage)
+```
+
+Totals are lifetime totals for the instance. See [Token usage](/agents/token-usage).
+
+### MCPDeployer (15.0.3)
+
+`MCPDeployer` turns an agent, any structure with a `run()` method, or a plain callable into an MCP server. Each target becomes one tool. Pass a list or a dict to serve several. Requests are authenticated by a custom `auth` callable, an MCP `TokenVerifier`, or static `api_keys`. With no auth configured, construction fails unless you pass `allow_anonymous=True`. It serves streamable HTTP by default, or SSE or stdio.
+
+```python
+from swarms import Agent, MCPDeployer
+
+researcher = Agent(
+    agent_name="Researcher",
+    agent_description="Answers research questions with a short summary.",
+    model_name="gpt-5.4",
+    max_loops=1,
+)
+
+# Serves http://127.0.0.1:8000/mcp as the tool "researcher"
+MCPDeployer(researcher, api_keys=["sk-local-dev"], port=8000).run()
+```
+
+`run()` blocks. Use `start()` and `stop()`, or a `with` block, to serve from a background thread. See [MCPDeployer](/api/mcp-deployer), [Serve an agent](/examples/mcp/mcp-deployer-serve-agent) and [Serve a team](/examples/mcp/mcp-deployer-serve-team).
+
+### Conversations from prior turns (15.0.3)
+
+`Agent` and `Conversation` take `messages`, a list of chat-format dicts. `Agent(messages=[...])` seeds the agent's memory at construction. `run(task, messages=[...])` sends the turns as the transcript the task continues from, including with `max_loops="auto"`. Tool calls in the turns survive the round trip.
+
+```python
+from swarms import Agent
+
+agent = Agent(agent_name="Assistant", model_name="gpt-5.4", max_loops=1)
+
+history = [
+    {"role": "user", "content": "Name three primes."},
+    {"role": "assistant", "content": "2, 3 and 5."},
+]
+agent.run("And what did I just ask you?", messages=history)
+```
+
+The same release gave each unnamed `Conversation` a unique `conversation-<8 hex>` name, and stopped creating an empty `./conversations` directory when nothing is saved.
+
+### Model catalogue check (15.0.3)
+
+`get_available_models` lists every model name LiteLLM knows, plus OpenRouter's live catalogue with an `openrouter/` prefix. The OpenRouter list is cached for five minutes, and a failed fetch returns an empty list with a warning. `is_model_available` and `model_count` build on it.
+
+```python
+from swarms import get_available_models, is_model_available, model_count
+
+print(is_model_available("claude-sonnet-4-6", include_openrouter=False))
+print(model_count(include_openrouter=False, exclude_keywords=["embedding"]))
+
+catalogue = get_available_models()
+print(catalogue["count"])
+```
+
+See [check_models](/api/check-models).
+
+### Point-to-point patterns (15.0.3)
+
+The three classes in `various_alt_swarms.py` now live in their own modules, each with a matching function: `OneToOne` and `one_to_one`, `Broadcast` and `broadcast`, `OneToThree` and `one_to_three`. All of them are exported from `swarms`.
+
+```python
+from swarms import Agent, OneToOne
+
+drafter = Agent(agent_name="Drafter", model_name="gpt-5.4", max_loops=1)
+critic = Agent(agent_name="Critic", model_name="gpt-5.4-mini", max_loops=1)
+
+result = OneToOne(sender=drafter, receiver=critic).run("Draft a launch tweet.", max_loops=2)
+```
+
+See [Swarming architectures](/api/swarming-architectures).
+
+### Autonomous loop upgrades (15.0.1)
+
+The `max_loops="auto"` loop gained a `glob(pattern, path)` tool that finds files recursively and returns relative paths, newest first. `read_file`, `run_bash`, `grep` and `glob` output is now capped by tokens, at a quarter of the agent's `context_length`, and the truncation notice says how much was cut. `ContextCompressor` now runs between subtask iterations, which it never did in auto mode before. Sub-agents receive the parent's tools and enough loops to use them. A tool that fails after `tool_retry_attempts` is reported to the model as a tool failure instead of re-running the model as if the provider had failed. See [Autonomous mode](/agents/autonomous-mode).
+
+### HierarchicalSwarm shows its plan (15.0.0)
+
+The director's plan, which was parsed and discarded, now renders above the orders it gave each worker. Orders are shown in full, and the panel is titled with the director's name. The panel is controlled by the new `print_on` parameter (default `True`) rather than `verbose`. The module was also split: prompts, schemas and the order parser moved to their own files. See [HierarchicalSwarm](/api/hierarchical-swarm).
+
+### Wider tracing (15.0.3)
+
+`SelfMoASeq`, `ModelRouter`, `SocialAlgorithms`, `AutoSwarmBuilder` and `SpreadSheetSwarm` now emit OpenTelemetry init and run spans. `AutoSwarmBuilder.run` is the parent of the swarm run it delegates to, so the build phase and the run share one trace. `ModelRouter` carries the tracing context into its thread pool. `SequentialWorkflow.run` emits its span again after a refactor had moved the decorator onto a helper. See [Telemetry](/deployment/telemetry).
+
+### Package version (15.0.1)
+
+`swarms.__version__` reads the installed package version. In a source checkout with no installed distribution, it returns `"unknown"`.
+
+```python
+import swarms
+
+print(swarms.__version__)
+```
+
+## Improvements
+
+**Typed chat turns (15.0.0).** `MixtureOfAgents`, `AgentRearrange`, `SequentialWorkflow`, `GroupChat`, `HierarchicalSwarm`, `MajorityVoting`, `GraphWorkflow`, `RoundRobinSwarm`, the swarming architectures, `AgentJudge` and `ReasoningDuo` all moved to typed turns. An agent's own earlier turns arrive as assistant messages and everyone else's as labelled user messages. 15.0.1 and 15.0.2 extended the same change to `PlannerWorkerSwarm`'s cycle judge, the Advisor swarm and `HeavySwarm`'s synthesis. 15.0.3 extended it to the `CouncilAsAJudge` aggregator. Guidance such as the collaboration preamble now travels as a system turn instead of being appended to your agents' `system_prompt`, which never reached the model.
+
+**Per-task isolation.** Nine structures reset their conversation at the start of `run()` (15.0.1), and `HierarchicalSwarm` resets its conversation and delivery cursor per task. `SequentialWorkflow.run_batched` and `run_concurrent` give each task its own clone (15.0.0, 15.0.3), and `ConcurrentWorkflow.batch_run` gives each task its own conversation (15.0.3). `SpreadSheetSwarm` no longer runs one agent in several threads, and `SelfMoASeq` and `ImageAgentBatchProcessor` draw each sample or image from a fresh agent (15.0.0).
+
+**Orchestration.** `AgentRearrange` parses its flow once, seeds its team-awareness message once instead of twice, and gates its logging on `verbose` (15.0.0). `MultiAgentRouter` runs selected agents concurrently and honours `skip_null_tasks` (15.0.0). `SocialAlgorithms` records every message in a `Conversation` (15.0.0).
+
+**Providers.** Swarms works with `mcp` 2.x (15.0.1). OpenAI's o-series and GPT-5-family models receive `max_completion_tokens` instead of `max_tokens`, with one automatic retry when a provider's error names the other key (15.0.2). System prompts now render their time line when an agent is built, not when the process started (15.0.1, 15.0.3).
+
+**Contributing (15.0.3).** Commit messages, PR titles and issue titles must use the WARP format, `[TYPE][Function/FileName][Short Description]`, and comments are one line. See [Contributing](/community/contributing#warp-git-messages). The repository also gained a Simplified Chinese README.
+
+## Bug fixes
+
+* `AutoAgentBuilder` accepts `agent_kwargs` without raising `TypeError` (15.0.0).
+* `tools=[]` no longer enables the deferred-tool machinery with an empty catalog (15.0.0).
+* A reused autonomous agent no longer grows its system prompt by a handoff block on every run (15.0.0).
+* A caller-supplied `saved_state_path` is no longer overwritten (15.0.0).
+* `AgentRearrange.remove_agent` removes by name instead of always raising (15.0.0).
+* `SwarmRouter(list_all_agents=True)` no longer raises at construction (15.0.0).
+* `GraphWorkflow` fan-in labels each predecessor's output correctly when one is missing (15.0.0).
+* `GroupChat` can seat a speaker again: bids returned as strings scored 0.0 for every agent (15.0.0).
+* `DebateWithJudge`, `one_on_one_debate` and the expert panel pass each speaker's answer, with names, rather than transcripts or a Python list repr (15.0.0).
+* The hierarchical structured-communication evaluator's score is parsed instead of hard-coded, so its early stop can fire (15.0.0).
+* `MixtureOfAgents` labels each worker contribution with its layer (15.0.1).
+* Failed MCP tool calls are reported as failures under `mcp` 2.x (15.0.1).
+* `return_all_except_first_string` drops one message, not two (15.0.1), and `"all-except-first"` output no longer drops a swarm's first agent answer (15.0.3).
+* Wrapped `Args:` lines in docstrings no longer truncate tool-schema descriptions (15.0.1).
+* `HierarchicalSwarm` raises when every loop failed, instead of returning a normal-looking transcript (15.0.3).
+* `Conversation.add_multiple_messages` works on machines with fewer than four CPUs and returns what it added, in order (15.0.3).
+* The `HeavySwarm` default variant no longer crashes, the medium variant gets the right questions, and HeavySwarm runs on Claude. The question decomposer also sees the image (15.0.3).
+* In auto mode, `agent.run()` shapes its result by `output_type` on every exit path (15.0.3).
+* Over-length `run_bash` file writes point the model at `create_file` (15.0.3).
+
+## Removals and breaking changes
+
+* The deprecated AOP module (`swarms/structs/aop.py`) and its examples were deleted (15.0.0). To serve agents over MCP, use [MCPDeployer](/api/mcp-deployer).
+* The `HierarchicalSwarm` live dashboard was removed (15.0.0). `interactive` still prompts for a task when `run()` gets none. `HierarchicalSwarm.arun`, `arun_stream` and `run_stream` were removed too.
+* `"auto"` and `"BatchedGridWorkflow"` are no longer `SwarmRouter` swarm types (15.0.0). Neither could run. `BatchedGridWorkflow` still works on its own.
+* `reasoning_effort` defaults to `None` again (was `"medium"` in v14), so tool calls work on OpenAI reasoning models by default (15.0.0).
+* `Conversation.return_messages_as_list` returns message dicts. The `"role: content"` strings moved to `return_messages_as_strings` (15.0.0).
+* `SocialAlgorithms` retired `enable_communication_logging`, `parallel_execution` and `max_workers`. Old arguments are still accepted and ignored (15.0.0).
+* `ReasoningDuo`'s internal agents are named `<agent_name>-reasoning` and `<agent_name>-main` (15.0.0).
+* The `Artifact` class and `swarms.artifacts` package were removed (15.0.1).
+* `various_alt_swarms.py` was split into `one_to_one.py`, `broadcast.py` and `one_to_three.py` (15.0.3).
+* Four helpers with no callers were deleted: `query_ragent`, `find_multiple_agents_by_name`, `track_history` and `coordinate_workflow` (15.0.3). `MultiAgentRouter.get_agent_response_schema` went in 15.0.0.
+* An unnamed `Conversation` is named `conversation-<8 hex>` instead of `conversation-test` (15.0.3).
+
+## Conclusion
+
+v15 makes multi-agent runs honest about who said what. Context arrives as typed turns, each task starts clean, and every structure records answers rather than transcripts. Usage accounting shows what a run cost, fallback swarms keep a router serving when one architecture fails, and `MCPDeployer` lets other agents and MCP hosts call yours. When you upgrade from v14, replace any AOP server with `MCPDeployer`, drop references to the `HierarchicalSwarm` dashboard and its streaming methods, and update code that read strings from `return_messages_as_list`. If you install from master, also check the new `temperature` and `dynamic_tools` defaults listed under [Unreleased](#unreleased).

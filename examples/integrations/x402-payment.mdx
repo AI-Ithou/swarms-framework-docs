@@ -64,14 +64,14 @@ load_dotenv()
 
 app = FastAPI(title="Research Agent API")
 
-# Initialize the research agent
-research_agent = Agent(
-    agent_name="Research-Agent",
-    system_prompt="You are an expert research analyst. Conduct thorough research on the given topic and provide comprehensive, well-structured insights with citations.",
-    model_name="gpt-5.4",
-    max_loops=1,
-    tools=[exa_search],
-)
+def build_research_agent() -> Agent:
+    return Agent(
+        agent_name="Research-Agent",
+        system_prompt="You are an expert research analyst. Conduct thorough research on the given topic and provide comprehensive, well-structured insights with citations.",
+        model_name="gpt-5.4",
+        max_loops=1,
+        tools=[exa_search],
+    )
 
 
 # Apply x402 payment middleware to the research endpoint
@@ -116,7 +116,8 @@ async def conduct_research(query: str):
     Returns:
         Research results from the agent
     """
-    result = research_agent.run(query)
+    # A fresh agent per request; a shared one would carry earlier callers' research into this answer.
+    result = build_research_agent().run(query)
     return {"research": result}
 
 

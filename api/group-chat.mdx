@@ -1,6 +1,7 @@
 ---
 title: GroupChat
 description: A turn-based groupchat where every agent bids each turn and the single highest-scoring bidder above threshold speaks
+icon: "comments"
 ---
 
 ## Overview
@@ -13,6 +14,8 @@ The chat ends when either:
 
 - `max_loops` total messages have been posted (the initial user task counts as the first), or
 - no agent's bid clears `threshold` on a turn — a conversational lull.
+
+Every call to `run` starts from an empty conversation, so you can reuse one `GroupChat` instance for unrelated tasks without the previous transcript leaking in.
 
 <Note>
   This replaces the older speaker-function design. Parameters and methods such as `speaker_function`, `speaker_state`, `set_speaker_function`, `start_interactive_session`, `@mention` routing, and the `round-robin-speaker` / `random-speaker` / `priority-speaker` selectors **no longer exist**. The current API is the turn-based, bid/threshold model documented below. Note also that `idle_timeout` is accepted for backward compatibility but is **not** used to end the chat — see below.
@@ -77,7 +80,7 @@ GroupChat(
 </ParamField>
 
 <ParamField path="output_type" type="str" default="str-all-except-first">
-  Format passed to `history_output_formatter`. Common values: `"str-all-except-first"`, `"str"`, `"list"`, `"dict"`, `"json"`.
+  Format passed to `history_output_formatter`. Common values: `"str-all-except-first"`, `"str"`, `"list"`, `"dict"`, `"json"`, `"final"`. The default joins every reply after the task without speaker names; use `"str"` for a `Name: message` transcript, or `"list"` to iterate `role` / `content` pairs.
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -113,11 +116,30 @@ agent = Agent(
 
 A bid only wins the floor when its (recency-adjusted) `score` clears `threshold` **and** `message` is non-empty — and only the single highest such bid each turn is posted; every other agent's bid for that turn is discarded.
 
+## How agents decide
+
+Each turn, every agent runs once with two inputs:
+
+- **The shared conversation as typed chat turns.** The task arrives as a `user` turn, the agent's own earlier replies as `assistant` turns, and peers' replies as `user` turns prefixed with the speaker's name, so an agent can tell its own words from a peer's.
+- **The decision prompt** `GROUPCHAT_DECIDE_PROMPT` (in `swarms/prompts/groupchat_prompt.py`), filled with the agent's name, the other participants, and the latest message.
+
+The prompt does not make silence the default. It asks the agent to assess the discussion, then return an honest, calibrated score for how useful it would be to speak right now:
+
+| Score | Meaning |
+|---|---|
+| `0.0` | Nothing substantive or distinct to add. The message should be empty. |
+| `0.1`–`0.3` | A minor contribution, normally not worth taking the floor. |
+| `0.4`–`0.6` | A useful contribution that develops the discussion or offers a next step. |
+| `0.7`–`0.8` | A highly relevant response, correction, or analysis the group should hear soon. |
+| `0.9`–`1.0` | An urgent or decisive contribution, such as correcting a serious error. |
+
+Agents score high when they are addressed, can correct a consequential mistake, or can supply missing evidence. They score low for agreement, filler, points already made, or speculation. A bid must score strictly above `threshold` to win, so with the default `0.5` only the upper end of the "useful" band and above can take the floor.
+
 ## Methods
 
 ### `run(task, streaming_callback=None)`
 
-Synchronously run the turn-based groupchat until a lull (no agent's bid clears `threshold`) or until `max_loops` messages have been posted. Posts `task` as the first message, then on each turn collects a concurrent `(score, message)` bid from every agent, lets the single highest (recency-adjusted) bidder speak, and returns the formatted conversation.
+Synchronously run the turn-based groupchat until a lull (no agent's bid clears `threshold`) or until `max_loops` messages have been posted. Clears the conversation, posts `task` as the first message, then on each turn collects a concurrent `(score, message)` bid from every agent, lets the single highest (recency-adjusted) bidder speak, and returns the formatted conversation.
 
 ```python
 def run(
@@ -145,7 +167,7 @@ result = chat.run("Should we adopt AI for medical diagnosis?")
 
 ### `run_batch(tasks)`
 
-Run several independent groupchats sequentially, one per task.
+Run several independent groupchats sequentially, one per task. Each task starts from an empty conversation.
 
 ```python
 def run_batch(self, tasks: List[str]) -> List[Any]
@@ -201,8 +223,7 @@ print(result)
 ### A more selective room
 
 ```python
-# Raise the threshold so only a strongly-motivated bid wins the floor each turn,
-# and widen the recency window so agents rotate speaking turns more aggressively.
+# A higher threshold and a wider recency window make the floor harder to win and keep.
 chat = GroupChat(
     agents=[optimist, pessimist, realist],
     max_loops=20,
@@ -240,8 +261,8 @@ result = chat.run("Discuss the tradeoffs of autonomous multi-agent systems.")
 
 ## How It Works
 
-1. **Seed** — the user task is posted to the single shared conversation as the first message.
-2. **Bid** — each turn, every agent is run concurrently (via `asyncio.gather` + `asyncio.to_thread`, so one slow model call never stalls the turn) and forced through the `respond` tool to return a `(score, message)` bid against a snapshot of the current transcript.
+1. **Seed** — the conversation is cleared and the user task is posted as the first message.
+2. **Bid** — each turn, every agent is run concurrently (via `asyncio.gather` + `asyncio.to_thread`, so one slow model call never stalls the turn) and forced through the `respond` tool to return a `(score, message)` bid. Each agent receives the shared conversation as typed turns plus the decision prompt described in [How agents decide](#how-agents-decide).
 3. **Select** — the highest bid wins, after subtracting `recency_penalty` from any agent that spoke within the last `recency_window` turns. Bids with an empty message never win, and the turn ends with no winner if no adjusted score clears `threshold`.
 4. **Post** — only the winning agent's reply is appended to the shared conversation; every other bid from that turn is discarded. All agents see the new message as context on the next turn.
 5. **Stop** — the chat ends when `max_loops` messages have been posted, or a turn passes with no bid clearing `threshold` (a conversational lull), and the formatted transcript is returned. `idle_timeout` is accepted for backward compatibility but no longer used to end the chat.
@@ -259,6 +280,9 @@ result = chat.run("Discuss the tradeoffs of autonomous multi-agent systems.")
 - `GroupChat` inherits `SerializableMixin`; `agents` and `conversation` are excluded from serialized state.
 - Exactly one agent speaks per turn — the highest recency-adjusted bidder above `threshold` — not every agent that clears the bar. This is a turn-based design, not a free-for-all broadcast.
 - There is no human-in-the-loop REPL in this implementation — `run` is fully autonomous and returns when the chat concludes.
+- If an agent's bid raises (for example, a provider error), the failure is logged as a warning and treated as a silent bid for that turn.
+- If no agent produces any reply on the first turn, the chat ends immediately and logs a warning. This usually means an invalid `model_name`, a missing API key, or a model without function-calling support.
+- `run` is traced as a `GroupChat.run` span when [telemetry](/deployment/telemetry) is on.
 
 ## Source Code
 

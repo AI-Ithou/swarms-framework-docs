@@ -174,7 +174,7 @@ analysis_workflow = ConcurrentWorkflow(
     name="Parallel-Analysis",
     agents=[statistical_analyst, trend_analyst, anomaly_detector],
     max_loops=1,
-    output_type="final",  # return a string so it can feed the next stage's task=
+    output_type="str-all-except-first",  # every analyst's answer, in agent order, as one string
 )
 
 # Third: Sequential visualization and reporting
@@ -260,6 +260,7 @@ marketing_analyst = Agent(
 # Add to parallel analysis
 analysis_workflow = ConcurrentWorkflow(
     agents=[statistical_analyst, trend_analyst, anomaly_detector, marketing_analyst],
+    output_type="str-all-except-first",
 )
 ```
 
@@ -308,7 +309,7 @@ from swarms import Agent
 real_time_monitor = Agent(
     agent_name="Real-Time-Monitor",
     system_prompt="Monitor streaming data for immediate insights...",
-    max_loops="auto",  # Continuous monitoring
+    max_loops=10,  # stopping_condition is checked after each loop; max_loops="auto" ignores it
     stopping_condition=lambda response: "critical_threshold_reached" in response.lower(),
 )
 ```
@@ -349,16 +350,22 @@ data_cleaner = Agent(
 
 ### Parallel Processing for Large Datasets
 
+ConcurrentWorkflow gives every agent the same task. To give each agent its own chunk, pair agents with tasks using `batched_grid_agent_execution`:
+
 ```python
-# Split dataset into chunks for parallel processing
+from swarms import Agent, batched_grid_agent_execution
+
+chunks = ["<rows 1-25,000>", "<rows 25,001-50,000>", "<rows 50,001-75,000>", "<rows 75,001-100,000>"]
+
 chunk_analysts = [
-    Agent(agent_name=f"Chunk-Analyst-{i}", ...)
-    for i in range(4)  # 4 parallel processors
+    Agent(agent_name=f"Chunk-Analyst-{i}", model_name="gpt-5.4-mini", max_loops=1)
+    for i in range(len(chunks))
 ]
 
-parallel_processing = ConcurrentWorkflow(
+# Results come back in agent order; a failed agent's slot holds its exception.
+chunk_results = batched_grid_agent_execution(
     agents=chunk_analysts,
-    max_loops=1,
+    tasks=[f"Analyze this chunk of the sales data:\n{chunk}" for chunk in chunks],
 )
 ```
 

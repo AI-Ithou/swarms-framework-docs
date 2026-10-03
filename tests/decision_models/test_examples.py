@@ -20,7 +20,18 @@ from swarms.structs import decision_model
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "examples" / "decision-models"
 CODE = EXAMPLES / "code"
-PAGES = [ROOT / "api" / "decision-model.mdx", *EXAMPLES.glob("*.mdx")]
+REFERENCE = ROOT / "api" / "decision-model.mdx"
+PAGES = [REFERENCE, *EXAMPLES.glob("*.mdx")]
+
+
+def reference_signature(code):
+    """Parse the reference's display-only signatures without executing them."""
+    source = code.strip()
+    if source.startswith("DecisionModel(\n"):
+        source = "def __init__(" + source[len("DecisionModel("):]
+    elif not re.fullmatch(r"(?:async )?def \w+\([\s\S]*\) -> [^\n]+", source):
+        return None
+    return ast.parse(source + ":\n    ...").body[0]
 
 
 def load_example(name):
@@ -250,6 +261,8 @@ def test_custom_script_modes_use_expected_payload_and_close(
 @pytest.mark.parametrize("page", PAGES)
 def test_python_snippets_parse(page):
     for index, code in enumerate(re.findall(r"```python\n(.*?)```", page.read_text(), re.DOTALL)):
+        if page == REFERENCE and reference_signature(code) is not None:
+            continue
         ast.parse(code, filename=f"{page.name}:{index}")
 
 
@@ -261,23 +274,44 @@ def test_guide_contains_exact_runnable_file(slug, name):
     assert (CODE / f"{name}.py").read_text() in (EXAMPLES / f"{slug}.mdx").read_text()
 
 
-def test_reference_constructor_matches_installed_source():
-    page = (ROOT / "api" / "decision-model.mdx").read_text()
-    block = next(code for code in re.findall(r"```python\n(.*?)```", page, re.DOTALL)
-                 if code.startswith("def __init__("))
-    function = ast.parse(block).body[0]
-    signature = inspect.signature(DecisionModel.__init__)
-    assert [arg.arg for arg in function.args.args] == list(signature.parameters)
-    assert [ast.literal_eval(value) for value in function.args.defaults] == [
-        param.default for name, param in signature.parameters.items() if name != "self"
-    ]
+def test_reference_signatures_match_installed_source():
+    blocks = re.findall(r"```python\n(.*?)```", REFERENCE.read_text(), re.DOTALL)
+    functions = [function for code in blocks
+                 if (function := reference_signature(code)) is not None]
+    expected = {
+        "__init__", "run", "arun", "choice", "score", "noul", "list_models",
+        "close", "build_headers", "build_payload", "parse_response", "get_decision_models",
+    }
+    assert {function.name for function in functions} == expected
+    assert len(functions) == len(expected)
+    for function in functions:
+        target = (decision_model.get_decision_models
+                  if function.name == "get_decision_models"
+                  else getattr(DecisionModel, function.name))
+        parameters = [param for name, param in inspect.signature(target).parameters.items()
+                      if name != "self"]
+        assert [arg.arg for arg in function.args.args] == [param.name for param in parameters]
+        assert [ast.literal_eval(value) for value in function.args.defaults] == [
+            param.default for param in parameters if param.default is not inspect.Parameter.empty
+        ]
+        assert isinstance(function, ast.AsyncFunctionDef) == inspect.iscoroutinefunction(target)
+
+
+@pytest.mark.parametrize("code", [
+    "DecisionModel(\n    model_name: str =\n)",
+    "def run(state: str, questions: Dict[str, Any] -> Dict[str, Any]",
+])
+def test_reference_signature_parser_rejects_malformed_signatures(code):
+    with pytest.raises(SyntaxError):
+        if reference_signature(code) is None:
+            ast.parse(code)
 
 
 def test_navigation_has_all_four_pages():
     tabs = json.loads((ROOT / "docs.json").read_text())["navigation"]["tabs"]
     api_tab = next(tab for tab in tabs if tab["tab"] == "API Reference")
     core = next(group for group in api_tab["groups"] if group["group"] == "Core Classes")
-    assert "api/decision-model" in core["pages"]
+    assert core["pages"].count("api/decision-model") == 1
     examples = next(tab for tab in tabs if tab["tab"] == "Examples")
     group = next(group for group in examples["groups"] if group["group"] == "Decision Models")
     assert group["pages"] == [
@@ -295,8 +329,16 @@ def test_new_pages_have_frontmatter_and_resolvable_internal_links(page):
     assert "title:" in text.split("---", 2)[1]
     assert "description:" in text.split("---", 2)[1]
     for link in re.findall(r"\]\((/[^)]+)\)", text):
-        path = link.split("#", 1)[0].lstrip("/")
-        assert (ROOT / f"{path}.mdx").is_file(), (page, link)
+        path, _, fragment = link.partition("#")
+        target = ROOT / f"{path.lstrip('/')}.mdx"
+        assert target.is_file(), (page, link)
+        if fragment:
+            headings = re.findall(r"^#{1,6} (.+)$", target.read_text(), re.MULTILINE)
+            anchors = {
+                re.sub(r"\s+", "-", re.sub(r"[^\w\s-]", "", heading.lower()))
+                for heading in headings
+            }
+            assert fragment in anchors, (page, link)
 
 
 def test_router_main_constructs_real_agents_without_live_generation(monkeypatch, capsys):

@@ -148,11 +148,11 @@ ruff check .
 
 ### 6. Commit Your Changes
 
-Write clear and descriptive commit messages:
+Write the commit message in the WARP format, `[TYPE][Function/FileName][Short Description]`. See [WARP git messages](/community/contributing#warp-git-messages):
 
 ```bash
 git add .
-git commit -m "Add feature: descriptive message about your changes"
+git commit -m "[FEAT][Agent.run][Accept a list of images per task]"
 ```
 
 ### 7. Push to Your Fork
@@ -163,7 +163,7 @@ git push origin feature/your-feature-name
 
 ### 8. Create a Pull Request
 
-Go to the original repository on GitHub and create a pull request from your fork.
+Go to the original repository on GitHub and create a pull request from your fork against `master`. Give it a WARP title and link the issue it fixes (`Fixes #1234`).
 
 ## Testing Guidelines
 

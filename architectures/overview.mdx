@@ -53,6 +53,26 @@ These reach a decision rather than producing a pipeline result. Each has an API 
 | [Self MoA Seq](/api/self-moa-seq) | One model sampled N times, windowed aggregation | Ensemble quality from a single model |
 | [Forest Swarm](/api/forest-swarm) | Trees of agents selected by embedding similarity | Large rosters with topical routing |
 
+### Routing and Composition
+
+| Architecture | Execution Pattern | Best For |
+|--------------|------------------|----------|
+| [Multi-Agent Router](/api/multi-agent-router) | A boss agent picks the specialist(s) for each task | Routing across a roster of specialists |
+| [Agent Router](/api/agent-router) | Embedding similarity between the task and agent descriptions | Routing without a chat-model call |
+| [Model Router](/api/model-router) | A function-calling model picks the model and provider | Choosing the model rather than the agent |
+| [Swarm Rearrange](/api/swarm-rearrange) | The `AgentRearrange` flow DSL over whole swarms | Chaining swarms into a pipeline |
+
+### Communication Topologies
+
+Small, fixed message-passing patterns. All are exported from `swarms` and documented together in [Swarming Architectures](/api/swarming-architectures).
+
+| Pattern | Execution Pattern | Best For |
+|--------------|------------------|----------|
+| `OneToOne` / `one_to_one` | Sender and receiver alternate for `max_loops` exchanges | Writer–editor and generator–critic loops |
+| `Broadcast` / `broadcast` | One sender speaks, then each receiver replies in turn | One message that many agents react to |
+| `OneToThree` / `one_to_three` | One sender, then exactly three receivers reply in turn | Fixed three-reviewer panels |
+| `circular_swarm`, `grid_swarm`, `star_swarm`, `mesh_swarm`, `pyramid_swarm` | Ring, grid, hub-and-spoke, shared queue, and pyramid layouts | Testing whether conversation shape changes the result |
+
 ## Architecture Categories
 
 ### Linear Architectures
@@ -66,7 +86,7 @@ These architectures execute tasks in a straightforward manner:
 
 These provide flexible orchestration patterns:
 
-- **Agent Rearrange**: Define custom flows with `→` and `,` operators
+- **Agent Rearrange**: Define custom flows with `->` and `,` operators
 - **Swarm Router**: Dynamically select and execute any swarm type
 - **Social Algorithms**: Upload arbitrary communication patterns
 
@@ -93,6 +113,16 @@ These do not execute anything themselves — they produce the agents that the ar
 - **[Auto Swarm Builder](/api/auto-swarm-builder)**: Generates the roster *and* selects the `swarm_type`, optionally executing it
 
 Because a generated roster is just a list of agents, it drops into any architecture on this page.
+
+### Serving, Scheduling, and Reasoning
+
+These are not architectures, but they sit next to the ones above:
+
+- **[MCPDeployer](/api/mcp-deployer)**: Serve any agent or swarm on this page as an authenticated MCP server
+- **[CronJob](/api/cron-job)**: Run an agent or swarm on a schedule
+- **[Tree of Thoughts](/agents/tree-of-thoughts)**: Search a tree of reasoning steps with a single agent, when the task needs deliberate reasoning rather than more agents
+- **[DecisionModel](/api/decision-model)**: Ask a decision model typed questions about a state
+- **[check_models](/api/check-models)**: Confirm a model name is available before you build a swarm around it
 
 ## One Interface, Any Architecture
 
@@ -137,10 +167,10 @@ The literal is `"RoundRobin"`, not `"RoundRobinSwarm"` — the class name and th
 Every architecture that runs several agents against one shared conversation now handles context the same way, which changes what your agents actually see.
 
 <AccordionGroup>
-  <Accordion title="Agents receive only what is new to them">
-    Handing an agent the whole shared conversation on each invocation puts that history into the agent's own memory, so the next invocation sends it again on top of what the agent already holds — context grows exponentially across loops, and the agent sees its own output twice, the second time mislabelled as something the user said.
+  <Accordion title="Agents read the shared conversation as typed turns">
+    Handing an agent the whole shared conversation as one block of task text puts that history into the agent's own memory, so the next invocation sends it again on top of what the agent already holds — context grows exponentially across loops, and the agent sees its own output twice, the second time mislabelled as something the user said.
 
-    Structures now track a per-agent cursor and send only the messages that agent has not been given yet, with the agent's own messages excluded. When there is nothing new, the agent is told to continue from its own previous response rather than receiving an empty instruction.
+    Structures now pass the shared conversation with each call as chat messages, seen from that agent's point of view: its own earlier messages arrive as `assistant` turns and everyone else's as `user` turns labelled with the speaker's name. These messages replace the agent's memory-derived history for that request, so nothing is sent twice, the model can tell its own output from a peer's, and the request keeps a stable prefix that providers can cache.
   </Accordion>
 
   <Accordion title="Agents contribute their answer, not their transcript">

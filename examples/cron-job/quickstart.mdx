@@ -12,7 +12,7 @@ An agent that answers once is a function call. An agent that answers every ten m
 |---------|-------------|
 | **One agent, one interval** | A `CronJob` binds a single agent to a single cadence |
 | **Runs on its own thread** | The schedule lives in the background; `run()` blocks the caller |
-| **Survives failures** | A task that raises is logged and retried on the next tick |
+| **Survives failures** | A task that raises is logged and retried at the next interval |
 | **Observable** | `get_execution_stats()` reports successes, failures and the last error |
 
 ```
@@ -22,7 +22,7 @@ run("task")
      ├── starts a background scheduler thread
      └── blocks here until stop() / Ctrl-C / error budget exhausted
               │
-              └── every tick: agent.run(task) ─── raises? log it, try again next tick
+              └── every interval: agent.run(task) ─── raises? log it, try again next interval
 ```
 
 ## The smallest job
@@ -110,7 +110,7 @@ stats = job.get_execution_stats()
 
 ## What happens when the agent fails
 
-Nothing dramatic, by design. The failure is logged with a traceback and the task runs again on the next tick, the way cron behaves. A rate limit or a dropped connection does not end your job.
+Nothing dramatic, by design. The failure is logged with a traceback, counted in `error_count` and `consecutive_errors`, and the task runs again at the next interval, the way cron behaves. A rate limit or a dropped connection does not end your job, and a failing task is not retried any faster than a healthy one runs.
 
 If you want a job to give up when it is failing *every* time, give it a budget:
 

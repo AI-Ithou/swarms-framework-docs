@@ -20,6 +20,9 @@ The `GraphWorkflow` class represents a workflow graph where each node is an agen
 - **JSON Serialization**: Save and load workflows to/from JSON
 - **Async Support**: Asynchronous execution for non-blocking operations
 - **Cycle Detection**: Automatic detection and reporting of cycles
+- **Nested Workflows**: Run a whole `GraphWorkflow` as a single node
+- **Checkpoints**: Resume an interrupted run from its last completed layer
+- **Token Usage**: Sum token spend across every node and subgraph with `usage`
 
 ## Installation
 
@@ -108,7 +111,7 @@ class GraphWorkflow:
 </ParamField>
 
 <ParamField path="checkpoint_dir" type="Optional[str]" default="None">
-  Directory for writing workflow checkpoints. When set, execution state can be persisted and resumed.
+  Directory for per-layer checkpoints. After each layer finishes, its outputs are written to `{checkpoint_dir}/{task_key}_layer_{n}.json`, where `task_key` is a hash of the task string. Running the same task again skips every layer that already has a checkpoint. Subgraph nodes checkpoint under `{checkpoint_dir}/{node_id}` unless they set their own directory. Remove old files with `clear_checkpoints(task)`.
 </ParamField>
 
 <ParamField path="on_node_complete" type="Optional[Callable[[str, Any], None]]" default="None">
@@ -116,7 +119,7 @@ class GraphWorkflow:
 </ParamField>
 
 <ParamField path="max_parallel_nodes" type="Optional[int]" default="None">
-  Maximum number of nodes to execute concurrently within a layer. Defaults to the framework's worker count when `None`.
+  Maximum number of nodes to execute concurrently within a layer. Defaults to `max(1, int(cpu_cores * 0.95))` when `None`. The run's thread pool is also capped at the size of the widest layer.
 </ParamField>
 
 ## Methods
@@ -125,14 +128,14 @@ class GraphWorkflow:
 
 #### `add_node(agent, **kwargs)`
 
-Add an agent node to the workflow graph.
+Add an agent, or a nested `GraphWorkflow`, as a node in the workflow graph. An agent node's ID is its `agent_name`. A nested workflow becomes a `SUBGRAPH` node whose ID is the inner workflow's `name`; it is compiled on insertion if needed. Raises `ValueError` if a node with the same ID already exists.
 
-<ParamField path="agent" type="Agent" required>
-  The agent to add as a node
+<ParamField path="agent" type="Union[Agent, GraphWorkflow]" required>
+  The agent or inner workflow to add. Pass the object itself, not a `Node`; to supply prebuilt `Node` objects, use the `nodes` constructor argument or `from_spec()`.
 </ParamField>
 
 <ParamField path="**kwargs" type="Any">
-  Additional keyword arguments for the node
+  Additional keyword arguments for the node, such as `metadata`
 </ParamField>
 
 #### `add_nodes(agents, batch_size=10, **kwargs)`
@@ -211,7 +214,9 @@ Create a parallel processing chain (full mesh connection).
 
 #### `run(task=None, img=None, on_node_complete=None, streaming_callback=None, *args, **kwargs)`
 
-Run the workflow graph with optimized parallel agent execution. When `max_loops > 1`, end-point outputs from each loop are fed as additional context into the next loop so agents can iteratively refine their results.
+Run the workflow graph with optimized parallel agent execution. The graph is compiled first if it is not already. Each node receives the task plus one chat turn per predecessor output. When `max_loops > 1`, end-point outputs from each loop are fed as additional context into the next loop so agents can iteratively refine their results.
+
+A node that raises does not stop the run: its output becomes an `"[ERROR] Agent <name> failed: ..."` string, and downstream nodes still run. A subgraph node's output is the inner workflow's results joined as `[node_id]: output` blocks.
 
 <ParamField path="task" type="Optional[str]">
   Task to execute. Uses self.task if not provided.
@@ -230,12 +235,12 @@ Run the workflow graph with optimized parallel agent execution. When `max_loops 
 </ParamField>
 
 <ResponseField name="results" type="Dict[str, Any]">
-  Execution results keyed by node ID. When `max_loops == 1`, returns the single loop's results. When `max_loops > 1`, returns a dict with per-loop results keyed as `{node_id}_loop_{loop_number}` plus the final loop's results under the plain `node_id` keys.
+  Execution results for every node, not only the end points, keyed by node ID. When `max_loops == 1`, returns the single loop's results. When `max_loops > 1`, returns a dict with per-loop results keyed as `{node_id}_loop_{loop_number}` plus the final loop's results under the plain `node_id` keys.
 </ResponseField>
 
 #### `arun(task=None, *args, **kwargs)`
 
-Async version of run for better performance with I/O bound operations.
+Async version of `run()`. Runs `run()` in a worker thread with `asyncio.to_thread`, forwarding any extra arguments.
 
 <ParamField path="task" type="Optional[str]">
   Task to execute. Uses self.task if not provided.
@@ -245,11 +250,24 @@ Async version of run for better performance with I/O bound operations.
   Execution results from all nodes
 </ResponseField>
 
+#### `usage` (property)
+
+Provider token usage summed over every agent in the graph, including the agents inside nested subgraphs at any depth. An agent that backs several nodes, or appears in both this graph and a subgraph, is counted once. See [Token usage](/agents/token-usage).
+
+<ResponseField name="usage" type="dict">
+  A new dict with `input_tokens`, `output_tokens`, `cached_tokens`, `reasoning_tokens` and `total_tokens`. Agent totals are lifetime totals, so the value grows across repeated `run()` / `arun()` calls and includes anything a shared agent spent in other workflows.
+</ResponseField>
+
+```python
+results = workflow.run("Research AI trends in healthcare")
+print(workflow.usage["total_tokens"])
+```
+
 ### Compilation and Optimization
 
 #### `compile()`
 
-Pre-compute expensive operations for faster execution. Results are cached.
+Pre-compute expensive operations for faster execution: auto-set missing entry and end points, compute topological layers and run the structural checks from `validate()`, logging any problems without raising. Results are cached until the graph changes; adding a node or edge, or setting entry or end points, invalidates the cache and the next `run()` recompiles.
 
 #### `get_compilation_status()`
 
@@ -321,12 +339,54 @@ Simple text-based visualization for environments without Graphviz.
 
 ### Serialization
 
+Workflows serialize in two shapes. A **shallow** spec stores the topology only: each node names its agent by `agent_name`, so you supply the live agents when loading. A **deep** export embeds each agent's `to_dict()` output plus export metadata and metrics.
+
+#### `to_dict(shallow=True, include_conversation=False, include_runtime_state=False)`
+
+Serialize the workflow to a dict. This is the builder behind `to_spec()`, `to_json()`, `save()` and `save_to_file()`.
+
+<ParamField path="shallow" type="bool" default="True">
+  `True` for the sorted, diffable topology spec. `False` for a deep export with agents embedded.
+</ParamField>
+
+<ParamField path="include_conversation" type="bool" default="False">
+  Deep shape only. Embed the conversation history.
+</ParamField>
+
+<ParamField path="include_runtime_state" type="bool" default="False">
+  Deep shape only. Embed the compilation state.
+</ParamField>
+
+#### `save(path, shallow=True, overwrite=True, include_conversation=False, include_runtime_state=False)`
+
+Write `to_dict(...)` to a JSON file, creating parent directories. Raises `FileExistsError` if the file exists and `overwrite=False`. Pair with `load()`.
+
+<ResponseField name="path" type="str">
+  The path written
+</ResponseField>
+
+#### `load(path, agent_registry=None, restore_runtime_state=False, **kwargs)` (classmethod)
+
+Read a file written by `save()`, `save_spec()` or `save_to_file()`, detecting which shape it holds. Raises `FileNotFoundError` if the file does not exist.
+
+<ParamField path="agent_registry" type="Optional[Dict[str, Agent]]" default="None">
+  Mapping from `agent_name` to live `Agent`. Required for a shallow spec (`ValueError` without it). Optional for a deep export; without it, deep-loaded nodes hold plain dicts instead of runnable agents.
+</ParamField>
+
+<ParamField path="restore_runtime_state" type="bool" default="False">
+  Deep exports only. Restore the saved compilation state.
+</ParamField>
+
+<ResponseField name="workflow" type="GraphWorkflow">
+  The reconstructed workflow
+</ResponseField>
+
 #### `to_json(fast=True, include_conversation=False, include_runtime_state=False)`
 
-Serialize the workflow to JSON.
+Serialize the workflow to a deep JSON export with agents embedded.
 
 <ParamField path="fast" type="bool" default="True">
-  Whether to use fast JSON serialization
+  Ignored; kept for backward compatibility
 </ParamField>
 
 <ParamField path="include_conversation" type="bool" default="False">
@@ -341,16 +401,20 @@ Serialize the workflow to JSON.
   JSON representation of the workflow
 </ResponseField>
 
-#### `from_json(json_str, restore_runtime_state=False)` (classmethod)
+#### `from_json(json_str, restore_runtime_state=False, agent_registry=None)` (classmethod)
 
-Deserialize a workflow from JSON.
+Deserialize a workflow from a deep JSON export. Nodes keep their exported IDs, so edges resolve. Raises `ValueError` if `json_str` is not valid JSON.
 
 <ParamField path="json_str" type="str" required>
-  JSON string representation of the workflow
+  JSON string produced by `to_json()`
 </ParamField>
 
 <ParamField path="restore_runtime_state" type="bool" default="False">
   Whether to restore runtime state
+</ParamField>
+
+<ParamField path="agent_registry" type="Optional[Dict[str, Agent]]" default="None">
+  Mapping from `agent_name` to live `Agent`. Nodes whose agent is not in the registry hold the exported agent dict, which cannot run.
 </ParamField>
 
 <ResponseField name="workflow" type="GraphWorkflow">
@@ -359,14 +423,14 @@ Deserialize a workflow from JSON.
 
 #### `save_to_file(filepath, include_conversation=False, include_runtime_state=False, overwrite=False)`
 
-Save the workflow to a JSON file.
+Save a deep export (agents embedded) to a JSON file. Appends `.json` when the path lacks it.
 
 <ParamField path="filepath" type="str" required>
   Path to save the JSON file
 </ParamField>
 
 <ParamField path="overwrite" type="bool" default="False">
-  Whether to overwrite existing files
+  Whether to overwrite an existing file. When `False`, an existing file raises `FileExistsError`.
 </ParamField>
 
 <ResponseField name="filepath" type="str">
@@ -375,7 +439,7 @@ Save the workflow to a JSON file.
 
 #### `load_from_file(filepath, restore_runtime_state=False)` (classmethod)
 
-Load a workflow from a JSON file.
+Load a workflow from a JSON file. Equivalent to `load(filepath, restore_runtime_state=...)` with no agent registry, so a deep export comes back with plain-dict agents. Use `load(path, agent_registry=...)` when you need a runnable workflow.
 
 <ParamField path="filepath" type="str" required>
   Path to the JSON file
@@ -540,10 +604,10 @@ results = workflow.run("Research AI trends in healthcare")
 
 ```python
 # Create multiple specialist agents
-technical = Agent(agent_name="Technical", llm=llm, system_prompt="Technical analysis")
-business = Agent(agent_name="Business", llm=llm, system_prompt="Business analysis")
-user_exp = Agent(agent_name="UX", llm=llm, system_prompt="User experience analysis")
-synthesizer = Agent(agent_name="Synthesizer", llm=llm, system_prompt="Synthesize all analyses")
+technical = Agent(agent_name="Technical", model_name="gpt-5.4-mini", system_prompt="Technical analysis")
+business = Agent(agent_name="Business", model_name="gpt-5.4-mini", system_prompt="Business analysis")
+user_exp = Agent(agent_name="UX", model_name="gpt-5.4-mini", system_prompt="User experience analysis")
+synthesizer = Agent(agent_name="Synthesizer", model_name="gpt-5.4", system_prompt="Synthesize all analyses")
 
 workflow = GraphWorkflow(name="Multi-Perspective")
 
@@ -570,13 +634,13 @@ results = workflow.run("Analyze AI chatbot implementation")
 
 ```python
 # Create a complex multi-stage workflow
-data_collector = Agent(agent_name="DataCollector", llm=llm)
-preprocessor = Agent(agent_name="Preprocessor", llm=llm)
-model_a = Agent(agent_name="ModelA", llm=llm)
-model_b = Agent(agent_name="ModelB", llm=llm)
-model_c = Agent(agent_name="ModelC", llm=llm)
-ensemble = Agent(agent_name="Ensemble", llm=llm)
-validator = Agent(agent_name="Validator", llm=llm)
+data_collector = Agent(agent_name="DataCollector", model_name="gpt-5.4-mini")
+preprocessor = Agent(agent_name="Preprocessor", model_name="gpt-5.4-mini")
+model_a = Agent(agent_name="ModelA", model_name="gpt-5.4-mini")
+model_b = Agent(agent_name="ModelB", model_name="gpt-5.4-mini")
+model_c = Agent(agent_name="ModelC", model_name="gpt-5.4-mini")
+ensemble = Agent(agent_name="Ensemble", model_name="gpt-5.4")
+validator = Agent(agent_name="Validator", model_name="gpt-5.4")
 
 workflow = GraphWorkflow(name="ML-Pipeline")
 
@@ -660,41 +724,39 @@ results = asyncio.run(run_workflow())
 
 ### Save and Load Workflows
 
-<Warning>
-**`save_to_file` / `load_from_file` do not currently round-trip.** `to_json()` writes each node's type as `str(node.type)`, which renders as `"NodeType.AGENT"`, while `from_json()` parses it with `NodeType(...)`, which only accepts the enum *value* `"agent"`. Every node is dropped during load, and the first edge then fails with `ValueError: Source node '...' does not exist in GraphWorkflow`.
-
-Use the topology-spec path instead, which is unaffected. It stores the graph shape only, so you supply the live agents on load:
+Agents hold live LLM clients, so a saved file can't recreate them. Save the topology and pass the live agents back in when you load:
 
 ```python
-import json
+# Topology only: each node stores its agent_name
+workflow.save("my_workflow.json")
 
-workflow.save_spec("my_workflow.json")
-
-spec = json.load(open("my_workflow.json"))
-loaded = GraphWorkflow.from_topology_spec(
-    spec,
-    {"alpha": alpha_agent, "beta": beta_agent},   # agent_name -> Agent
-)
-```
-</Warning>
-
-```python
-# Save workflow
-workflow.save_to_file(
+loaded_workflow = GraphWorkflow.load(
     "my_workflow.json",
-    include_conversation=True,
-    include_runtime_state=True
+    agent_registry={"Researcher": researcher, "Analyzer": analyzer, "Writer": writer},
 )
 
-# Load workflow
-loaded_workflow = GraphWorkflow.load_from_file(
-    "my_workflow.json",
-    restore_runtime_state=True
-)
-
-# Continue execution
 results = loaded_workflow.run("New task")
 ```
+
+A deep export also round-trips, with the same registry needed to make it runnable:
+
+```python
+workflow.save_to_file(
+    "my_workflow_full.json",
+    include_runtime_state=True,
+    overwrite=True,
+)
+
+loaded_workflow = GraphWorkflow.load(
+    "my_workflow_full.json",
+    agent_registry={"Researcher": researcher, "Analyzer": analyzer, "Writer": writer},
+    restore_runtime_state=True,
+)
+```
+
+<Warning>
+  `load_from_file()` takes no agent registry, so the workflow it returns holds the exported agent dicts rather than agents. Running it produces an `[ERROR]` output for every node. Use `load(path, agent_registry=...)` to get a runnable workflow.
+</Warning>
 
 ### Using Rustworkx Backend
 
@@ -770,11 +832,16 @@ print(text_viz)
 
 ### Node
 
+A node wraps an `Agent` (`NodeType.AGENT`) or a nested `GraphWorkflow` (`NodeType.SUBGRAPH`). When `id` is omitted, it defaults to the agent's `agent_name` or the workflow's `name`.
+
 ```python
 from swarms import Node, NodeType
 
 # Create node from agent
 node = Node.from_agent(agent)
+
+# Create node from a nested workflow
+sub_node = Node.from_subgraph(inner_workflow, node_id="research-stage")
 
 # Create node manually
 node = Node(
@@ -783,6 +850,9 @@ node = Node(
     agent=agent,
     metadata={"custom_key": "custom_value"}
 )
+
+# Prebuilt nodes go in through the constructor; add_node() takes the agent itself
+workflow = GraphWorkflow(nodes={node.id: node})
 ```
 
 ### Edge
@@ -804,9 +874,27 @@ edge = Edge(
 )
 ```
 
+### Nested workflows (subgraphs)
+
+Pass a `GraphWorkflow` to `add_node()` to run it as a single node. The inner workflow receives the outer node's prompt as its task, and its results are joined into one output for downstream nodes. `usage` and `to_spec()` include subgraphs.
+
+```python
+research = GraphWorkflow(name="ResearchStage")
+research.add_node(researcher)
+research.add_node(analyzer)
+research.add_edge("Researcher", "Analyzer")
+
+pipeline = GraphWorkflow(name="Pipeline")
+pipeline.add_node(research)  # node id "ResearchStage"
+pipeline.add_node(writer)
+pipeline.add_edge("ResearchStage", "Writer")
+
+results = pipeline.run("Research AI trends in healthcare")
+```
+
 ## Best Practices
 
-1. **Compilation**: Always compile workflows before execution for optimal performance
+1. **Compilation**: `run()` compiles on demand; call `compile()` yourself to surface validation warnings before the first run
 2. **Visualization**: Use `visualize()` to understand your workflow structure
 3. **Validation**: Validate workflows before production deployment
 4. **Entry/Exit Points**: Let the system auto-detect entry/exit points or set them explicitly
@@ -814,12 +902,13 @@ edge = Edge(
 6. **Error Handling**: Wrap execution in try-except blocks
 7. **Batching**: Use `add_nodes()` with appropriate batch sizes for many agents
 8. **Caching**: Enable `auto_compile` for multi-loop workflows
-9. **Save Progress**: Save complex workflows to JSON for reuse
+9. **Save Progress**: Save complex workflows with `save()` and reload them with `load(path, agent_registry=...)`
+10. **Cost Tracking**: Read `workflow.usage` after a run to see token spend across every node
 
 ## Performance Characteristics
 
 - **Parallel Execution**: Independent agents in the same layer run concurrently
-- **CPU Utilization**: Uses ~95% of available CPU cores
+- **Thread Pool**: One pool per run, sized to `max_parallel_nodes` (default ~95% of CPU cores) and capped at the widest layer
 - **Compilation**: Pre-computes execution plan, cached for multi-loop runs
 - **Memory**: Each agent maintains its own context
 - **Graph Backend**: Rustworkx is faster for large graphs (>100 nodes)

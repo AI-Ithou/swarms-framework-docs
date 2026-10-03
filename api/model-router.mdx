@@ -8,15 +8,18 @@ icon: "route"
 
 The `ModelRouter` is an intelligent routing system that automatically selects and executes AI models based on task requirements. It leverages a function-calling architecture to analyze tasks and recommend the optimal model and provider combination for each specific use case.
 
+Each step makes two LLM calls:
+
+1. A routing call to `gpt-4o` with `response_format=ModelOutput`. The reply is parsed into a `ModelOutput` that names the model, provider, rewritten task, `max_tokens`, `temperature`, and `system_prompt` to use.
+2. An execution call to `{provider}/{model}` through LiteLLM, using the settings from that reply.
+
 ## Key Features
 
 - Dynamic model selection based on task complexity and requirements
 - Multi-provider support (OpenAI, Anthropic, Google, etc.)
-- Concurrent and asynchronous execution capabilities
-- Batch processing with memory
-- Automatic error handling and retries
-- Provider-aware routing
-- Cost optimization
+- Sequential, batch, and thread-pool concurrent execution
+- Optional multi-loop refinement, where each step's output becomes the next step's task
+- OpenTelemetry tracing: each `run()` is a `ModelRouter.run` span, and `concurrent_run()` carries the tracing context into its worker threads (see [Telemetry](/deployment/telemetry))
 
 ## Installation
 
@@ -38,34 +41,51 @@ GOOGLE_API_KEY=your_google_api_key
 ## Attributes
 
 <ParamField path="system_prompt" type="str" default="model_router_system_prompt">
-  Custom prompt for guiding model selection behavior.
+  System prompt for the routing call. It replaces the built-in selection guidance, so describe the models you want the router to choose from. It does not reach the selected model; that model gets the `system_prompt` written in the routing reply.
 </ParamField>
 
 <ParamField path="max_tokens" type="int" default="4000">
-  Maximum token limit for model outputs.
+  Stored as `router.max_tokens` and shown in `repr()`. Neither LLM call reads it: the execution call uses the `max_tokens` from the routing reply.
 </ParamField>
 
 <ParamField path="temperature" type="float" default="0.5">
-  Control parameter for response randomness (0.0-1.0).
+  Temperature for the routing call. The execution call uses the `temperature` from the routing reply.
 </ParamField>
 
 <ParamField path="max_workers" type="int | str" default="10">
-  Maximum concurrent workers. Use `"auto"` for CPU count.
+  Thread count for `concurrent_run()`. Use `"auto"` for `os.cpu_count()`.
 </ParamField>
 
 <ParamField path="api_key" type="str" default="None">
-  API key for model access.
+  Accepted but unused. Set provider keys as environment variables instead.
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of refinement iterations.
+  Maximum number of steps per `run()`. Each step's output becomes the next step's task, and the loop stops early if a step returns its input unchanged.
 </ParamField>
+
+Extra positional and keyword arguments are accepted and ignored.
+
+## `ModelOutput`
+
+The schema the routing call must return. Import it from `swarms.structs.model_router`.
+
+```python
+class ModelOutput(BaseModel):
+    rationale: Optional[str]
+    model: Optional[str]
+    provider: Optional[str]
+    task: Optional[str]
+    max_tokens: Optional[int]
+    temperature: Optional[float]
+    system_prompt: Optional[str]
+```
 
 ## Methods
 
 ### step()
 
-Runs a single routing step: selects a model/provider for the task, executes it, and returns the output. `run()` calls this internally in a loop up to `max_loops` times.
+Runs a single routing step. It sends the task to the routing model, parses the JSON reply into a `ModelOutput`, prints the decision, then runs the rewritten task on `{provider}/{model}` and prints the output. `run()` calls this internally in a loop up to `max_loops` times.
 
 ```python
 def step(self, task: str) -> str
@@ -74,11 +94,13 @@ def step(self, task: str) -> str
 **Parameters:**
 - `task` (str): The task to be executed
 
-**Returns:** `str` - The result of the single routing step
+**Returns:** `str` - The selected model's output
+
+**Raises:** `pydantic.ValidationError` if the routing reply does not parse as a `ModelOutput`. Errors from the execution call propagate unchanged.
 
 ### run()
 
-Executes a single task through the model router with memory and refinement capabilities.
+Runs `step()` up to `max_loops` times, feeding each output back in as the next task. Recorded as a `ModelRouter.run` trace span when telemetry is enabled. Calling the router directly, `router(task)`, does the same thing.
 
 ```python
 def run(self, task: str) -> str
@@ -102,9 +124,11 @@ def batch_run(self, tasks: list) -> list
 
 **Returns:** `list` - List of results, one for each task
 
+**Raises:** `RuntimeError` wrapping the first failure.
+
 ### concurrent_run()
 
-Parallel execution of multiple tasks using thread pooling.
+Runs `run()` once per task on a thread pool of `max_workers` threads. The pool carries the caller's tracing context into each thread, so every task's span joins the caller's trace.
 
 ```python
 def concurrent_run(self, tasks: list) -> list
@@ -113,7 +137,9 @@ def concurrent_run(self, tasks: list) -> list
 **Parameters:**
 - `tasks` (list): List of task strings to be executed
 
-**Returns:** `list` - List of results from parallel execution
+**Returns:** `list` - Results in task order
+
+**Raises:** `RuntimeError` wrapping the first failure.
 
 ### async_run()
 
@@ -136,8 +162,7 @@ from swarms import ModelRouter
 router = ModelRouter()
 
 async def run_task(task: str):
-    # Offloads the blocking, synchronous run() call to a thread
-    # so it doesn't block the event loop.
+    # Keeps the blocking run() call off the event loop.
     return await asyncio.to_thread(router.run, task)
 
 result = asyncio.run(run_task("Analyze the sentiment in this feedback"))
@@ -247,8 +272,7 @@ import pandas as pd
 class FinancialAnalysisSystem:
     def __init__(self):
         self.router = ModelRouter(
-            temperature=0.3,  # Lower temperature for more deterministic outputs
-            max_tokens=8000,  # Higher token limit for detailed analysis
+            temperature=0.3,  # Applies to the routing call
             max_loops=2  # Allow for refinement iteration
         )
 
@@ -302,12 +326,12 @@ class MedicalDataProcessor:
     def __init__(self):
         self.router = ModelRouter(
             max_workers="auto",  # Automatic worker scaling
-            temperature=0.2,     # Conservative temperature for medical analysis
-            system_prompt="""You are a specialized medical data analyzer focused on:
-            1. Clinical terminology interpretation
-            2. Patient data analysis
-            3. Treatment recommendation review
-            4. Medical research synthesis"""
+            temperature=0.2,     # Applies to the routing call
+            system_prompt="""You route medical data analysis tasks to a model.
+            Choose provider "openai" with model "gpt-5.4" for structured record review,
+            or provider "anthropic" with model "claude-sonnet-4-6" for long clinical reasoning.
+            Write a system prompt for the chosen model that focuses on clinical terminology,
+            medication interactions, and lab interpretation."""
         )
 
     async def process_patient_records(self, records: List[Dict]) -> List[Dict]:
@@ -330,8 +354,7 @@ class MedicalDataProcessor:
             """
             analysis_tasks.append(task)
 
-        # async_run() is currently broken -- offload the synchronous
-        # run() to a thread instead (see the Warning under async_run()).
+        # async_run() is broken, so offload the synchronous run() to a thread.
         results = await asyncio.gather(*[
             asyncio.to_thread(self.router.run, task) for task in analysis_tasks
         ])
@@ -410,13 +433,23 @@ analyses = pipeline.process_documents(documents)
 
 ## Available Models and Use Cases
 
-| Model | Provider | Optimal Use Cases | Characteristics |
-|-------|----------|-------------------|-----------------|
-| gpt-4-turbo | OpenAI | Complex reasoning, Code generation, Creative writing | High accuracy, Latest knowledge cutoff |
-| claude-3-opus | Anthropic | Research analysis, Technical documentation, Long-form content | Strong reasoning, Detailed outputs |
-| gemini-pro | Google | Multimodal tasks, Code generation, Technical analysis | Fast inference, Strong coding abilities |
-| mistral-large | Mistral | General tasks, Content generation, Classification | Open source, Good price/performance |
-| deepseek-reasoner | DeepSeek | Mathematical analysis, Logic problems, Scientific computing | Specialized reasoning capabilities |
+The default routing prompt embeds these recommendations. The routing model can still name any model.
+
+| Model | Provider | Best for |
+|-------|----------|----------|
+| gpt-5.4 | openai | Simple queries, basic text generation, quick responses |
+| gpt-4-turbo | openai | Complex tasks, up-to-date knowledge, long context |
+| gpt-3.5-turbo | openai | Chat applications, content generation, basic assistance |
+| o3-mini | groq | Basic completion, simple classification, constrained environments |
+| deepseek-reasoner | deepseek | Complex problem solving, logical reasoning, mathematical analysis |
+| claude-3-5-sonnet | anthropic | Creative writing, detailed analysis, nuanced responses |
+| claude-3-opus | anthropic | Research, complex analysis, technical writing, code generation |
+| gemini-pro | google | Multimodal tasks, code generation, creative content |
+| mistral-large | mistral | General purpose tasks, code assistance, content generation |
+
+<Warning>
+  Most of these are older model names. If your provider no longer serves the model the router picks, the execution call fails. Pass a `system_prompt` that lists the models you can call.
+</Warning>
 
 ## Provider Capabilities
 
@@ -432,9 +465,8 @@ analyses = pipeline.process_documents(documents)
 ## Performance Optimization Tips
 
 1. **Token Management**
-   - Set appropriate `max_tokens` based on task complexity
-   - Monitor token usage for cost optimization
-   - Use streaming for long outputs
+   - The routing reply sets `max_tokens` for each execution call, so ask for a limit in your `system_prompt` if you need one
+   - Raise `max_loops` only when refinement is worth the extra calls; each step makes two LLM calls
 
 2. **Concurrency Settings**
    - Adjust `max_workers` based on system resources
@@ -447,7 +479,7 @@ analyses = pipeline.process_documents(documents)
    - Mid-range (0.4-0.6) for balanced outputs
 
 4. **System Prompts**
-   - Customize for specific domains
+   - A custom `system_prompt` replaces the routing guidance, so list the models and providers you want chosen
    - Include relevant context
    - Define clear output formats
 

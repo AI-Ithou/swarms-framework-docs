@@ -23,6 +23,9 @@ The `GraphWorkflow` orchestrates agents using a Directed Acyclic Graph (DAG) str
 - Graph visualization (with Graphviz)
 - Auto-compilation for performance
 - Graph validation and cycle detection
+- Nested workflows: a `GraphWorkflow` can run as a single node
+- Per-layer checkpoints for resuming interrupted runs
+- Token usage summed across every node and subgraph
 
 ## Basic Example
 
@@ -222,7 +225,7 @@ workflow = GraphWorkflow.from_spec(
 </ParamField>
 
 <ParamField path="checkpoint_dir" type="str">
-  Directory used to persist run checkpoints for later inspection/resumption.
+  Directory for per-layer checkpoints. Rerunning the same task skips every layer that already has one. See [Checkpoints](#checkpoints).
 </ParamField>
 
 <ParamField path="on_node_complete" type="Callable[[str, Any], None]">
@@ -237,7 +240,7 @@ workflow = GraphWorkflow.from_spec(
 
 ### add_node()
 
-Add an agent to the graph:
+Add an agent to the graph. The node ID is the agent's `agent_name`, and a duplicate ID raises `ValueError`:
 
 ```python
 workflow.add_node(
@@ -245,6 +248,8 @@ workflow.add_node(
     metadata={"priority": "high"}  # Optional metadata
 )
 ```
+
+`add_node()` also accepts a whole `GraphWorkflow`, which becomes a subgraph node. Pass the agent or workflow itself, not a `Node` object.
 
 ### add_nodes()
 
@@ -289,8 +294,10 @@ workflow = GraphWorkflow(auto_compile=True)
 Compilation:
 - Auto-sets entry/exit points
 - Computes topological layers
-- Caches for performance
-- Validates graph structure
+- Caches for performance until the graph changes
+- Validates graph structure, logging problems without raising
+
+`run()` compiles automatically when needed, so calling `compile()` yourself is optional.
 
 ### run()
 
@@ -316,7 +323,53 @@ result = workflow.run(
 )
 ```
 
-Return shape: with `max_loops == 1` (the default), `run()` returns a `Dict[str, Any]` keyed by node ID. With `max_loops > 1`, it returns per-loop results keyed as `{node_id}_loop_{loop_number}` plus the final loop's results under the plain `node_id` keys.
+Return shape: with `max_loops == 1` (the default), `run()` returns a `Dict[str, Any]` with every node's output, keyed by node ID. With `max_loops > 1`, it returns per-loop results keyed as `{node_id}_loop_{loop_number}` plus the final loop's results under the plain `node_id` keys.
+
+A node that raises does not stop the run. Its output becomes an `"[ERROR] Agent <name> failed: ..."` string and downstream nodes still execute.
+
+## Nested workflows
+
+Add a `GraphWorkflow` as a node to reuse a whole sub-pipeline as one step. Its node ID is the inner workflow's `name`. The inner workflow receives the outer node's prompt as its task, and its results are joined into a single output for downstream nodes.
+
+```python
+research = GraphWorkflow(name="ResearchStage")
+research.add_node(data_collector)
+research.add_node(processor)
+research.add_edge("DataCollector", "Processor")
+
+pipeline = GraphWorkflow(name="Pipeline")
+pipeline.add_node(research)
+pipeline.add_node(analyzer)
+pipeline.add_edge("ResearchStage", "Analyzer")
+
+result = pipeline.run("Process Q4 sales data")
+```
+
+## Token usage
+
+`workflow.usage` sums provider token usage over every agent in the graph, subgraphs included. An agent that backs several nodes is counted once. Totals are lifetime totals, so they grow across runs. See [Token usage](/agents/token-usage).
+
+```python
+result = workflow.run("Process Q4 sales data")
+print(workflow.usage)
+# {"input_tokens": ..., "output_tokens": ..., "cached_tokens": ..., "reasoning_tokens": ..., "total_tokens": ...}
+```
+
+## Checkpoints
+
+Set `checkpoint_dir` to write each layer's outputs to disk as it finishes. If a run crashes, run the same task again and completed layers are restored instead of re-executed:
+
+```python
+workflow = GraphWorkflow(name="Data-Pipeline", checkpoint_dir="./checkpoints")
+# ... add nodes and edges ...
+
+result = workflow.run("Process Q4 sales data")
+
+# Delete this task's checkpoint files once you no longer need them
+workflow.clear_checkpoints("Process Q4 sales data")
+```
+
+Checkpoints are keyed on the exact task string, so a different task starts from scratch.
 
 ## Use Cases
 
@@ -468,16 +521,17 @@ Parallel execution within layers using ThreadPoolExecutor.
 
 ### Cycle Detection
 
-`compile()` never raises on a cycle by itself — internally it calls `validate(auto_fix=False, raise_on_error=False)` and only logs a warning. To turn cycle detection into an exception, call `validate(raise_on_error=True)` explicitly: a detected cycle counts as a "serious warning" that marks the workflow invalid (unless `auto_fix=True`), so `raise_on_error=True` will raise `ValueError` for it.
+`compile()` never raises on a cycle by itself. It runs the same structural checks as `validate()` and only logs a warning; the cyclic nodes are placed in a final layer. To turn cycle detection into an exception, call `validate(raise_on_error=True)` explicitly: a detected cycle counts as a "serious warning" that marks the workflow invalid (unless `auto_fix=True`), so `raise_on_error=True` will raise `ValueError` for it.
 
 ```python
 workflow.add_edge("A", "B")
 workflow.add_edge("B", "C")
 workflow.add_edge("C", "A")  # Creates cycle
-workflow.compile()  # succeeds silently — cycles only warn here
+workflow.compile()  # succeeds; cycles only warn here
 
 result = workflow.validate()
-if result["cycles"]:
+# "cycles" is present only when at least one cycle was found
+if result.get("cycles"):
     print(f"Cycle(s) detected: {result['cycles']}")
 
 try:
@@ -513,8 +567,10 @@ result1 = workflow.run("Task 1")
 result2 = workflow.run("Task 2")
 result3 = workflow.run("Task 3")
 
-# Manual recompilation (if graph changed)
-workflow.compile()
+# Changing the graph invalidates the cache; the next run recompiles
+workflow.add_node(reporter)
+workflow.add_edge("Analyzer", "Reporter")
+result4 = workflow.run("Task 4")
 ```
 
 ### Concurrent Node Addition
@@ -535,13 +591,13 @@ workflow.add_nodes(
 
 1. **Clear Dependencies**: Only add edges for true dependencies
 2. **Maximize Parallelism**: Let independent nodes run concurrently
-3. **Compilation**: Always compile before running
+3. **Compilation**: Call `compile()` early to surface validation warnings; `run()` compiles on its own otherwise
 4. **Entry/Exit Points**: Let auto-detection work unless specific control needed
 5. **Backend Choice**: Use Rustworkx for large graphs (>100 nodes)
 
-<Warning>
-  Graph compilation is cached - manually recompile if graph structure changes after initial compilation
-</Warning>
+<Note>
+  Graph compilation is cached. Adding nodes or edges, or setting entry or end points, invalidates the cache, and the next `run()` recompiles automatically.
+</Note>
 
 ## Error Handling
 
@@ -553,9 +609,9 @@ except ValueError as e:
     # Source or target node doesn't exist
 
 try:
-    workflow.compile()
-except Exception as e:
-    print(f"Compilation failed: {e}")
+    workflow.validate(raise_on_error=True)
+except ValueError as e:
+    print(f"Invalid workflow: {e}")
     # Cycle detected or invalid graph structure
 ```
 

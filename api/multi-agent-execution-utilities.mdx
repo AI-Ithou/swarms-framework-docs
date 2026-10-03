@@ -8,6 +8,12 @@ icon: "gears"
 
 The `multi_agent_exec` module provides a comprehensive set of utility functions for running multiple agents using various execution strategies. It includes synchronous and asynchronous execution methods, concurrent batch processing, and utility functions for information retrieval.
 
+Every function on this page is exported from the top-level `swarms` package, so `from swarms import run_agents_concurrently` works. They also remain importable from `swarms.structs.multi_agent_exec` and `swarms.structs.batch_agent_execution`.
+
+<Note>
+These helpers call `agent.run()` on the agents you pass and do not reset their conversations. Running the same `Agent` instance twice, or in two threads at once, carries one task's history into the next. Pass distinct agent instances when tasks must not share context.
+</Note>
+
 ## Installation
 
 ```bash
@@ -23,8 +29,8 @@ pip install -U swarms
 | `run_agents_concurrently_async` | Concurrent | Runs multiple agents concurrently using asyncio |
 | `run_agents_concurrently` | Concurrent | Optimized concurrent runner with image support and flexible output formats |
 | `run_agents_concurrently_multiprocess` | Concurrent | Manages agents concurrently in batches with optimized performance |
-| `batched_grid_agent_execution` | Batched & Grid | Runs multiple agents with different tasks concurrently |
-| `batch_agent_execution` | Batched & Grid | Runs a 1:1 list of agents against a parallel list of tasks (from `swarms.structs.batch_agent_execution`) |
+| `batched_grid_agent_execution` | Batched & Grid | Runs `agents[i]` on `tasks[i]` concurrently |
+| `batch_agent_execution` | Batched & Grid | Runs `agents[i]` on `tasks[i]` (and optional `imgs[i]`) concurrently (from `swarms.structs.batch_agent_execution`) |
 | `run_agents_with_different_tasks` | Batched & Grid | Runs agents with different tasks concurrently in batches |
 | `get_swarms_info` | Utility | Fetches and formats information about available swarms |
 | `get_agents_info` | Utility | Fetches and formats information about available agents |
@@ -48,8 +54,7 @@ def run_single_agent(agent: AgentType, task: str, *args, **kwargs) -> Any
 **Returns:** Agent execution result
 
 ```python
-from swarms import Agent
-from swarms.structs.multi_agent_exec import run_single_agent
+from swarms import Agent, run_single_agent
 
 agent = Agent(
     agent_name="Financial-Analyst",
@@ -74,12 +79,11 @@ async def run_agent_async(agent: AgentType, task: str) -> Any
 - `agent` (AgentType): Agent instance to run
 - `task` (str): Task string to execute
 
-**Returns:** Agent execution result
+**Returns:** Agent execution result. The blocking `agent.run()` call runs in a worker thread via `asyncio.to_thread`, so it does not block the event loop
 
 ```python
 import asyncio
-from swarms import Agent
-from swarms.structs.multi_agent_exec import run_agent_async
+from swarms import Agent, run_agent_async
 
 async def main():
     agent = Agent(
@@ -112,12 +116,13 @@ async def run_agents_concurrently_async(
 - `agents` (List[AgentType]): List of Agent instances to run concurrently
 - `task` (str): Task string to execute by all agents
 
-**Returns:** List of outputs from each agent
+**Returns:** List of outputs from each agent, in input order
+
+**Raises:** The first exception raised by any agent. Results from the other agents are not returned in that case
 
 ```python
 import asyncio
-from swarms import Agent
-from swarms.structs.multi_agent_exec import run_agents_concurrently_async
+from swarms import Agent, run_agents_concurrently_async
 
 async def main():
     agents = [
@@ -156,17 +161,18 @@ def run_agents_concurrently(
 **Parameters:**
 - `agents` (List[AgentType]): List of Agent instances to run concurrently
 - `task` (str): Task string to execute
-- `img` (Optional[str]): Optional image data to pass to agent `run()` if supported
+- `img` (Optional[str]): Optional image data to pass to agent `run()` if supported. Only passed when not `None`
 - `max_workers` (Optional[int]): Maximum number of threads in the executor. Defaults to 95% of CPU cores
-- `return_agent_output_dict` (bool): If True, returns a dict mapping agent names to outputs
+- `return_agent_output_dict` (bool): If True, returns a dict mapping agent names to outputs. Keys use `agent_name`, then `name`, then `str(agent)`
 
 **Returns:**
 - If `return_agent_output_dict=False`: List of outputs from each agent in **input order**, so `results[i]` is `agents[i]`'s (exceptions included if agents fail)
 - If `return_agent_output_dict=True`: Dictionary mapping agent names to outputs, preserving agent input order
 
+The executor carries the caller's OpenTelemetry context into each worker thread, so agent spans nest under the span that called this function.
+
 ```python
-from swarms import Agent
-from swarms.structs.multi_agent_exec import run_agents_concurrently
+from swarms import Agent, run_agents_concurrently
 
 # Create multiple agents
 agents = [
@@ -207,7 +213,7 @@ for agent_name, result in results_dict.items():
 
 ### run_agents_concurrently_multiprocess()
 
-Manages and runs multiple agents concurrently in batches with optimized performance.
+Runs multiple agents on the same task in batches. Despite the name, it does not start processes: each batch runs through `run_agents_concurrently_async` on a fresh event loop, and batches run one after another.
 
 ```python
 def run_agents_concurrently_multiprocess(
@@ -222,12 +228,15 @@ def run_agents_concurrently_multiprocess(
 - `task` (str): Task string to execute by all agents
 - `batch_size` (int): Number of agents to run in parallel in each batch. Defaults to CPU count
 
-**Returns:** List of outputs from each agent
+**Returns:** List of outputs from each agent, in input order
+
+<Warning>
+It creates and runs its own event loop, so call it from synchronous code. Inside a running event loop, `await run_agents_concurrently_async(...)` instead.
+</Warning>
 
 ```python
 import os
-from swarms import Agent
-from swarms.structs.multi_agent_exec import run_agents_concurrently_multiprocess
+from swarms import Agent, run_agents_concurrently_multiprocess
 
 agents = [
     Agent(
@@ -250,7 +259,7 @@ print(f"Completed {len(results)} agent executions")
 
 ### batched_grid_agent_execution()
 
-Runs multiple agents with different tasks concurrently using batched grid execution.
+Runs `agents[i]` on `tasks[i]` for every `i`, concurrently in a thread pool.
 
 ```python
 def batched_grid_agent_execution(
@@ -263,15 +272,14 @@ def batched_grid_agent_execution(
 **Parameters:**
 - `agents` (List[AgentType]): List of agent instances
 - `tasks` (List[str]): List of tasks, one for each agent
-- `max_workers` (int): Maximum number of threads to use. Defaults to 90% of CPU cores
+- `max_workers` (int): Maximum number of threads to use. Defaults to 95% of CPU cores
 
-**Returns:** List of results from each agent
+**Returns:** List of results in input order, so `results[i]` is `agents[i]`'s. A failed agent's slot holds the exception it raised
 
 **Raises:** `ValueError` if the number of agents doesn't match the number of tasks
 
 ```python
-from swarms import Agent
-from swarms.structs.multi_agent_exec import batched_grid_agent_execution
+from swarms import Agent, batched_grid_agent_execution
 
 agents = [
     Agent(
@@ -309,37 +317,29 @@ for i, result in enumerate(results):
 
 ### batch_agent_execution()
 
-<Warning>
-**Currently broken — every call raises.** `batch_agent_execution` builds its future map from `zip(agents, tasks, imgs)` while `imgs` defaults to `None`, so it fails with `TypeError: zip argument #3 must support iteration` before any agent runs. It also stores 3-tuples but unpacks only two values when collecting results.
-
-Use [`run_agents_with_different_tasks`](#run-agents-with-different-tasks) for the same 1:1 agent-to-task pairing until this is fixed.
-</Warning>
-
-
-Runs a list of agents on a parallel list of tasks. Each `agents[i]` runs `tasks[i]` — unlike `batched_grid_agent_execution` (which runs every agent on every task), pairings are 1:1.
+Runs a list of agents on a parallel list of tasks, with an optional parallel list of images. Each `agents[i]` runs `tasks[i]`. Unlike `batched_grid_agent_execution`, it accepts plain callables and returns `None` for a failed slot instead of the exception.
 
 ```python
 def batch_agent_execution(
     agents: List[Union[Agent, Callable]],
-    tasks: List[str] = None,
-    imgs: List[str] = None,
+    tasks: Optional[List[str]] = None,
+    imgs: Optional[List[str]] = None,
     max_workers: int = max(1, int(os.cpu_count() * 0.9)),
-) -> List[Any]
+)
 ```
 
 **Parameters:**
-- `agents` (List[Agent | Callable]): Agents to run.
-- `tasks` (List[str]): One task per agent. Must have the same length as `agents`.
-- `imgs` (List[str]): One optional image input per agent. Must be the same length as `agents` when provided.
+- `agents` (List[Agent | Callable]): Agents to run. An object with a `run` method is called as `agent.run(task, img)`; any other callable is called as `agent(task, img)`.
+- `tasks` (List[str]): One task per agent. Must have the same length as `agents`. Required in practice: passing `None` fails.
+- `imgs` (List[str], optional): One image input per agent. Must be the same length as `agents` when provided. When `None`, every call receives `img=None`.
 - `max_workers` (int): Thread pool size. Defaults to ~90% of CPU cores.
 
-**Returns:** List of results in the order the input pairings were submitted; failed tasks yield `None` in that slot.
+**Returns:** List of results in agent order, so `results[i]` is `agents[i]`'s. A failed call is logged and leaves `None` in its slot.
 
-**Raises:** `BatchAgentExecutionError` wrapping any internal failure. Mismatched `len(agents)` vs `len(tasks)` is wrapped from the inner `ValueError`.
+**Raises:** `BatchAgentExecutionError` wrapping any setup failure, including the `ValueError` for mismatched `agents`/`tasks` or `agents`/`imgs` lengths.
 
 ```python
-from swarms import Agent
-from swarms.structs.batch_agent_execution import batch_agent_execution
+from swarms import Agent, batch_agent_execution
 
 agents = [
     Agent(agent_name="Summarizer", model_name="claude-sonnet-4-6", max_loops=1),
@@ -353,12 +353,12 @@ tasks = [
     "Classify this review as positive, negative, or neutral: 'Loved it!'",
 ]
 
-results = batch_agent_execution(agents=agents, tasks=tasks, imgs=[None, None, None])
+results = batch_agent_execution(agents=agents, tasks=tasks)
 for agent, result in zip(agents, results):
     print(f"{agent.agent_name}: {result}")
 ```
 
-Pair this with `run_agents_concurrently` (every agent runs the same task) and `batched_grid_agent_execution` (every agent runs every task) to cover the three common shapes of "run a bunch of agents".
+Use `run_agents_concurrently` when every agent runs the same task, and `batch_agent_execution`, `batched_grid_agent_execution` or `run_agents_with_different_tasks` when each agent gets its own task.
 
 ### run_agents_with_different_tasks()
 
@@ -374,14 +374,13 @@ def run_agents_with_different_tasks(
 
 **Parameters:**
 - `agent_task_pairs` (List[tuple[AgentType, str]]): List of (agent, task) tuples
-- `batch_size` (int): Number of agents to run in parallel in each batch. Default: 10
-- `max_workers` (int): Maximum number of threads
+- `batch_size` (int): Number of agents to run in parallel in each batch. Batches run one after another. Default: 10
+- `max_workers` (int): Maximum number of threads per batch. Defaults to 95% of CPU cores
 
-**Returns:** List of outputs from each agent, in the same order as input pairs
+**Returns:** List of outputs from each agent, in the same order as input pairs. A failed agent's slot holds the exception it raised. An empty input returns `[]`
 
 ```python
-from swarms import Agent
-from swarms.structs.multi_agent_exec import run_agents_with_different_tasks
+from swarms import Agent, run_agents_with_different_tasks
 
 # Create agents
 agents = [
@@ -432,10 +431,10 @@ def get_swarms_info(swarms: List[Callable]) -> str
 **Parameters:**
 - `swarms` (List[Callable]): List of swarm objects to get information about
 
-**Returns:** Formatted string containing names and descriptions of all swarms
+**Returns:** Formatted string with each swarm's `name`, `description`, agent count and `swarm_type`. Every swarm must have those four attributes. Returns `"No swarms currently available in the system."` for an empty list
 
 ```python
-from swarms.structs.multi_agent_exec import get_swarms_info
+from swarms import get_swarms_info
 
 swarms = [
     # Your swarm objects here
@@ -468,11 +467,10 @@ def get_agents_info(
 - `agents` (List[Union[Agent, Callable]]): List of agent objects to get information about
 - `team_name` (str, optional): Optional team name to display
 
-**Returns:** Formatted string containing names and descriptions of all agents
+**Returns:** Formatted string with each agent's `agent_name`, `agent_description`, `role`, `model_name` and `max_loops`. Returns `"No agents currently available in the system."` for an empty list
 
 ```python
-from swarms import Agent
-from swarms.structs.multi_agent_exec import get_agents_info
+from swarms import Agent, get_agents_info
 
 agents = [
     Agent(
@@ -498,12 +496,12 @@ print(info)
 ## Advanced Multi-Agent Workflow Example
 
 ```python
-from swarms import Agent
-from swarms.structs.multi_agent_exec import (
+from swarms import (
+    Agent,
+    batched_grid_agent_execution,
+    get_agents_info,
     run_agents_concurrently,
     run_agents_with_different_tasks,
-    batched_grid_agent_execution,
-    get_agents_info
 )
 
 # Create specialized agents
@@ -582,8 +580,7 @@ grid_results = batched_grid_agent_execution(grid_agents, grid_tasks, max_workers
 ## Error Handling and Best Practices
 
 ```python
-from swarms import Agent
-from swarms.structs.multi_agent_exec import run_agents_concurrently
+from swarms import Agent, run_agents_concurrently
 import logging
 
 # Set up logging
@@ -620,13 +617,13 @@ except Exception as e:
 
 | Technique | Best Use Case / Description |
 |-----------|---------------------------|
-| **ThreadPoolExecutor** | Best for CPU-bound tasks with moderate I/O, supports image processing and flexible output formats |
+| **ThreadPoolExecutor** | Best for I/O-bound work such as LLM calls, supports image processing and flexible output formats |
 | **Batch Processing** | Prevents system overload with large numbers of agents, maintains order with grid execution |
 | **Resource Monitoring** | Adjust worker counts based on system capabilities (defaults to 95% of CPU cores) |
 | **Async/Await** | Use async functions for better concurrency control and platform optimizations |
 | **Image Support** | Pass image data to agents that support multimodal processing for enhanced capabilities |
 | **Dictionary Output** | Use `return_agent_output_dict=True` for structured results with agent name mapping |
-| **Error Handling** | All functions include comprehensive exception handling with graceful fallbacks |
+| **Error Handling** | The thread-pool functions return a failed agent's exception (or `None` for `batch_agent_execution`) in its slot. `run_single_agent`, `run_agent_async`, `run_agents_concurrently_async` and `run_agents_concurrently_multiprocess` propagate the exception |
 
 ## Best Practices
 

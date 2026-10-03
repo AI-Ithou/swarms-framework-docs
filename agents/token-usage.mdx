@@ -1,0 +1,293 @@
+---
+title: 'Token Usage'
+description: 'Read the provider-reported token counts for an agent or a whole swarm, and estimate the size of the next request'
+icon: 'coins'
+---
+
+Swarms gives you two token numbers for an agent:
+
+- `agent.usage` is what the provider billed. It sums the token counts the provider reports on every call the agent has made.
+- `agent.input_tokens` is an estimate of the next request. It counts what the agent is about to send, before you run it.
+
+`SwarmRouter`, `GraphWorkflow`, `HeavySwarm` and `TreeOfThoughts` expose a `usage` property with the same keys, summed over the agents they run.
+
+## agent.usage
+
+```python
+from swarms import Agent
+
+agent = Agent(
+    agent_name="Usage-Demo",
+    system_prompt="You answer in one short paragraph.",
+    model_name="gpt-5.4",
+    max_loops=1,
+)
+
+print(agent.usage)  # all zeros before the first call
+
+agent.run("Explain what a token is, for someone new to language models.")
+print(agent.usage)
+# {'input_tokens': ..., 'output_tokens': ..., 'cached_tokens': ...,
+#  'reasoning_tokens': ..., 'total_tokens': ...}
+```
+
+### Fields
+
+`agent.usage` returns a new dict on every access, so changing it does not change the agent's totals.
+
+<ResponseField name="input_tokens" type="int">
+  Prompt tokens, from the provider's `prompt_tokens`.
+</ResponseField>
+
+<ResponseField name="output_tokens" type="int">
+  Completion tokens, from the provider's `completion_tokens`.
+</ResponseField>
+
+<ResponseField name="cached_tokens" type="int">
+  The part of `input_tokens` the provider served from its prompt cache, from `prompt_tokens_details.cached_tokens`. It is already included in `input_tokens`, not added to it. See [Prompt Caching](/agents/prompt-caching#verifying-cache-hits).
+</ResponseField>
+
+<ResponseField name="reasoning_tokens" type="int">
+  The part of `output_tokens` the model spent on hidden reasoning, from `completion_tokens_details.reasoning_tokens`. It is already included in `output_tokens`.
+</ResponseField>
+
+<ResponseField name="total_tokens" type="int">
+  The provider's `total_tokens`, or `input_tokens + output_tokens` when the provider leaves it out.
+</ResponseField>
+
+<Note>
+  LiteLLM reports every provider in OpenAI's usage shape, so the keys are the same for OpenAI, Anthropic and the rest. A breakdown the provider does not report counts as `0`, which means unknown, not zero.
+</Note>
+
+### What is counted
+
+Every completion the agent's own model client makes adds to the total:
+
+- Every loop of `run()`, including turns that only call tools.
+- The tool-summary call after a tool runs (`tool_call_summary=True`, the default) and the summary after MCP tool calls.
+- The plan, execute and summary calls of `max_loops="auto"`, and the planning call of `plan_enabled=True`.
+- Calls made after switching to a fallback model. The total lives on the agent, so rebuilding the model client does not reset it.
+- Streamed calls. Swarms asks the provider to end the stream with a usage chunk and records it when the stream has been consumed. `run()` consumes its own streams; with `run_stream()` and `arun_stream()` the total updates once you have read every token.
+
+A response without a usage block, such as a failed request, adds nothing.
+
+Calls made by other agents are not counted, even when this agent started them. Sub-agents created in autonomous mode and agents reached through `handoffs` keep their own `usage`. Sum them yourself:
+
+```python
+sub_agents = [entry["agent"] for entry in getattr(agent, "sub_agents", {}).values()]
+total = agent.usage["total_tokens"] + sum(a.usage["total_tokens"] for a in sub_agents)
+```
+
+If you pass your own `LiteLLM` instance as `llm`, the agent sets its `usage_hook` so its calls land in `agent.usage` too, unless you set a hook yourself.
+
+### When it resets
+
+Never. `agent.usage` is a lifetime total for the agent instance: it keeps growing across runs and there is no reset method. `save()` and `load()` do not store it, so a loaded agent starts from zero. To measure one run, snapshot before and after:
+
+```python
+before = agent.usage
+agent.run("Now explain a context window, the same way.")
+after = agent.usage
+
+this_run = {key: after[key] - before[key] for key in after}
+print(this_run)
+```
+
+<Tip>
+  Read `agent.usage`, not `agent.llm.usage`. The model client keeps its own counter, but the agent replaces the client when it switches to a fallback model or loads tools on demand, and the new client starts from zero.
+</Tip>
+
+### Estimate cost
+
+Multiply by your provider's rates. Cached input is usually billed at a lower rate, so price it separately:
+
+```python
+# $ per 1M tokens; use your provider's price list
+INPUT_PRICE = 2.50
+CACHED_INPUT_PRICE = 1.25
+OUTPUT_PRICE = 10.00
+
+
+def cost(usage: dict) -> float:
+    """Dollar cost of a usage dict at the rates above."""
+    uncached = usage["input_tokens"] - usage["cached_tokens"]
+    return (
+        uncached * INPUT_PRICE
+        + usage["cached_tokens"] * CACHED_INPUT_PRICE
+        + usage["output_tokens"] * OUTPUT_PRICE
+    ) / 1_000_000
+
+
+print(f"${cost(agent.usage):.5f}")
+```
+
+### Tool loops
+
+Each loop that calls a tool makes two provider calls, the tool call and the summary of its result. Both are counted:
+
+```python
+from swarms import Agent
+
+
+def word_count(text: str) -> int:
+    """Count the words in a piece of text.
+
+    Args:
+        text: The text to count.
+    """
+    return len(text.split())
+
+
+tool_agent = Agent(
+    agent_name="Usage-Tool-Demo",
+    system_prompt="Use the word_count tool when asked about length.",
+    model_name="gpt-5.4",
+    tools=[word_count],
+    max_loops=3,
+)
+
+tool_agent.run(
+    "How many words are in this sentence: 'The quick brown fox jumps "
+    "over the lazy dog'? Then tell me whether that is a long sentence."
+)
+print(tool_agent.usage)
+```
+
+## agent.input_tokens
+
+`agent.input_tokens` counts the tokens the agent's next request would carry, using its model's tokenizer. Use it to see how full the context window is before a run:
+
+```python
+from swarms import Agent
+
+agent = Agent(agent_name="Window-Check", model_name="gpt-5.4", max_loops=1)
+agent.run("Summarize the plot of Hamlet in five sentences.")
+
+used = agent.input_tokens
+print(f"{used} of {agent.context_length} tokens ({used / agent.context_length:.1%})")
+```
+
+It covers the system prompt, the whole conversation in `agent.short_memory`, and the tool schemas in `agent.tools_list_dictionary`. It does not cover text added only at request time, such as the Agent Skills section or MCP tool schemas.
+
+<Note>
+  `input_tokens` is an estimate. The conversation is counted as rendered text, with role labels and timestamps, so it lands a little above what the provider bills for the same content. It makes no provider call and is computed fresh on every access. For billed numbers, use `usage`.
+</Note>
+
+## Usage across a swarm
+
+Every structure below returns a new dict with the same five keys, built by adding up `Agent.usage`. Because agent totals are lifetime totals, the structure totals grow across runs too, and an agent shared with another workflow contributes what it spent there as well. Snapshot before and after a run to isolate it.
+
+### SwarmRouter.usage
+
+`router.usage` sums `Agent.usage` over the `agents` you passed in, plus every `Agent` that a swarm the router has built holds as an attribute, directly or in a list or tuple. That covers agents the swarm creates for itself, such as a `HierarchicalSwarm` director. Each agent is counted once.
+
+```python
+from swarms import Agent, SwarmRouter
+
+agents = [
+    Agent(agent_name="Researcher", system_prompt="Gather the key facts. Be brief.", model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Analyst", system_prompt="Weigh the facts you were given. Be brief.", model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Writer", system_prompt="Write a three-sentence brief from the analysis.", model_name="gpt-5.4", max_loops=1),
+]
+
+router = SwarmRouter(
+    name="usage-hierarchical",
+    agents=agents,
+    swarm_type="HierarchicalSwarm",
+    max_loops=1,
+)
+router.run("Should a small team adopt a monorepo? Give a recommendation.")
+
+workers = sum(agent.usage["total_tokens"] for agent in agents)
+print(router.usage)
+print("director:", router.usage["total_tokens"] - workers)
+```
+
+<Warning>
+  `router.usage` only finds agents stored as attributes of the built swarm, alone or in a list or tuple. It misses agents a swarm keeps anywhere else. With `swarm_type="HeavySwarm"`, the workers live in a dict and the question generator is not an `Agent`, so `router.usage` reports only the agents you passed in. Read `router.swarm.usage` after the run instead. `router.swarm` is the swarm that ran last.
+</Warning>
+
+### GraphWorkflow.usage
+
+`workflow.usage` sums `Agent.usage` over every agent node, including the agents inside nested subgraph workflows at any depth. An agent that backs several nodes, or appears in both the graph and a subgraph, is counted once. Nodes without an agent are skipped.
+
+```python
+from swarms import Agent, GraphWorkflow
+
+researcher = Agent(agent_name="Researcher", model_name="gpt-5.4-mini", max_loops=1)
+writer = Agent(agent_name="Writer", model_name="gpt-5.4-mini", max_loops=1)
+
+workflow = GraphWorkflow(name="usage-graph")
+workflow.add_node(researcher)
+workflow.add_node(writer)
+workflow.add_edge("Researcher", "Writer")
+
+workflow.run("Produce a short market note on AI chips.")
+print(workflow.usage)
+```
+
+### HeavySwarm.usage
+
+`swarm.usage` adds the question-generation calls, which go through a bare `LiteLLM` client rather than an `Agent`, to `Agent.usage` for every agent in `swarm.agents`: the workers plus the synthesis agent or captain, depending on `variant`. It grows across `run()` calls and across `max_loops`.
+
+```python
+from swarms import HeavySwarm
+
+swarm = HeavySwarm(
+    question_agent_model_name="gpt-5.4-mini",
+    worker_model_name="gpt-5.4-mini",
+)
+swarm.run("What are the main risks of building a data center in a hot climate?")
+print(swarm.usage)
+```
+
+### TreeOfThoughts.usage
+
+`TreeOfThoughts` runs each model call on a single-use agent and folds its usage into the search. `tot.usage` is the total over every search the instance has run. `tot.last_result.usage` holds the latest search alone, next to `last_result.llm_calls` and `last_result.nodes_expanded`. See [Tree of Thoughts](/agents/tree-of-thoughts).
+
+```python
+from swarms import TreeOfThoughts
+
+tot = TreeOfThoughts(model_name="gpt-5.4-mini", max_depth=2)
+tot.run("Use 4, 9, 10 and 13 with + - * / to make 24.")
+
+print(tot.last_result.usage, tot.last_result.llm_calls)
+print(tot.usage)
+```
+
+### Other structures
+
+`SequentialWorkflow`, `ConcurrentWorkflow`, `AgentRearrange` and the other structures do not expose `usage`. Sum it over the agents you gave them:
+
+```python
+def total_usage(agents) -> dict:
+    """Sum agent.usage over a list of agents."""
+    total = {}
+    for agent in agents:
+        for key, value in agent.usage.items():
+            total[key] = total.get(key, 0) + value
+    return total
+```
+
+Or run them through a `SwarmRouter` and read `router.usage`.
+
+## Summary
+
+| Source | What it sums | Resets |
+| --- | --- | --- |
+| `agent.usage` | Every provider call by the agent's own model clients | Never; a new or loaded agent starts at zero |
+| `agent.input_tokens` | Estimated size of the next request | Recomputed on each access |
+| `router.usage` | `agents` plus `Agent` attributes of the swarms it built | Never; derived from agent totals |
+| `workflow.usage` (`GraphWorkflow`) | Agent nodes, including nested subgraphs | Never; derived from agent totals |
+| `swarm.usage` (`HeavySwarm`) | Question generation plus every agent in `swarm.agents` | Never |
+| `tot.usage` (`TreeOfThoughts`) | Every search; `last_result.usage` holds the latest one | Never; `last_result` is replaced each run |
+
+## Reference
+
+- `Agent.usage`, `Agent.input_tokens`: `swarms/structs/agent.py`
+- Usage normalization and stream accounting: `empty_usage`, `usage_from_response` and `LiteLLM._track_streaming_usage` in `swarms/utils/litellm_wrapper.py`
+- `SwarmRouter.usage`: `swarms/structs/swarm_router.py`
+- `GraphWorkflow.usage`: `swarms/structs/graph_workflow.py`
+- `HeavySwarm.usage`: `swarms/structs/heavy_swarm.py`
+- `TreeOfThoughts.usage`: `swarms/agents/tree_of_thoughts.py`
+- Runnable examples: `examples/single_agent/utils/agent_usage.py` and `examples/multi_agent/swarm_router/swarm_router_usage.py`

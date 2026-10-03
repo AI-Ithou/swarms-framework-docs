@@ -117,6 +117,8 @@ response = agent.run(
 )
 ```
 
+See [Autonomous mode](/agents/autonomous-mode) for the plan, execute and summarize loop and its iteration budgets.
+
 ### Pattern 6: Agent with Fallback Models
 
 For reliability and cost optimization:
@@ -125,16 +127,18 @@ For reliability and cost optimization:
 agent = Agent(
     agent_name="Reliable-Agent",
     fallback_models=[
-        "claude-sonnet-4-6",           # Primary model
-        "gpt-5.4",      # First fallback
-        "gpt-5.4-mini"     # Final fallback
+        "claude-sonnet-4-6",  # Primary model
+        "gpt-5.4",            # First fallback
+        "gpt-5.4-mini",       # Final fallback
     ],
     max_loops=1,
 )
 
-# Agent will automatically try fallback models if primary fails
+# If a model fails after retry_attempts, the agent moves to the next one
 response = agent.run("Generate a report")
 ```
+
+When `fallback_models` is set, its first entry is the primary model and `model_name` is not used.
 
 ### Pattern 7: Agent from Marketplace Prompt
 
@@ -152,8 +156,52 @@ agent = Agent(
     max_loops=1,
 )
 
-# System prompt is automatically loaded from the marketplace
+# The marketplace prompt is appended to the agent's system prompt at construction
 response = agent.run("Execute the marketplace prompt task")
+```
+
+### Pattern 8: Continue an Existing Conversation
+
+Pass earlier turns as `messages`. On the constructor they seed the conversation and are sent with every run. On `run()` they apply to that call and are added to the conversation.
+
+```python
+from swarms import Agent
+
+history = [
+    {"role": "user", "content": "My project is called Helios."},
+    {"role": "assistant", "content": "Got it, your project is Helios."},
+]
+
+agent = Agent(
+    agent_name="Project-Assistant",
+    model_name="gpt-5.4",
+    max_loops=1,
+    messages=history,
+)
+print(agent.run("What is my project called?"))
+
+# Or per call
+other = Agent(agent_name="One-Off", model_name="gpt-5.4", max_loops=1)
+print(other.run("What is my project called?", messages=history))
+```
+
+### Pattern 9: Several Answers to One Task
+
+`run(task, n=3)` runs the task three times and returns a list with one output per run. Every run gets the same `img`, `imgs`, `messages` and `streaming_callback`. The runs share the agent's conversation, so later runs see the earlier answers. Use `output_type="final"` so each entry holds only that run's answer. With `max_loops="auto"`, `n` is ignored and you get one output.
+
+```python
+from swarms import Agent
+
+agent = Agent(
+    agent_name="Brainstormer",
+    model_name="gpt-5.4",
+    max_loops=1,
+    output_type="final",
+)
+
+ideas = agent.run("Suggest a name for a note-taking app.", n=3)
+for idea in ideas:
+    print(idea)
 ```
 
 ## Best Practices
@@ -242,6 +290,10 @@ agent = Agent(
 
 ## Common Patterns
 
+<Note>
+  `temperature` defaults to `None`, which sends no temperature and uses the provider's default. Set it only when you want to steer randomness, and leave it unset for models that reject a temperature value.
+</Note>
+
 ### Research Agent
 
 ```python
@@ -294,10 +346,13 @@ code_agent = Agent(
   <Card title="Structured Outputs" icon="code" href="/agents/structured-outputs">
     Get structured responses from agents
   </Card>
+  <Card title="Token Usage" icon="coins" href="/agents/token-usage">
+    See what each run cost in tokens
+  </Card>
 </CardGroup>
 
 ## Reference
 
 For the complete API reference, see the [Agent class documentation](/api/agent).
 
-Location in source: `swarms/structs/agent.py:140` (`class Agent`); the constructor (`__init__`) starts at line 309.
+Location in source: `swarms/structs/agent.py:130` (`class Agent`); the constructor (`__init__`) starts at line 306.

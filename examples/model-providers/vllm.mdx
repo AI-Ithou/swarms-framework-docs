@@ -53,8 +53,12 @@ class VLLMWrapper:
             max_tokens=max_tokens,
         )
 
-    def run(self, task: str) -> str:
-        outputs = self.llm.generate([task], self.sampling_params)
+    def run(self, task: str = None, *args, messages: list = None, **kwargs) -> str:
+        # Agent sends its conversation as chat messages and passes task=None
+        if messages:
+            outputs = self.llm.chat(messages, self.sampling_params)
+        else:
+            outputs = self.llm.generate([task], self.sampling_params)
         return outputs[0].outputs[0].text
 
 
@@ -74,6 +78,10 @@ agent = Agent(
 
 print(agent.run("Compare paged attention to standard attention."))
 ```
+
+<Note>
+`Agent` calls a custom `llm` as `llm.run(task=None, messages=[...])`, where `messages` holds the conversation as `{"role": ..., "content": ...}` dicts. A wrapper whose `run` accepts only `task` fails with `unexpected keyword argument 'messages'`, so accept `messages` (and `**kwargs`) as above. The agent's `system_prompt` is not included in those messages; add it yourself if your model needs it.
+</Note>
 
 ### Option 2: OpenAI-Compatible Server
 

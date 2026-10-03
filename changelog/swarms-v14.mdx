@@ -1,0 +1,243 @@
+---
+title: Swarms v14
+description: Changelog for Swarms v14 "Zena", from 14.0.0 through 14.0.2
+---
+
+**Releases:** 14.0.0 on 2026-08-01 · 14.0.1 on 2026-08-24 · 14.0.2 on 2026-08-25
+
+## Overview
+
+Swarms v14, codenamed "Zena", covers everything merged between 13.0.0 and 14.0.2. It also folds in the 13.0.1 and 13.0.2 patch work: configurable `HierarchicalSwarm` director settings, worker recovery, and the turn-based `GroupChat`.
+
+The headline is observability. OpenTelemetry tracing now runs across agents and swarms, on by default with a single opt-out switch. Alongside it, MCP moved behind one `MCPManager` with OAuth support, and two new structures landed: `AutoAgentBuilder` and `AuctionSwarm`. The 14.0.1 patch then carried a long correctness pass on the autonomous loop and on how context flows between agents, plus a large dead-code cleanup.
+
+## Highlights
+
+* **OpenTelemetry tracing**: agent and swarm runs emit nested spans. Turn it off with `SWARMS_TELEMETRY_ON=false`.
+* **Unified MCP manager**: one `MCPManager` handles connections, tool discovery, headers, timeouts and OAuth.
+* **AutoAgentBuilder**: generate a task-specific roster of agents, then run it in any structure.
+* **AuctionSwarm**: agents bid confidence and cost for a task, and the best bid wins the work.
+* **Turn-based GroupChat**: one speaker per turn, with a recency penalty against monologues.
+* **HierarchicalSwarm recovery**: retry failing workers, reassign their tasks, and override the director without subclassing.
+* **Faster GraphWorkflow**: native rustworkx algorithms, one thread pool per run, and a single-pass compile.
+* **Honest autonomous loop (14.0.1)**: real message transcripts, a mutable plan, and five correctness fixes.
+
+## New features
+
+### OpenTelemetry tracing
+
+Swarms now ships OpenTelemetry tracing. `Agent` and the multi-agent structures record an init span when they are built and a run span when they run. Spans nest, so a workflow and every agent run underneath it form one trace. Errors that the LLM retry loop would otherwise swallow are recorded too.
+
+Telemetry is on by default and fail-safe: if the exporter cannot start, tracing goes inert and your agents keep running. To opt out, set one variable:
+
+```bash
+export SWARMS_TELEMETRY_ON=false
+```
+
+You can trace your own harness with the same helpers. Use `ContextThreadPoolExecutor` instead of a plain `ThreadPoolExecutor`, or child spans detach from the caller's trace.
+
+```python
+from swarms import Agent
+from swarms.telemetry.otel import ContextThreadPoolExecutor, capture_init, trace_run
+
+
+class MySwarm:
+    def __init__(self, agents: list[Agent]):
+        self.agents = agents
+        capture_init(self)
+
+    @trace_run("MySwarm.run")
+    def run(self, task: str):
+        with ContextThreadPoolExecutor(max_workers=8) as executor:
+            return list(executor.map(lambda agent: agent.run(task), self.agents))
+```
+
+See [Telemetry](/deployment/telemetry) for what each span captures, payload limits, and how to send spans to your own backend.
+
+### Unified MCP manager
+
+The standalone `swarms.tools.mcp_client_tools` module is gone. Connections, tool discovery and auth now live behind [`MCPManager`](/api/mcp-manager), which you reach through `Agent` parameters. You can set a bearer token, extra headers, a timeout, or OAuth 2.1 settings (`mcp_oauth`) once for every server. The OAuth token cache is written atomically with `0600` permissions.
+
+```python
+from swarms import Agent
+
+agent = Agent(
+    agent_name="Multi-MCP-Agent",
+    model_name="gpt-5.4",
+    mcp_urls=["http://localhost:8000/mcp", "http://localhost:8001/mcp"],
+    mcp_authorization_token="your-token",
+    mcp_headers={"X-Tenant-Id": "acme"},
+    mcp_timeout=30,
+    max_loops=1,
+)
+```
+
+The same release extracted three managers out of `Agent`: [`LLMManager`](/api/llm-manager), [`SkillsManager`](/api/skills-manager) and [`AgentMarketplaceHandler`](/api/agent-marketplace-handler). See [MCP integration](/integrations/mcp) for the full guide.
+
+### AutoAgentBuilder
+
+[`AutoAgentBuilder`](/api/auto-agent-builder) designs a team for a task. A builder agent is forced to call one function, `build_agents`, and each generated agent carries a name, description, system prompt and model. `max_agents` is a ceiling, and the builder prefers the smallest roster that covers the task. Use `num_agents` when you need an exact count.
+
+```python
+from swarms import AutoAgentBuilder, SequentialWorkflow
+
+task = "Analyze why churn rose last quarter and write a brief for leadership."
+
+configs = AutoAgentBuilder(max_agents=3, return_dict=True).run(task)
+agents = AutoAgentBuilder(num_agents=3, agent_kwargs={"max_loops": 1}).run(task)
+result = SequentialWorkflow(agents=agents, max_loops=1).run(task)
+```
+
+<Note>
+In the 14.x line, passing any `agent_kwargs` raised a `TypeError`. This was fixed in 15.0.0.
+</Note>
+
+### AuctionSwarm
+
+`AuctionSwarm` inverts the boss-picks-the-worker model. Each agent bids its confidence and estimated cost through a forced tool call, the bids are scored, and the `top_k` winners run the task. The default scoring is `"confidence_per_cost"`, and you can pass your own function. It is not exported from the top-level package, so import it from its module.
+
+```python
+from swarms import Agent
+from swarms.structs.auction_swarm import AuctionSwarm
+
+specialists = [
+    Agent(agent_name=name, model_name="gpt-5.4", max_loops=1)
+    for name in ["SQL-Expert", "Python-Expert", "Infra-Expert"]
+]
+
+swarm = AuctionSwarm(
+    agents=specialists,
+    top_k=2,
+    scoring=lambda confidence, cost: confidence**2 / max(cost, 0.1),
+)
+result = swarm.run("Optimize a slow analytical query over a 40M-row table.")
+```
+
+### Turn-based GroupChat
+
+`GroupChat` now runs one speaker per turn. Every agent privately bids through a forced `respond(score, message)` call, and the highest bid above `threshold` takes the floor. `recency_penalty` lowers the bid of an agent that spoke within the last `recency_window` turns, so no one monologues. `auto_equip=True` (the default) attaches the bidding tool for you. See [GroupChat](/api/group-chat).
+
+```python
+from swarms import Agent, GroupChat
+
+agents = [
+    Agent(agent_name="Optimist", system_prompt="Argue the benefits.", model_name="gpt-5.4", max_loops=1),
+    Agent(agent_name="Pessimist", system_prompt="Argue the risks.", model_name="gpt-5.4", max_loops=1),
+]
+
+chat = GroupChat(agents=agents, max_loops=12, threshold=0.6, recency_penalty=0.3, recency_window=1)
+result = chat.run("Should we adopt AI for medical diagnosis?")
+```
+
+### HierarchicalSwarm recovery and director settings
+
+A failing worker is now retried up to `max_agent_retries` times. If it stays down, the director can reassign its task up to `max_reassignment_attempts` times instead of dropping the work. `planning_enabled` adds a planning pass, `agent_as_judge` scores worker output, and `parallel_execution` with `max_workers` runs orders concurrently. You can configure the built-in director through `director_model_name`, `director_temperature`, and a `director_settings` dict of extra `Agent` arguments. See [HierarchicalSwarm](/api/hierarchical-swarm).
+
+```python
+from swarms import Agent, HierarchicalSwarm
+
+workers = [
+    Agent(agent_name="DataWorker", model_name="gpt-5.4-mini", max_loops=1),
+    Agent(agent_name="WritingWorker", model_name="gpt-5.4-mini", max_loops=1),
+]
+
+swarm = HierarchicalSwarm(
+    agents=workers,
+    director_model_name="claude-sonnet-4-6",
+    director_settings={"temperature": 0.2, "max_tokens": 16000},
+    planning_enabled=True,
+    agent_as_judge=True,
+    max_agent_retries=2,
+    max_reassignment_attempts=1,
+)
+result = swarm.run("Produce a competitive analysis of the AI chip market.")
+```
+
+<Note>
+`director_settings` configures the director the swarm builds. If you pass your own `director` agent, it is used as is.
+</Note>
+
+### Pydantic models from a class signature
+
+`class_init_to_pydantic_model` turns a constructor's parameters, types and Google-style `Args:` descriptions into a Pydantic model class. You can use it for validation or structured output without keeping a second definition in sync.
+
+```python
+from swarms import Agent
+from swarms.utils.class_to_pydantic import class_init_to_pydantic_model
+
+AgentSchema = class_init_to_pydantic_model(
+    Agent, include=("agent_name", "system_prompt", "model_name")
+)
+spec = AgentSchema(agent_name="Analyst", system_prompt="You analyze.")
+agent = Agent(**spec.model_dump())
+```
+
+### ConcurrentWorkflow failure policy and pool sizing
+
+`ConcurrentWorkflow` gained `on_error`. With `"store"` (the default), a failing agent's error is recorded as its output and the other agents finish. With `"raise"`, the exception aborts the run. Thread pools are now sized for network-bound work: `max_workers` defaults to the number of agents, capped at 32. `MixtureOfAgents` and `HierarchicalSwarm` expose `max_workers` too. See [ConcurrentWorkflow](/api/concurrent-workflow).
+
+```python
+from swarms import Agent, ConcurrentWorkflow
+
+agents = [Agent(agent_name=f"Worker-{i}", model_name="gpt-5.4", max_loops=1) for i in range(5)]
+workflow = ConcurrentWorkflow(agents=agents, on_error="store", max_workers=8)
+result = workflow.run("List ten use cases for multi-agent AI systems.")
+```
+
+### Smaller additions
+
+* `CronJob` survives failed executions and retries on the next tick. `max_consecutive_errors` sets an error budget, and `run_many()` / `stop_many()` run several agents on different schedules. See [CronJob](/api/cron-job).
+* `SequentialWorkflow` bounds drift-detection reruns with `drift_max_retries` (default `3`).
+* `AgentLoader.load_agents_from_csv()` replaces the standalone CSV-to-agent module. See [AgentLoader](/api/agent-loader).
+* `Agent.max_tokens` now defaults to the model's own output limit when you leave it unset, falling back to 16,000 for unmapped models.
+* `MixtureOfAgents` workers now receive the task plus the previous layer's synthesis, not the full transcript.
+
+## Improvements
+
+**Autonomous loop and context (14.0.1).** The `max_loops="auto"` loop moved out of `agent.py` into `AutonomousAgentLoop`. It now sends the model a real message list with assistant tool calls and tool results, rather than one flattened string. The same change applies to the integer `max_loops` path. The plan is mutable, tool errors reach the model, and a failed dependency now blocks its dependents. The think guard works, and a stuck subtask is contained (one reproduction dropped from 2,002 LLM turns to 22). In multi-agent structures, agents receive only what is new to them and contribute their answer rather than their whole transcript. Context now grows linearly instead of exponentially. With dynamic tools enabled, schemas sit behind `tool_search` and MCP schemas join that catalog. See [Autonomous mode](/agents/autonomous-mode) and [Dynamic tools](/agents/dynamic-tools).
+
+**Workspace and logging (14.0.1).** One `WorkspaceManager` now owns autosave for `SequentialWorkflow`, `ConcurrentWorkflow`, `HierarchicalSwarm`, `SwarmRouter` and `Agent`. Autosave never makes a run fail. All logs go under `{WORKSPACE_DIR}/logs`, one file per module plus a combined daily log. `WORKSPACE_DIR` is honored at import. If it cannot be created, Swarms warns and falls back to `./agent_workspace`.
+
+**Performance.** `GraphWorkflow`'s rustworkx backend calls native rustworkx algorithms instead of Python reimplementations. Each run uses one thread pool, single-node layers run inline, and compile builds its maps in one pass (200-node compile: about 150 ms down to 0.3 ms). Remote image URLs are fetched once per process, and multiple images go to the provider in one request instead of one agent run per image.
+
+**API cleanup.** `SwarmRouter` dropped the dead `shared_memory_system` and `telemetry_enabled` parameters. Its `output_type` now defaults to `"dict"` and `multi_agent_collab_prompt` to `False`. `AutoSwarmBuilder` replaced `execution_type` with `swarm_type`. Component IDs are unique per instance from one generator built on `secrets.token_hex`. Thirty hand-written batch methods now share one batch runner.
+
+## Bug fixes
+
+* `Agent` forwards `llm_base_url` and `llm_api_key` to the provider call.
+* `context_length` and `max_tokens` passed to `Agent` were silently overwritten. Both now take effect.
+* `tool_execution_retry` actually retries `tool_retry_attempts` times and surfaces the final failure.
+* Each `Agent` gets its own `tools_list_dictionary` instead of sharing one list.
+* An unmapped model ID falls back to defaults instead of raising at construction.
+* `Agent.load()`, `run_batched` without `imgs`, `run_concurrent_tasks`, and `arun` positional arguments all work again.
+* The autonomous loop no longer hands the loop object to built-in tools, which had broken every file and shell tool.
+* `Conversation` can load the file it just saved.
+* `SequentialWorkflow.run`, `PlannerWorkerSwarm.run`, parallel `AgentRearrange` steps and `HeavySwarm` workers now pass images through.
+* `planning_enabled` no longer strips the director's `SwarmSpec` schema.
+* Concurrent helpers and `MajorityVoting` / `MixtureOfAgents` `run_concurrently` return results in input order.
+* `create_agent_map` rejects duplicate agent names.
+* `GraphWorkflow` JSON round trips work, and `visualize` sanitizes the workflow name.
+* Pydantic tool schemas are named after the model, and two validators disabled under `pydantic.v1` work again.
+* Image URL fetches resolve hostnames and block private, loopback and cloud-metadata addresses.
+* 14.0.0 pinned `mcp` below 2.0 so `import swarms` kept working, and 14.0.1 added the OpenTelemetry packages a clean install needs.
+* 14.0.2 fixed `MixtureOfAgents` failing at construction without an `aggregator_agent`, because `aggegrator_args` was never stored.
+
+## Removals and breaking changes
+
+* `Agent.persistent_memory` now defaults to `False`. Pass `persistent_memory=True` to keep `MEMORY.md` across restarts. See [Agent memory](/agents/agent-memory).
+* `swarms.tools.mcp_client_tools` was removed. Use `MCPManager` or the `mcp_*` parameters on `Agent`.
+* `AOP` was removed from the top-level exports in 14.0.0. The module itself was deleted in 15.0.0.
+* `"AutoSwarmBuilder"` is no longer a `SwarmRouter` `swarm_type`. Use [`AutoSwarmBuilder`](/api/auto-swarm-builder) directly.
+* `BaseSwarm` and `BaseStructure` were deleted. Write custom structures as plain classes.
+* `RoundTableDiscussion` was deleted. Eight scripted conversation patterns, such as `CouncilMeeting` and `NegotiationSession`, moved to `examples/multi_agent/alternate_debates/`. `SkillOrchestra` moved to `examples/multi_agent/`.
+* Ten unused math-sequence swarms (`FibonacciSwarm`, `PrimeSwarm` and others) and a dozen dead schema and tool modules were removed. These include `create_agent_tool`, `openai_tool_creator_decorator` and `swarms_api_schemas`.
+* `Agent` lost methods with no callers: `run_multiple_images`, `undo_last`, `set_system_prompt`, `enable_autosave` / `disable_autosave` and others. Use `run(imgs=[...])` for several images. The unread `retry_interval` and `tokenizer` arguments are now ignored.
+* The computer-use toolkit added during this cycle was removed again in 14.0.1 as a duplicate.
+
+<Note>
+Two v14 defaults changed again in 15.0.0. `reasoning_effort` defaulted to `"medium"` in v14 and is `None` again from 15.0.0. The `HierarchicalSwarm` live dashboard was removed in 15.0.0. See [Swarms v15](/changelog/swarms-v15).
+</Note>
+
+## Conclusion
+
+v14 makes Swarms observable and easier to trust. Tracing shows what every agent and swarm did. `MCPManager` gives tools one consistent connection layer, and `AutoAgentBuilder` and `AuctionSwarm` let a task shape its own team. The 14.0.1 patch made the autonomous loop and multi-agent context honest and removed a large amount of dead code. When you upgrade, check that you set `persistent_memory=True` wherever you rely on memory, and move any `mcp_client_tools` imports to `MCPManager`.

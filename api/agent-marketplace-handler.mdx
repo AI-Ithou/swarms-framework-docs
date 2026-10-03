@@ -13,17 +13,21 @@ Every `Agent` builds one as `agent.marketplace`. The class also works with **no 
 ```python
 from swarms import Agent
 
-# Load a prompt at construction
-agent = Agent(marketplace_prompt_id="550e8400-e29b-41d4-a716-446655440000")
+# Loads the marketplace prompt during construction
+agent = Agent(
+    model_name="gpt-5.4",
+    marketplace_prompt_id="550e8400-e29b-41d4-a716-446655440000",
+    use_cases=[{"title": "Code review", "description": "Review a pull request"}],
+)
 
-# Publish this agent's prompt
+# Publishing requires use_cases
 agent.handle_publish_to_marketplace()
 ```
 
 ## Import
 
 ```python
-from swarms.agents.agent_marketplace_handler import AgentMarketplaceHandler
+from swarms import AgentMarketplaceHandler
 ```
 
 ## Authentication
@@ -58,7 +62,9 @@ def fetch(
     name: Optional[str] = None,
     timeout: float = 30.0,
     return_params_on: bool = True,
-) -> Optional[Union[Dict[str, Any], Tuple[str, str, str]]]
+) -> Optional[
+    Union[Dict[str, Any], Tuple[Optional[str], Optional[str], Optional[str]]]
+]
 ```
 
 `GET https://swarms.world/api/get-prompts/<uuid-or-url-encoded-name>`
@@ -79,7 +85,7 @@ def fetch(
   `True` returns a `(name, description, prompt)` tuple; `False` returns the full JSON response.
 </ParamField>
 
-Returns `None` when the prompt does not exist (404). Raises `ValueError` when neither argument is given, and `httpx.HTTPStatusError` for any other error status.
+Returns `None` when the prompt does not exist (404). Tuple fields the response lacks are `None`. Raises `ValueError` when neither argument is given or `SWARMS_API_KEY` is unset, and `httpx.HTTPStatusError` for any other error status.
 
 ```python
 name, description, prompt = AgentMarketplaceHandler.fetch(
@@ -91,7 +97,7 @@ name, description, prompt = AgentMarketplaceHandler.fetch(
 
 ```python
 @classmethod
-def fetch_prompt(prompt_id: str) -> Tuple[str, str, str]
+def fetch_prompt(prompt_id: str) -> Tuple[Optional[str], Optional[str], Optional[str]]
 ```
 
 Like `fetch`, but requires the prompt to exist — raises `ValueError` with a helpful message on 404.
@@ -122,7 +128,15 @@ Defaults to the agent's configured `marketplace_prompt_id`.
 def publish(category: str = "research") -> Dict[str, Any]
 ```
 
-Publish the owning agent's prompt and metadata. Raises `AgentInitializationError` when `use_cases` was not provided.
+Publish the owning agent's prompt and metadata through `add_prompt()`, and return the API response. Raises `AgentInitializationError` when `use_cases` was not provided.
+
+The fields sent are:
+
+- `name`: `agent.agent_name`
+- `prompt`: `agent.short_memory.get_str()`, the agent's rendered history rather than the raw `system_prompt`. At construction that is the system prompt as one `[timestamp] System: ...` entry, plus any seeded rules or messages.
+- `description`: `agent.agent_description`
+- `tags`: `build_tags()`
+- `use_cases`: `agent.use_cases`
 
 ```python
 agent = Agent(
@@ -141,7 +155,7 @@ agent = Agent(
 def build_tags() -> str
 ```
 
-Merge the agent's `tags` and `capabilities` into one comma-separated string. Either list may be empty or unset; only what exists is included, and neither returns `""`.
+Merge the agent's `tags` and `capabilities` into one comma-separated string. Either list may be empty or unset; only what exists is included. Returns `""` when both are empty.
 
 ### add_prompt
 
@@ -192,7 +206,9 @@ def add_prompt(
   Request timeout in seconds for the underlying HTTP call.
 </ParamField>
 
-Each missing required field (including `category`, if explicitly passed as `None`) raises `ValueError` naming that field.
+Each missing required field (including `category`, if explicitly passed as `None`) raises `ValueError` naming that field. An unset `SWARMS_API_KEY` also raises `ValueError`.
+
+**Returns** the parsed JSON response, or the raw response text when the body is not JSON. An error status is logged with the response body and raised as `httpx.HTTPStatusError`.
 
 ## Agent integration
 
@@ -207,7 +223,7 @@ Each missing required field (including `category`, if explicitly passed as `None
 ## Standalone use
 
 ```python
-from swarms.agents.agent_marketplace_handler import AgentMarketplaceHandler
+from swarms import AgentMarketplaceHandler
 
 # No agent required
 handler = AgentMarketplaceHandler()

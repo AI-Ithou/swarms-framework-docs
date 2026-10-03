@@ -8,11 +8,41 @@ icon: "chart-mixed"
 
 Monitoring is essential for running production multi-agent systems. This guide covers how to monitor agent performance, track metrics, implement logging, and gain full observability into your Swarms deployment.
 
+## Built-in observability
+
+Swarms gives you three signals without any setup:
+
+<CardGroup cols={3}>
+  <Card title="Tracing" icon="diagram-project" href="/deployment/telemetry">
+    OpenTelemetry spans for every agent and swarm run, on by default
+  </Card>
+  <Card title="Token usage" icon="coins" href="/agents/token-usage">
+    `agent.usage` and `router.usage` totals reported by the provider
+  </Card>
+  <Card title="Log files" icon="file-lines">
+    Console output plus files under `{WORKSPACE_DIR}/logs/`
+  </Card>
+</CardGroup>
+
+```python
+from swarms import Agent
+
+agent = Agent(agent_name="Monitored-Agent", model_name="gpt-5.4", max_loops=1)
+
+before = agent.usage["total_tokens"]
+agent.run("Summarize the incident report.")
+print(agent.usage["total_tokens"] - before)  # tokens spent on this request
+```
+
+`agent.usage` is a running total for the instance, with the keys `input_tokens`, `output_tokens`, `cached_tokens`, `reasoning_tokens`, and `total_tokens`.
+
 ## Logging Architecture
 
 ### Loguru Integration
 
-Swarms uses [Loguru](https://github.com/Delgan/loguru) for powerful, structured logging:
+Swarms uses [Loguru](https://github.com/Delgan/loguru). On import it adds a console sink and two file sinks under `{WORKSPACE_DIR}/logs/`: a combined `swarms_YYYY-MM-DD.log`, rotated daily and kept for 10 days, and one `<module>.log` per Swarms module that logs, such as `agent.log` or `graph_workflow.log`. Errors from standard-library loggers go to `{WORKSPACE_DIR}/error.txt`.
+
+To replace the defaults with your own configuration, remove the existing sinks first. This also removes the workspace log files:
 
 ```python
 from loguru import logger
@@ -374,9 +404,9 @@ def health_check(agent) -> Dict[str, Any]:
     Perform comprehensive health check on agent.
     """
     try:
-        # Quick test run
+        # Quick test run; use a lightweight agent configured with max_loops=1
         start = time.time()
-        result = agent.run("Hello", max_loops=1)
+        result = agent.run("Reply with OK.")
         duration = time.time() - start
         
         return {
@@ -556,7 +586,8 @@ logger.info(
 
 - Response time (mean, median, p95, p99)
 - Throughput (requests per second/minute)
-- Error rate
+- Error rate, including `AgentLLMError` raised once retries and fallback models are exhausted
+- Token usage per request, from [`agent.usage`](/agents/token-usage)
 - Resource usage (CPU, memory)
 
 ### 5. Set Up Alerts
@@ -570,4 +601,6 @@ logger.info(
 
 - [Production Best Practices](/deployment/production-best-practices)
 - [Scaling Guide](/deployment/scaling)
+- [Telemetry](/deployment/telemetry)
+- [Token usage](/agents/token-usage)
 - [Loguru Documentation](https://loguru.readthedocs.io/)

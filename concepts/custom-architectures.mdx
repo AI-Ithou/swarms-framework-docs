@@ -130,15 +130,15 @@ class CustomSwarm:
         self.max_workers = max_workers
         self.autosave_conversation = autosave_conversation
 
-        # Initialize conversation management
-        # See: https://docs.swarms.world/swarms/structs/conversation/
-        conversation_config = conversation_config or {}
+        # Keys in conversation_config override these defaults.
         self.conversation = Conversation(
-            id=f"swarm_{name}_{int(time.time())}",
-            name=f"{name}_conversation",
-            autosave=autosave_conversation,
-            time_enabled=True,
-            **conversation_config
+            **{
+                "id": f"swarm_{name}_{int(time.time())}",
+                "name": f"{name}_conversation",
+                "autosave": autosave_conversation,
+                "time_enabled": True,
+                **(conversation_config or {}),
+            }
         )
 
         # Validate agents and log initialization
@@ -469,32 +469,24 @@ class CustomSwarm:
             "conversation_id": self.conversation.id,
         }
 
-    def export_conversation(self, filepath: str = None) -> str:
+    def export_conversation(self) -> str:
         """
-        Export the conversation history to a file.
-
-        Args:
-            filepath (str): Optional custom filepath for export.
+        Save the conversation history as JSON.
 
         Returns:
             str: The filepath where the conversation was saved.
         """
-        if filepath is None:
-            filepath = f"conversations/{self.name}_{self.conversation.id}.json"
-
-        self.conversation.export_conversation(filepath)
+        self.conversation.save_as_json(force=True)
+        filepath = self.conversation.save_filepath
         logger.info(f"Conversation exported to: {filepath}")
         return filepath
 
-    def display_conversation(self, detailed: bool = True):
+    def display_conversation(self):
         """
-        Display the conversation history in a formatted way.
-
-        Args:
-            detailed (bool): Whether to show detailed information.
+        Print the conversation history as role: content blocks.
         """
         logger.info(f"Displaying conversation for swarm: {self.name}")
-        self.conversation.display_conversation(detailed=detailed)
+        print(self.conversation.get_str())
 ```
 
 ## Creating Agents for Your Swarm
@@ -727,8 +719,8 @@ history = swarm.conversation.return_history_as_string()
 # Search for specific content
 financial_messages = swarm.conversation.search("financial")
 
-# Export conversation data
-swarm.conversation.export_conversation("analysis_session.json")
+# Export conversation data to conversation.save_filepath
+swarm.conversation.save_as_json(force=True)
 
 # Get conversation statistics
 stats = swarm.conversation.count_messages_by_role()

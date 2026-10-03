@@ -1,11 +1,16 @@
 ---
 title: AutoSwarmBuilder
 description: Automatically builds and manages swarms of AI agents with intelligent task decomposition
+icon: "wand-magic-sparkles"
 ---
 
 ## Overview
 
 The `AutoSwarmBuilder` class automatically builds and manages swarms of AI agents by intelligently decomposing tasks and creating specialized agents as needed. It uses a sophisticated boss agent system to delegate work, design agent architectures, and orchestrate multi-agent collaboration.
+
+The boss agent's reply is parsed and validated against a Pydantic schema. Malformed JSON or a schema mismatch triggers a repair retry that feeds the error back to the model; if no valid reply arrives within the budget, a `ValueError` is raised.
+
+Each `run()` is recorded as an `AutoSwarmBuilder.run` trace span when telemetry is enabled. When the swarm is executed, the `SwarmRouter.run` span nests under it, so the build phase and the delegated run share one trace. See [Telemetry](/deployment/telemetry).
 
 ## Class Definition
 
@@ -24,11 +29,11 @@ from swarms import AutoSwarmBuilder
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="True">
-  Whether to output detailed logs during execution
+  Stored as `builder.verbose` but not read. The builder logs through loguru either way
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
-  Maximum number of execution loops. Must be greater than 0
+  Passed as `max_loops` to the `SwarmRouter` built by `build_and_run_swarm()` and `initialize_swarm_router()`. Cannot be 0
 </ParamField>
 
 <ParamField path="model_name" type="str" default="gpt-5.4">
@@ -54,6 +59,24 @@ from swarms import AutoSwarmBuilder
 <ParamField path="auto_execute" type="bool" default="False">
   Default value for `run()`'s `execute` parameter. When `True`, `run()` builds real `Agent` objects from a freshly generated spec and executes them through a `SwarmRouter` (via `build_and_run_swarm()`) instead of returning a spec-only result
 </ParamField>
+
+### Attributes you can set after construction
+
+These are not constructor arguments. Set them on the instance before calling `run()`.
+
+<ParamField path="max_agents" type="Optional[int]" default="None">
+  Upper bound on how many agents the boss agent may generate. A larger roster raises `ValueError`. Unbounded when `None`
+</ParamField>
+
+<ParamField path="max_json_repair_attempts" type="int" default="1">
+  Number of repair retries when the boss agent's reply is malformed JSON or fails schema validation
+</ParamField>
+
+```python
+builder = AutoSwarmBuilder(swarm_type="return-agents")
+builder.max_agents = 4
+builder.max_json_repair_attempts = 2
+```
 
 ## Execution Types
 
@@ -124,7 +147,7 @@ Runs the swarm builder on a given task, creating agents based on execution type.
 </ResponseField>
 
 **Raises:**
-- `ValueError`: If swarm_type is invalid
+- `ValueError`: If swarm_type is invalid, or if the generated spec fails validation (see `create_agents()`)
 - `Exception`: If there's an error during swarm execution
 
 ---
@@ -149,6 +172,8 @@ Designs a multi-agent team for `task` and executes it. Generates one validated `
   `{"name", "description", "agents" (names actually built), "swarm_type", "task", "output"}` where `output` is the `SwarmRouter`'s execution result
 </ResponseField>
 
+The router is built with `output_type="dict"` and the builder's `max_loops`. The spec's `rules` and `multi_agent_collab_prompt` fields are not applied to the agents.
+
 ---
 
 ### `create_agents()`
@@ -168,11 +193,11 @@ Creates agent specifications for a given task using the boss agent.
 **Returns:**
 
 <ResponseField name="agents_dict" type="dict">
-  Dictionary containing agent specifications with comprehensive system prompts and configurations
+  `{"agents": [...]}`, one validated `AgentSpec` dict per agent
 </ResponseField>
 
 **Raises:**
-- `Exception`: If there's an error during agent creation
+- `ValueError`: If no valid reply arrives within the repair budget, if two agents share an `agent_name`, or if the roster exceeds `max_agents`
 
 ---
 
@@ -201,6 +226,8 @@ Creates Agent objects from agent specifications.
 
 **Note:** Automatically handles parameter name mapping (e.g., 'description' → 'agent_description')
 
+**Raises:** `ValueError` if two specs share a non-empty `agent_name`.
+
 ---
 
 ### `create_router_config()`
@@ -220,11 +247,11 @@ Creates a SwarmRouter configuration for a given task.
 **Returns:**
 
 <ResponseField name="config" type="dict">
-  Complete SwarmRouter configuration including agents, swarm type, and execution parameters
+  The `SwarmRouterConfig` fields as a dict. `task` is set to the exact string you passed, not the model's echo of it
 </ResponseField>
 
 **Raises:**
-- `Exception`: If there's an error during router config creation
+- `ValueError`: If the reply fails validation, names a `swarm_type` outside `SwarmType`, repeats an `agent_name`, or exceeds `max_agents`
 
 ---
 
@@ -234,7 +261,7 @@ Creates a SwarmRouter configuration for a given task.
 def batch_run(self, tasks: List[str]) -> List[Any]
 ```
 
-Runs the swarm builder on a list of tasks sequentially.
+Runs the swarm builder on a list of tasks sequentially. Each task goes through `run()`, so each gets its own trace span.
 
 **Parameters:**
 
@@ -259,7 +286,9 @@ def reliability_check(self) -> None
 Performs reliability checks on the AutoSwarmBuilder configuration.
 
 **Raises:**
-- `ValueError`: If max_loops is set to 0
+- `ValueError`: If `max_loops` is 0, `max_agents` is set and not positive, or `max_json_repair_attempts` is negative
+
+Called once from `__init__`. Call it again yourself if you change `max_agents` or `max_json_repair_attempts` afterwards and want them checked.
 
 ---
 
@@ -285,7 +314,9 @@ Lists all available execution types.
 def initialize_swarm_router(self, agents: List[Agent], task: str) -> Any
 ```
 
-Builds a `SwarmRouterConfig` for the task via the boss agent, then constructs and runs a `SwarmRouter` with the given agents. Not called automatically by `run()` for any `swarm_type` — call it directly if you want `AutoSwarmBuilder` to both design agents (via `create_agents`) and immediately execute them through a `SwarmRouter`.
+Runs agents you already have under an architecture the boss agent picks. The boss generates a `SwarmRouterConfig` for the task; only its `name`, `description`, `swarm_type`, and `rearrange_flow` are used, and the generated agent specs are discarded. The `SwarmRouter` is built with your `agents`, the builder's `max_loops`, and `output_type="dict"`. Not called by `run()`.
+
+To design the agents and run them from one consistent spec, use `build_and_run_swarm()` instead.
 
 **Parameters:**
 
@@ -306,10 +337,10 @@ Builds a `SwarmRouterConfig` for the task via the boss agent, then constructs an
 ### `dict_to_agent()`
 
 ```python
-def dict_to_agent(self, output: dict) -> List[Agent]
+def dict_to_agent(self, output: Any) -> List[Agent]
 ```
 
-Alternate helper that builds `Agent` objects directly from a raw `{"agents": [...]}` dictionary via `Agent(**agent_config)`, without the field-name mapping (`description` → `agent_description`) that `create_agents_from_specs()` performs.
+Builds `Agent` objects from a raw `{"agents": [...]}` dictionary by delegating to `create_agents_from_specs()`, so the `description` → `agent_description` mapping and the duplicate-name check apply. Any non-dict input returns an empty list.
 
 **Parameters:**
 
@@ -346,10 +377,14 @@ class SwarmRouterConfig(BaseModel):
     agents: List[AgentSpec]                # Agent configurations
     swarm_type: SwarmType                  # Multi-agent structure type
     rearrange_flow: Optional[str]          # Flow configuration
-    rules: Optional[str]                   # Rules for all agents
-    multi_agent_collab_prompt: Optional[str]
+    rules: Optional[str]                   # Generated, not applied on execution
+    multi_agent_collab_prompt: Optional[str]  # Generated, not applied on execution
     task: str                              # Task to execute
 ```
+
+This `SwarmRouterConfig` lives in `swarms.structs.auto_swarm_builder` and is the boss agent's output schema. It is a different class from the `SwarmRouterConfig` in `swarms.structs.swarm_router`.
+
+The generated `swarm_type` must be a `SwarmType` member. `"AutoSwarmBuilder"` and `"auto"` are always rejected so a generated spec cannot recurse.
 
 ## Boss Agent Design Principles
 
@@ -484,7 +519,7 @@ The boss agent can design swarms using various architectures:
 - **HierarchicalSwarm**: Layered decision-making
 - **HeavySwarm**: High-capacity specialized processing
 - **MajorityVoting**: Democratic decision-making
-- **And more...**
+- **And more...** Any [`SwarmType`](/api/swarm-router#swarmtype) value is accepted
 
 ## Source Code
 

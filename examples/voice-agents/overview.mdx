@@ -37,13 +37,15 @@ export ANTHROPIC_API_KEY=sk-ant-...    # only if using Claude models
 
 `StreamingTTSCallback` is a callable that accepts one token at a time, buffers it sentence-by-sentence, and dispatches each sentence to the configured TTS engine. Because it implements the `streaming_callback` contract, it works anywhere Swarms exposes per-token callbacks — single agents, autonomous loops, hierarchical swarms, debates, etc.
 
+The callback only receives tokens when the agent streams, so set `streaming_on=True` on the agent. Without it the model call is not streamed and the callback is never invoked.
+
 ```python
 from swarms import Agent
 from voice_agents import StreamingTTSCallback
 
 tts = StreamingTTSCallback(voice="alloy", model="openai/tts-1")
 
-agent = Agent(model_name="gpt-5.4", max_loops=1)
+agent = Agent(model_name="gpt-5.4", max_loops=1, streaming_on=True)
 result = agent.run(task="Hello!", streaming_callback=tts)
 tts.flush()  # emit any remaining text in the buffer
 ```

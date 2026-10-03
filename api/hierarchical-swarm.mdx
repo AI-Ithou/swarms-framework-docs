@@ -1,11 +1,14 @@
 ---
 title: HierarchicalSwarm
 description: A hierarchical multi-agent orchestrator that coordinates agents through a director
+icon: "network-wired"
 ---
 
 ## Overview
 
-The `HierarchicalSwarm` class implements a hierarchical architecture where a director agent creates plans and distributes tasks to worker agents. The director can provide feedback and iterate on results through multiple loops to achieve desired outcomes while maintaining conversation history throughout the process.
+The `HierarchicalSwarm` class implements a hierarchical architecture where a director agent distributes tasks to worker agents as structured orders. The director can provide feedback and iterate on results through multiple loops to achieve desired outcomes while maintaining conversation history throughout the process.
+
+Each step prints a panel with the director's orders, and its plan when the director returns one. Set `print_on=False` to hide it.
 
 ## Class Definition
 
@@ -24,11 +27,11 @@ from swarms import HierarchicalSwarm
 </ParamField>
 
 <ParamField path="director" type="Optional[Union[Agent, Callable, Any]]" default="None">
-  The director agent that coordinates the swarm. If None, a default director will be created
+  The director agent that coordinates the swarm. If None, a default director is created that returns an `OrderBatch` through a function call. A custom director must return output that `parse_orders()` can read: an `OrderBatch` or `SwarmSpec`, a JSON string or dict with an `orders` key, or a tool call carrying one. See [Custom director](/architectures/hierarchical-swarm#custom-director)
 </ParamField>
 
 <ParamField path="agents" type="AgentListType" default="None">
-  List of worker agents available for task execution. Must not be empty
+  List of worker agents available for task execution. Must not be empty. Nested orchestrators work too; they are matched by their `name`
 </ParamField>
 
 <ParamField path="max_loops" type="int" default="1">
@@ -40,7 +43,7 @@ from swarms import HierarchicalSwarm
 </ParamField>
 
 <ParamField path="feedback_director_model_name" type="str" default="gpt-5.4">
-  Model name for the feedback director
+  Model for the separate agent that writes director feedback when `director_feedback_on=True`
 </ParamField>
 
 <ParamField path="director_name" type="str" default="Director">
@@ -52,15 +55,15 @@ from swarms import HierarchicalSwarm
 </ParamField>
 
 <ParamField path="add_collaboration_prompt" type="bool" default="True">
-  Whether to add collaboration prompts to agents
+  Forwarded to the helper that adds the worker roster to the shared conversation. The roster is added before the collaboration prompt would be appended, so this flag currently has no effect
 </ParamField>
 
 <ParamField path="director_feedback_on" type="bool" default="False">
-  Whether director feedback is enabled
+  Whether director feedback is enabled. Feedback runs only when `max_loops > 1`, never on the final loop, and not when `agent_as_judge=True`
 </ParamField>
 
 <ParamField path="interactive" type="bool" default="False">
-  Enable interactive dashboard with real-time monitoring
+  When `True`, `run()` called without a task prompts for one on the console, and every worker's `print_on` is set to `False` at construction
 </ParamField>
 
 <ParamField path="director_system_prompt" type="str" default="HIEARCHICAL_SWARM_SYSTEM_PROMPT">
@@ -79,8 +82,12 @@ from swarms import HierarchicalSwarm
   Top-p parameter for director agent's LLM
 </ParamField>
 
+<Note>
+  The auto-created director sends both `director_temperature` and `director_top_p`. Anthropic's current models reject the two together, so for a Claude director set one of them to `None`, for example `director_settings={"model_name": "claude-sonnet-4-6", "top_p": None}`.
+</Note>
+
 <ParamField path="planning_enabled" type="bool" default="False">
-  Whether to enable the planning phase before order distribution
+  Whether to run a separate planning pass before the director writes orders. The plan is recorded in the shared conversation under the director's name
 </ParamField>
 
 <ParamField path="autosave" type="bool" default="False">
@@ -88,7 +95,7 @@ from swarms import HierarchicalSwarm
 </ParamField>
 
 <ParamField path="verbose" type="bool" default="False">
-  Enable verbose logging output
+  Log the autosave directory and each save. It does not control the orders panel; see `print_on`
 </ParamField>
 
 <ParamField path="parallel_execution" type="bool" default="True">
@@ -100,7 +107,7 @@ from swarms import HierarchicalSwarm
 </ParamField>
 
 <ParamField path="agent_as_judge" type="bool" default="False">
-  When `True`, a judge agent evaluates the worker outputs to inform the director's feedback loop.
+  When `True`, a judge agent scores the worker outputs after each step and returns a `JudgeReport`. It replaces director feedback, and its report becomes the previous-loop result the next loop builds on.
 </ParamField>
 
 <ParamField path="judge_agent_model_name" type="str" default="gpt-5.4">
@@ -120,7 +127,7 @@ from swarms import HierarchicalSwarm
 </ParamField>
 
 <ParamField path="print_on" type="bool" default="True">
-  Whether to print the director's plan and orders to the console at each step
+  Whether to print the director's orders, and its plan when it returns one, to the console at each step. Orders are shown in full, and the panel is titled with the director's name. This is separate from `verbose`, which controls logging
 </ParamField>
 
 <Note>
@@ -160,14 +167,19 @@ Executes the hierarchical swarm for the specified number of feedback loops.
 </ResponseField>
 
 **Workflow:**
-1. Director creates a plan and distributes orders to agents
-2. Agents execute tasks and report back to director
-3. Failed workers are retried up to `max_agent_retries`
-4. Exhausted workers are marked unavailable in shared context
-5. Director reassigns failed tasks to healthy workers, up to `max_reassignment_attempts`
-6. Director evaluates results and issues new orders if needed (up to `max_loops`)
-7. All context and conversation history is preserved throughout
-8. Returns final output formatted per swarm-level `output_type`
+1. Clears the conversation and every agent's delivery cursor, then re-adds the worker roster and the task, so each call starts clean
+2. Director distributes orders to agents (after an optional planning pass)
+3. Agents execute tasks and report back to director
+4. Failed workers are retried up to `max_agent_retries`
+5. Exhausted workers are marked unavailable in shared context
+6. Director reassigns failed tasks to healthy workers, up to `max_reassignment_attempts`
+7. Director evaluates results and issues new orders if needed (up to `max_loops`). Each later loop gets the previous loop's result and the original task
+8. Records a `--- Loop N/M completed ---` or `--- Loop N/M failed: <error> ---` marker after every loop
+9. Returns final output formatted per swarm-level `output_type`, and saves the conversation when `autosave=True`
+
+<Warning>
+  A loop that raises, for example because the director is unreachable or its output cannot be parsed, is recorded as failed and the next loop still runs. If every loop fails, `run()` re-raises the last error instead of returning a transcript.
+</Warning>
 
 ---
 
@@ -179,6 +191,7 @@ def step(
     task: str,
     img: str = None,
     *args,
+    is_final_loop: bool = False,
     **kwargs,
 ) -> Any
 ```
@@ -195,17 +208,33 @@ Executes a single step of the hierarchical swarm workflow.
   Optional image input for the task
 </ParamField>
 
+<ParamField path="is_final_loop" type="bool" default="False">
+  Skips director feedback, which could not inform another loop
+</ParamField>
+
 **Returns:**
 
 <ResponseField name="feedback" type="Any">
-  The results from this step, either agent outputs or director feedback
+  The results from this step: the judge report when `agent_as_judge=True`, director feedback when it runs, otherwise the list of worker outputs. An empty list when the director issued no orders
 </ResponseField>
 
 **Process:**
-1. Director runs to create plan and orders
-2. Orders are parsed and distributed
+1. Director runs (after the planning pass, if enabled) and returns orders
+2. `parse_orders()` extracts the plan and orders; the panel prints them when `print_on=True`
 3. Agents execute assigned tasks
-4. Optional director feedback on results
+4. Optional judge scoring or director feedback on results
+
+Errors are not swallowed. If the director fails or its output cannot be parsed, `step()` raises and `run()` records the loop as failed.
+
+---
+
+### `parse_orders()`
+
+```python
+def parse_orders(self, output)
+```
+
+Parses a director response and returns a `(plan, orders)` tuple, where `orders` is a list of `HierarchicalOrder`. Accepts an `OrderBatch`, a `SwarmSpec`, a JSON string (decoded twice if double-encoded), a dict, an OpenAI-style tool call, or a list of tool calls or conversation turns. `plan` is `None` unless the output carries one. Raises `ValueError` when no `orders` can be found. The logic lives in `swarms/structs/hierarchical_order_parser.py`.
 
 ---
 
@@ -259,6 +288,12 @@ Executes the hierarchical swarm for multiple tasks, calling `run()` once per tas
   Results in task order, or keyed by task when `return_agent_output_dict=True`
 </ResponseField>
 
+Each task starts from a clean conversation and delivery cursor, because `run()` resets both.
+
+<Warning>
+  All tasks share this one instance. With `max_workers` set, concurrent tasks clear and write the same conversation. Keep the default sequential mode unless you use one swarm per task.
+</Warning>
+
 ---
 
 ### `display_hierarchy()`
@@ -294,6 +329,8 @@ Performs validation checks to ensure the swarm is properly configured.
 
 ## Data Models
 
+The schemas live in `swarms.schemas.hs_schemas`. `SwarmSpec` is also importable from `swarms.structs.hiearchical_swarm`.
+
 ### HierarchicalOrder
 
 ```python
@@ -302,7 +339,18 @@ class HierarchicalOrder(BaseModel):
     task: str        # Specific task to be executed
 ```
 
+### OrderBatch
+
+The schema the default director returns.
+
+```python
+class OrderBatch(BaseModel):
+    orders: List[HierarchicalOrder]
+```
+
 ### SwarmSpec
+
+The legacy schema with a plan. A custom director can still return it; the plan is then shown in the orders panel.
 
 ```python
 class SwarmSpec(BaseModel):
@@ -326,17 +374,6 @@ class JudgeReport(BaseModel):
     scores: List[AgentScore]
     summary: str
 ```
-
-## Interactive Dashboard
-
-When `interactive=True`, the HierarchicalSwarm displays a real-time dashboard with:
-
-- **Operations Status**: Swarm name, description, current loop, agent count
-- **Director Operations**: Current plan and active orders
-- **Agent Monitoring Matrix**: Real-time agent status, tasks, and outputs
-- **Progress Tracking**: Loop completion and runtime metrics
-
-The dashboard uses Swarms Corporation styling with red/black color scheme and provides professional monitoring of swarm operations.
 
 ## Usage Example
 
@@ -371,13 +408,11 @@ swarm = HierarchicalSwarm(
     director_settings={
         "model_name": "claude-sonnet-4-6",
         "temperature": 0.2,
+        "top_p": None,
         "max_tokens": 4000,
-        "persistent_memory": False,
     },
     max_agent_retries=1,
     max_reassignment_attempts=1,
-    interactive=True,
-    verbose=True
 )
 
 # Display the hierarchy
@@ -393,8 +428,10 @@ print(result)
 
 ## Conversation Autosave
 
-When `autosave=True`, conversation history is automatically saved to:
-`workspace_dir/swarms/HierarchicalSwarm/{swarm-name}-{timestamp}/conversation_history.json`
+When `autosave=True`, the directory is created at construction and the conversation history is saved at the end of every `run()`, including a failed one:
+`$WORKSPACE_DIR/swarms/HierarchicalSwarm/{swarm-name}-{timestamp}/conversation_history.json`
+
+`WORKSPACE_DIR` defaults to `./agent_workspace`. Each run overwrites the same file.
 
 This enables:
 - Post-execution analysis

@@ -232,7 +232,7 @@ graph TD
 
 ### Unified Interface via Reasoning Agent Router
 
-The `ReasoningAgentRouter` provides a centralized interface for accessing all reasoning agent implementations:
+The `ReasoningAgentRouter` provides one interface for every reasoning agent on this page except Tree of Thoughts, which you create directly:
 
 ```python
 from swarms import ReasoningAgentRouter
@@ -255,7 +255,12 @@ print(result)
 ### Direct Agent Implementation
 
 ```python
-from swarms import SelfConsistencyAgent, ReasoningDuo, ReflexionAgent
+from swarms import (
+    SelfConsistencyAgent,
+    ReasoningDuo,
+    ReflexionAgent,
+    TreeOfThoughts,
+)
 
 # Self-Consistency Agent for high-accuracy requirements
 consistency_agent = SelfConsistencyAgent(
@@ -263,9 +268,10 @@ consistency_agent = SelfConsistencyAgent(
     num_samples=5
 )
 
-# Reasoning Duo for collaborative analysis workflows
+# reasoning_model_name sets the reasoning agent; model_names[1] sets the main agent
 duo_agent = ReasoningDuo(
-    model_names=["claude-sonnet-4-6", "gpt-5.4"]
+    reasoning_model_name="claude-sonnet-4-6",
+    model_names=["claude-sonnet-4-6", "gpt-5.4"],
 )
 
 # Reflexion Agent for adaptive learning scenarios
@@ -273,6 +279,13 @@ reflexion_agent = ReflexionAgent(
     model_name="claude-sonnet-4-6",
     max_loops=3,
     memory_capacity=100
+)
+
+# Tree of Thoughts for problems with checkable steps
+tot_agent = TreeOfThoughts(
+    model_name="gpt-5.4",
+    search_algorithm="dfs",
+    max_depth=4,
 )
 ```
 

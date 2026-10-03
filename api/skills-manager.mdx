@@ -1,36 +1,38 @@
 ---
 title: 'SkillsManager'
-description: 'Loads Agent Skills from disk and renders them into an agent system prompt'
+description: 'Loads Agent Skills from one or more directories and renders them as prompt text for an agent'
 icon: 'graduation-cap'
 ---
 
 ## Overview
 
-`SkillsManager` implements Agent Skills: `SKILL.md` files on disk, discovered and folded into an agent's system prompt. It supports the tiered loading model — name/description metadata kept in memory for context-aware activation (Tier 1), and a skill's full body pulled on demand (Tier 2).
+`SkillsManager` implements Agent Skills: `SKILL.md` files on disk, discovered and rendered into a prompt section the agent sends to the model. It supports the tiered loading model — name/description metadata kept in memory for context-aware activation (Tier 1), and a skill's full body pulled on demand (Tier 2).
 
 Every `Agent` builds one automatically as `agent.skills`. It is also usable standalone.
 
 ```python
 from swarms import Agent
 
-agent = Agent(agent_name="Analyst", skills_dir="./skills")
-agent.run("Build a DCF model")   # relevant skills load into the prompt
+agent = Agent(agent_name="Analyst", model_name="gpt-5.4", skills_dir="./skills")
+agent.run("Build a DCF model")  # relevant skills are sent with each LLM call
 ```
 
 ## Import
 
 ```python
-from swarms.agents.skills_manager import SkillsManager
+from swarms import SkillsManager
 ```
 
 ## Design
 
-The manager **never mutates the agent**. It returns prompt text and the caller decides what to do with it, which keeps prompt mutation in one visible place and makes the class testable on its own:
+The manager **never mutates the agent**. It returns prompt text and the caller decides what to do with it, which keeps the class testable on its own:
 
 ```python
-# Agent.handle_skills is a single line
-self.system_prompt += self.skills.prompt_for_task(task)
+# Agent.handle_skills stores the section; it does not touch system_prompt
+self._skills_prompt = self.skills.prompt_for_task(task)
 ```
+
+`Agent.call_llm` then sends that section with every LLM call: as a leading system message when the call carries `messages`, otherwise in front of the task string. The tool-summary call gets it too. `agent.system_prompt` never changes, so repeated runs do not stack copies of the skills.
 
 ## Constructor
 
@@ -38,8 +40,8 @@ self.system_prompt += self.skills.prompt_for_task(task)
 SkillsManager(skills_dir=None, similarity_threshold=0.3)
 ```
 
-<ParamField path="skills_dir" type="str">
-  Directory containing skill folders, each holding a `SKILL.md` file with YAML frontmatter. `None` disables skills entirely.
+<ParamField path="skills_dir" type="Union[str, List[str]]">
+  A directory, or a list of directories, containing skill folders. Each folder holds a `SKILL.md` file with YAML frontmatter. Directories are read in order. When two directories hold a skill with the same name, the later directory wins and a warning is logged. `None` disables skills entirely.
 </ParamField>
 
 <ParamField path="similarity_threshold" type="float" default="0.3">
@@ -48,8 +50,12 @@ SkillsManager(skills_dir=None, similarity_threshold=0.3)
 
 ### Attributes
 
-<ParamField path="skills_dir" type="Optional[str]">
-  The configured skills directory.
+<ParamField path="skills_dir" type="Optional[Union[str, List[str]]]">
+  The configured skills directory or directories.
+</ParamField>
+
+<ParamField path="similarity_threshold" type="float">
+  The threshold passed to the dynamic loader.
 </ParamField>
 
 <ParamField path="metadata" type="List[Dict[str, str]]">
@@ -57,7 +63,7 @@ SkillsManager(skills_dir=None, similarity_threshold=0.3)
 </ParamField>
 
 <ParamField path="enabled" type="bool">
-  Read-only. `True` when a directory is configured **and** exists on disk.
+  Read-only. `True` when at least one configured directory exists on disk.
 </ParamField>
 
 ## Skill format
@@ -107,7 +113,7 @@ skills = SkillsManager(skills_dir="./skills")
 section = skills.prompt_for_task("Build a DCF valuation model")
 # only financial-analysis is selected
 ```
-Uses `DynamicSkillsLoader`, which scores each skill's description against the task by cosine similarity and keeps those above `similarity_threshold`. The loader is built lazily on first use and reused afterwards.
+Uses `DynamicSkillsLoader`, which scores each skill's description against the task by cosine similarity and keeps those at or above `similarity_threshold`. The loader is built lazily on first use and reused afterwards, so it reads the skill directories once. Call `set_skills_dir()` to make it re-read them.
 </Tab>
 <Tab title="Static">
 ```python
@@ -120,10 +126,12 @@ section = skills.prompt_for_task(None)
 ### load_metadata
 
 ```python
-def load_metadata(skills_dir: Optional[str] = None) -> List[Dict[str, str]]
+def load_metadata(
+    skills_dir: Optional[Union[str, List[str]]] = None,
+) -> List[Dict[str, str]]
 ```
 
-Tier 1 loading — scan a directory and return one dict per skill with `name`, `description`, `path`, and `content`. Defaults to the configured directory. Returns `[]` when the directory is missing. Entries are returned in sorted order for determinism.
+Tier 1 loading — scan one or more directories and return one dict per skill with `name`, `description`, `path`, and `content`. Defaults to the configured directories. A missing directory is logged and contributes nothing, so the result is `[]` when none exist. Within a directory, skill folders are read in sorted order. Across directories, a later skill replaces an earlier one with the same name.
 
 <Warning>
 `load_metadata()` **returns** metadata without assigning it to `self.metadata`. Only `prompt_for_task()` populates that attribute — and `load_full_skill()` reads from it. Calling `load_metadata()` alone and then `load_full_skill()` will always return `None`.
@@ -148,10 +156,10 @@ Tier 2 loading — the complete markdown below the frontmatter for one skill, fo
 ### set_skills_dir
 
 ```python
-def set_skills_dir(skills_dir: Optional[str]) -> None
+def set_skills_dir(skills_dir: Optional[Union[str, List[str]]]) -> None
 ```
 
-Point the manager at a different directory, discarding cached `metadata` and the dynamic loader.
+Point the manager at a different directory or list of directories, discarding cached `metadata` and the dynamic loader.
 
 ## Agent integration
 
@@ -160,16 +168,32 @@ Point the manager at a different directory, discarding cached `metadata` and the
 | `agent.skills` | The `SkillsManager` instance |
 | `agent.skills_dir` | Property reading through to `skills.skills_dir` (settable) |
 | `agent.skills_metadata` | Property reading through to `skills.metadata` (settable) |
-| `agent.handle_skills(task=None)` | Appends `prompt_for_task(task)` to the system prompt |
+| `agent.handle_skills(task=None)` | Stores `prompt_for_task(task)`; `call_llm` sends it with every LLM call |
 | `agent.load_skills_metadata(skills_dir=None)` | Delegates to `load_metadata()` |
 | `agent.load_full_skill(name)` | Delegates to `load_full_skill()` |
 
-Skills load at `run()` time, not construction, so an agent's recorded system prompt at init does not yet include them.
+Skills are selected at `run()` time, not construction. Each `run(task)` calls `handle_skills(task)` when `skills_dir` is set, so the selection follows the current task and replaces the previous one. `agent.system_prompt` never includes the skills.
+
+## Several directories
+
+Pass a list to combine skill sets, for example your own skills and a shared team folder:
+
+```python
+from swarms import Agent
+
+agent = Agent(
+    agent_name="Reviewer",
+    model_name="gpt-5.4",
+    skills_dir=["./team_skills", "./my_skills"],
+)
+```
+
+If both folders define `code-review`, the one in `./my_skills` is used and a warning names the overridden file.
 
 ## Standalone use
 
 ```python
-from swarms.agents.skills_manager import SkillsManager
+from swarms import SkillsManager
 
 skills = SkillsManager(skills_dir="./skills")
 

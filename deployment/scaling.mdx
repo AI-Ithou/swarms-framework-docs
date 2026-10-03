@@ -45,10 +45,19 @@ results = run_agents_concurrently(
     max_workers=None,  # Uses 95% of CPU cores by default
 )
 
-# Results is a list of outputs in completion order
-for i, result in enumerate(results):
-    print(f"Agent {i+1} result: {result}")
+# Results come back in input order, so results[i] belongs to agents[i]
+for agent, result in zip(agents, results):
+    if isinstance(result, Exception):
+        print(f"{agent.agent_name} failed: {result}")
+    else:
+        print(f"{agent.agent_name} result: {result}")
 ```
+
+A failing agent does not stop the others. Its slot in the results holds the exception it raised instead of an output.
+
+<Warning>
+  Pass distinct `Agent` instances. Each agent keeps one conversation, so listing the same instance twice makes both runs write to the same history.
+</Warning>
 
 ### Concurrent with Dictionary Output
 
@@ -253,7 +262,7 @@ Optimize token usage with dynamic context windows:
 agent = Agent(
     agent_name="Optimized-Agent",
     model_name="claude-sonnet-4-6",
-    dynamic_context_window=True,  # Auto-manage context
+    dynamic_context_window=True,  # Auto-manage context (default)
     context_length=8000,
 )
 ```
@@ -487,17 +496,17 @@ max_workers = int(num_cores * 0.9)
 
 ```python
 def resilient_concurrent_run(agents, task, max_workers=None):
-    try:
-        return run_agents_concurrently(
-            agents=agents,
-            task=task,
-            max_workers=max_workers,
-        )
-    except Exception as e:
-        logger.error(f"Concurrent execution failed: {e}")
-        logger.info("Falling back to sequential execution")
-        # Fallback to sequential
-        return [agent.run(task) for agent in agents]
+    results = run_agents_concurrently(
+        agents=agents,
+        task=task,
+        max_workers=max_workers,
+    )
+    # Failed agents come back as exceptions; retry those one at a time
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.warning(f"{agents[i].agent_name} failed: {result}; retrying")
+            results[i] = agents[i].run(task)
+    return results
 ```
 
 ### 4. Monitor Resource Usage

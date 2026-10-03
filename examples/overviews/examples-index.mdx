@@ -108,8 +108,20 @@ This index organizes **100+ production-ready examples** from our [Swarms Example
 ### Utilities and Output Formats
 | Category | Example | Description |
 |----------|---------|-------------|
-| XML Output | [XML Output Example](https://github.com/kyegomez/swarms/blob/master/examples/single_agent/utils/xml_output_example.py) | Structured XML output formatting for agent responses |
 | CSV Agent | [CSV Agent Example](https://github.com/kyegomez/swarms/blob/master/examples/utils/misc/csvagent_example.py) | CSV data processing and manipulation agent |
+| Token Usage | [Agent Usage](https://github.com/kyegomez/swarms/blob/master/examples/single_agent/utils/agent_usage.py) | Read provider token counts from `agent.usage` and estimate the cost of one run ([guide](/agents/token-usage)) |
+| Router Token Usage | [Swarm Router Usage](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/swarm_router/swarm_router_usage.py) | `router.usage` summed over a swarm's agents, including a `HierarchicalSwarm` director |
+
+### Reasoning and Decision Models
+| Category | Example | Description |
+|----------|---------|-------------|
+| Tree of Thoughts | [Tree of Thoughts Examples](https://github.com/kyegomez/swarms/tree/master/examples/reasoning_agents/tree_of_thoughts_examples) | BFS and DFS searches over reasoning steps in mathematics, physics, and logic puzzles ([reference](/agents/tree-of-thoughts)) |
+| Decision Models | [Decision Model Examples](https://github.com/kyegomez/swarms/tree/master/examples/decision_models) | `DecisionModel` for triage, routing, guarded group chats, and early-stopping debates ([reference](/api/decision-model)) |
+
+### Models via the Swarms API
+| Category | Example | Description |
+|----------|---------|-------------|
+| GPT-6 Astra | [gpt-6-astra Examples](https://github.com/kyegomez/swarms/tree/master/examples/models/gpt_astra) | `gpt-6-astra` on a local `Agent`, and a single agent or Mixture of Agents through the Swarms API |
 
 ### Third-Party Integrations
 | Category | Example | Description |
@@ -157,17 +169,16 @@ This index organizes **100+ production-ready examples** from our [Swarms Example
 | Sequential Workflow | [Sequential Workflow Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/sequential_workflow/sequential_workflow_example.py) | Linear workflow with agents processing tasks in sequence |
 | Sequential Swarm | [Sequential Swarm Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/sequential_workflow/sequential_workflow.py) | Sequential swarm with coordinated task execution |
 
-### Group Chat and Interactive Systems
+### Group Chat
 | Category | Example | Description |
 |----------|---------|-------------|
 | Group Chat | [Group Chat Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/groupchat_examples/group_chat_example.py) | Multi-agent group chat system with turn-based communication |
 | Group Chat Advanced | [Group Chat Advanced](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/groupchat_examples/groupchat_example.py) | Advanced group chat with enhanced interaction capabilities |
 | Mortgage Panel | [Mortgage Tax Panel](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/groupchat_examples/mortgage_tax_panel_example.py) | Specialized panel for mortgage and tax discussions |
-| Interactive Group Chat | [Interactive Group Chat](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/dynamic_groupchat_example.py) | Interactive group chat with real-time user participation |
-| Dynamic Speaker | [Random Dynamic Speaker](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/dynamic_groupchat_example_simple.py) | Dynamic speaker selection in group conversations |
-| Interactive Speaker | [Interactive Speaker Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/dynamic_groupchat_example.py) | Interactive speaker management in group chats |
+| Explicit Respond Tool | [GroupChat with RESPOND_TOOL](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/dynamic_groupchat_example.py) | Group chat where each agent declares `RESPOND_TOOL` itself |
+| Auto-Equipped Agents | [Simple GroupChat](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/dynamic_groupchat_example_simple.py) | Group chat that injects the `respond` tool for you (`auto_equip=True`) |
 | Medical Panel | [Medical Panel Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/medical_panel_example.py) | Medical expert panel for healthcare discussions |
-| Stream Example | [Stream Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/stream_example.py) | Streaming capabilities in interactive group chats |
+| Stream Example | [Stream Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/stream_example.py) | Single-agent token streaming with `streaming_on=True` |
 
 ### Research and Deep Analysis
 | Category | Example | Description |
@@ -196,11 +207,15 @@ This index organizes **100+ production-ready examples** from our [Swarms Example
 | Enhanced Collaboration | [Enhanced Collaboration Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/groupchat/enhanced_collaboration_example.py) | Advanced collaboration patterns between multiple agents |
 | Mixture of Agents | [Mixture of Agents Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/moa_examples/mixture_of_agents_example.py) | Heterogeneous agent mixture for diverse task handling |
 | Aggregate | [Aggregate Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/utils/aggregate_example.py) | Aggregation of results from multiple agents |
+| One to One | [One-to-One Examples](https://github.com/kyegomez/swarms/tree/master/examples/multi_agent/one_to_one_examples) | Sender and receiver reply to each other for `max_loops` rounds (`OneToOne`, [reference](/api/swarming-architectures)) |
+| One to Three | [One-to-Three Examples](https://github.com/kyegomez/swarms/tree/master/examples/multi_agent/one_to_three_examples) | The sender answers, then exactly three receivers reply in turn (`OneToThree`) |
+| Broadcast | [Broadcast Examples](https://github.com/kyegomez/swarms/tree/master/examples/multi_agent/broadcast_examples) | The sender answers, then every receiver replies in turn (`Broadcast`) |
 
 ### API and Integration
 | Category | Example | Description |
 |----------|---------|-------------|
 | Swarms API | [Swarms API Example](https://github.com/kyegomez/swarms/blob/master/examples/multi_agent/swarms_api_examples/swarms_api_example.py) | API integration for Swarms multi-agent systems |
+| MCPDeployer | [MCPDeployer Examples](https://github.com/kyegomez/swarms/tree/master/examples/mcp/mcp_deployer) | Serve agents, workflows, and functions as an authenticated MCP server ([walkthrough](/examples/mcp/mcp-deployer-serve-agent)) |
 
 ### Utilities and Batch Processing
 | Category | Example | Description |

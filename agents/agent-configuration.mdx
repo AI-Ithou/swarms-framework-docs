@@ -16,8 +16,8 @@ The `Agent` class provides extensive configuration options to customize behavior
   
   ```python
   agent = Agent(model_name="claude-sonnet-4-6")
-  agent = Agent(model_name="claude-sonnet-4-5")
-  agent = Agent(model_name="groq/llama-3.1-70b")
+  agent = Agent(model_name="gpt-5.4-mini")
+  agent = Agent(model_name="groq/llama-3.3-70b-versatile")
   ```
 </ParamField>
 
@@ -32,9 +32,13 @@ The `Agent` class provides extensive configuration options to customize behavior
   ```
 </ParamField>
 
-<ParamField path="temperature" type="float" default="0.5">
-  Controls randomness in model outputs (0.0 = deterministic, 1.0 = creative).
-  
+<ParamField path="temperature" type="float | None" default="None">
+  Controls randomness in model outputs (0.0 = deterministic, 1.0 = creative). When left as `None`, no `temperature` is sent and the provider's own default applies. This keeps models that reject any temperature value working without extra configuration. Set it only when you need it.
+
+  <Note>
+    Two settings override this value. `dynamic_temperature_enabled=True` sets a random temperature between 0.0 and 1.0 on each loop. On Anthropic models, `reasoning_effort` or `reasoning_enabled=True` forces `temperature=1` and drops `top_p`, because extended thinking requires it.
+  </Note>
+
   ```python
   # Deterministic for code generation
   agent = Agent(model_name="claude-sonnet-4-6", temperature=0.1)
@@ -44,11 +48,11 @@ The `Agent` class provides extensive configuration options to customize behavior
   ```
 </ParamField>
 
-<ParamField path="max_tokens" type="int" default="16000">
+<ParamField path="max_tokens" type="int" default="None">
   Maximum number of tokens to generate in a single response.
 
   <Note>
-    The constructor default is actually `None`. When left unset, `self.max_tokens` resolves during `__init__` to the model's real max-output-tokens (via `_default_max_tokens()`), falling back to `16000` only if that lookup fails. Pass `max_tokens` explicitly to override the resolved value.
+    When left unset (or set to `0` or less), `max_tokens` resolves during `__init__` to the model's own maximum output tokens from LiteLLM's model registry, falling back to `16000` only if that lookup fails. Pass `max_tokens` explicitly to override the resolved value. For OpenAI's o1/o3/o4 and gpt-5/gpt-6 families the value is sent as `max_completion_tokens`, the key those models accept.
   </Note>
 
   ```python
@@ -72,7 +76,7 @@ The `Agent` class provides extensive configuration options to customize behavior
   Enable provider-side prompt caching. When `True`, the stable prefix of each request (system prompt, tools, and last message) is cached and re-billed at a large discount. Applies to the Anthropic model family (Claude on Anthropic / Bedrock / Vertex); OpenAI and other auto-caching providers are left untouched. See the full [Prompt Caching guide](/agents/prompt-caching).
 
   ```python
-  agent = Agent(model_name="claude-opus-4-8", prompt_caching=True, temperature=None)
+  agent = Agent(model_name="claude-sonnet-4-6", prompt_caching=True)
   ```
 </ParamField>
 
@@ -81,13 +85,42 @@ The `Agent` class provides extensive configuration options to customize behavior
 
   ```python
   agent = Agent(
-      model_name="claude-opus-4-8",
+      model_name="claude-sonnet-4-6",
       prompt_caching=True,
       cache_config={"ttl": "1h", "cache_tools": True},
-      temperature=None,
   )
   ```
 </ParamField>
+
+### Reasoning
+
+<ParamField path="reasoning_effort" type="str | None" default="None">
+  Reasoning effort for reasoning models, forwarded to the provider as `reasoning_effort`. Accepted values: `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"ultra"`, `"max"`. Which values a model accepts is up to the provider. When `None`, nothing is sent. On Anthropic models, setting it also forces `temperature=1`, drops `top_p` and raises `max_tokens` to at least 16000.
+
+  ```python
+  agent = Agent(model_name="o3", reasoning_effort="high")
+  ```
+</ParamField>
+
+<ParamField path="reasoning_enabled" type="bool" default="False">
+  Turn on extended thinking. When `True`, each request carries a thinking block with a budget of `thinking_tokens`. On Anthropic models, `temperature` is forced to `1`, `top_p` is dropped, and `max_tokens` is raised above the budget when needed.
+</ParamField>
+
+<ParamField path="thinking_tokens" type="int" default="1024">
+  Thinking budget sent with each request when `reasoning_enabled=True`. It has no effect otherwise.
+
+  ```python
+  agent = Agent(
+      model_name="claude-sonnet-4-6",
+      reasoning_enabled=True,
+      thinking_tokens=4096,
+  )
+  ```
+</ParamField>
+
+<Tip>
+  Reasoning tokens a provider reports show up in `agent.usage["reasoning_tokens"]`. See [Token usage](/agents/token-usage).
+</Tip>
 
 ### Agent Identity
 
@@ -178,45 +211,45 @@ The `Agent` class provides extensive configuration options to customize behavior
 ### Output Configuration
 
 <ParamField path="output_type" type="str" default="str-all-except-first">
-  Format for agent output. Options: "str", "list", "json", "dict", "yaml", "xml".
-  
+  How `run()` formats the conversation it returns. Options: `"str-all-except-first"`, `"final"`, `"last"`, `"str"`, `"string"`, `"all"`, `"list"`, `"list-final"`, `"dict"`, `"dictionary"`, `"dict-all-except-first"`, `"dict-final"`, `"json"`, `"yaml"`. The `"xml"` type was removed. See [Structured Outputs](/agents/structured-outputs#output-types) for what each one returns.
+
   ```python
-  # String output
-  agent = Agent(output_type="str")
-  
-  # JSON output
+  # Just the last message
+  agent = Agent(output_type="final")
+
+  # The whole conversation as a JSON string
   agent = Agent(output_type="json")
-  
-  # Dictionary output
-  agent = Agent(output_type="dict")
+
+  # The whole conversation as a list of message dicts
+  agent = Agent(output_type="list")
   ```
 </ParamField>
 
 <ParamField path="streaming_on" type="bool" default="False">
-  Enable basic streaming with formatted panels.
-  
+  Stream each LLM call. With `print_on=True` tokens render in a live panel; with `print_on=False` the stream is collected silently. Required for `streaming_callback` to receive tokens.
+
   ```python
   agent = Agent(streaming_on=True)
   ```
 </ParamField>
 
 <ParamField path="stream" type="bool" default="False">
-  Enable detailed token-by-token streaming with metadata.
-  
+  Detailed streaming. Each token is printed with its metadata (model, finish reason, logprobs, citations, usage), and `streaming_callback` receives a dict per token whose `"token"` key holds the text.
+
   ```python
   agent = Agent(stream=True)
-  response = agent.run("Tell me a story")  # Streams each token
+  response = agent.run("Tell me a story")
   ```
 </ParamField>
 
 <ParamField path="streaming_callback" type="Callable" default="None">
-  Callback function to receive streaming tokens in real-time.
-  
+  Function that receives each streamed token as a string. It only fires on streamed calls, so pair it with `streaming_on=True`. On its own it is never called. You can also pass it per call: `agent.run(task, streaming_callback=fn)`.
+
   ```python
   def on_token(token: str):
-      print(f"Token: {token}", end="", flush=True)
-  
-  agent = Agent(streaming_callback=on_token)
+      print(token, end="", flush=True)
+
+  agent = Agent(streaming_on=True, streaming_callback=on_token)
   ```
 </ParamField>
 
@@ -263,7 +296,7 @@ asyncio.run(main())
 ```
 
 <Note>
-  Both methods stream tokens through every internal loop, including tool calls, synthesis turns after a tool returns, and the autonomous plan/execute/summary cycle when `max_loops="auto"`.
+  Both methods stream tokens through every internal loop, including tool calls, synthesis turns after a tool returns, and the autonomous plan/execute/summary cycle when `max_loops="auto"`. Streamed calls are counted in `agent.usage` once the stream has been consumed.
 </Note>
 
 <ParamField path="verbose" type="bool" default="False">
@@ -309,6 +342,30 @@ asyncio.run(main())
   ```
 </ParamField>
 
+<ParamField path="messages" type="List[dict]" default="None">
+  Prior turns in chat format, such as `{"role": "user", "content": "..."}`. They seed the agent's conversation at construction and are sent as context on every run. `run()` takes the same argument per call: those turns are added to the conversation and sent as the context that call continues from.
+
+  ```python
+  agent = Agent(
+      agent_name="Support-Agent",
+      model_name="gpt-5.4",
+      messages=[
+          {"role": "user", "content": "My order number is 4417."},
+          {"role": "assistant", "content": "Thanks, I have order 4417."},
+      ],
+  )
+  agent.run("What is my order number?")
+  ```
+</ParamField>
+
+<ParamField path="persistent_memory" type="bool" default="False">
+  Read and append to `{workspace}/agents/{agent_name}/MEMORY.md` so context survives process restarts. Off by default. See [Agent Memory](/agents/agent-memory).
+</ParamField>
+
+<ParamField path="context_compression" type="bool" default="True">
+  Summarize the conversation when it crosses 90% of `context_length`. Applies to integer `max_loops` and `"auto"` alike. See [Agent Memory](/agents/agent-memory).
+</ParamField>
+
 ### Advanced Features
 
 <ParamField path="dynamic_temperature_enabled" type="bool" default="False">
@@ -340,6 +397,22 @@ asyncio.run(main())
   
   ```python
   agent = Agent(dashboard=True)
+  ```
+</ParamField>
+
+<ParamField path="dynamic_tools" type="bool" default="False">
+  Hide tool schemas behind a single `tool_search` tool and load them on demand. Off by default. When `True`, it applies only if the agent has `tools`, an MCP server, or `max_loops="auto"`. See [Dynamic Tool Loading](/agents/dynamic-tools).
+
+  ```python
+  agent = Agent(model_name="gpt-5.4", max_loops="auto", dynamic_tools=True)
+  ```
+</ParamField>
+
+<ParamField path="skills_dir" type="str | List[str]" default="None">
+  One directory, or a list of directories, of `SKILL.md` skills. With a list, directories are read in order and a later directory's skill replaces an earlier one with the same name. See [Agent Skills](/agents/agent-skills).
+
+  ```python
+  agent = Agent(skills_dir=["./team_skills", "./my_skills"])
   ```
 </ParamField>
 
@@ -383,7 +456,7 @@ asyncio.run(main())
 ### Reliability
 
 <ParamField path="fallback_models" type="List[str]" default="None">
-  List of fallback models to try if primary model fails.
+  Models to try in order. When set, the first entry is the primary model and `model_name` is not used. If a run fails after `retry_attempts`, the agent switches to the next model and runs the task again.
   
   ```python
   agent = Agent(
@@ -399,14 +472,11 @@ asyncio.run(main())
 ### Performance
 
 <ParamField path="mode" type="str" default="standard">
-  Agent execution mode. Options: "interactive", "fast", "standard".
-  
+  Agent execution mode. Options: `"interactive"`, `"fast"`, `"standard"`. Only `"fast"` changes behavior: it sets `print_on=False` and `verbose=False` at the end of construction. `"interactive"` does not turn on interactive mode; use `interactive=True` for that.
+
   ```python
-  # Fast mode (no printing, minimal overhead)
+  # No printing and no verbose logging
   agent = Agent(mode="fast")
-  
-  # Interactive mode
-  agent = Agent(mode="interactive")
   ```
 </ParamField>
 
@@ -479,4 +549,4 @@ batch_agent = Agent(
 
 ## Reference
 
-Location in source: `swarms/structs/agent.py:309-411` (the `Agent.__init__` signature)
+Location in source: `swarms/structs/agent.py:306-412` (the `Agent.__init__` signature)

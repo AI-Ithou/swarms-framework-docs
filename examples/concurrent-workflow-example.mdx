@@ -65,7 +65,7 @@ print(results)
    - Market Analyst examines market trends
    - Financial Analyst evaluates financial implications
    - Risk Analyst identifies potential risks
-3. **Result Collection**: All three analyses are collected and returned as a list of role/content message dicts
+3. **Result Collection**: All three analyses are collected and returned as a list of role/content message dicts, one per agent, in the order the agents were passed (not the order they finished). Each entry holds that agent's answer, and every `run()` starts from a fresh conversation
 4. **Comprehensive Output**: You receive multiple perspectives on the same topic in the time it takes for the slowest agent to complete
 
 ## Common Use Cases

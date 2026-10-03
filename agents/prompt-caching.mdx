@@ -29,10 +29,9 @@ SYSTEM_PROMPT = (
 agent = Agent(
     agent_name="FinancialAnalyst",
     system_prompt=SYSTEM_PROMPT,
-    model_name="claude-opus-4-8",
-    temperature=None,        # Opus 4.7+/Sonnet 5 reject a temperature value
+    model_name="claude-sonnet-4-6",
     max_loops=1,
-    prompt_caching=True,     # the on-switch
+    prompt_caching=True,  # the on-switch
 )
 
 # First call writes the prefix to cache; later calls with the same prefix read it.
@@ -129,8 +128,7 @@ SYSTEM_PROMPT = (
 agent = Agent(
     agent_name="FinancialAnalyst",
     system_prompt=SYSTEM_PROMPT,
-    model_name="claude-opus-4-8",
-    temperature=None,
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     prompt_caching=True,   # defaults: ttl=5m, cache tools + system + messages
 )
@@ -153,8 +151,7 @@ SYSTEM_PROMPT = (
 agent = Agent(
     agent_name="FinancialAnalyst",
     system_prompt=SYSTEM_PROMPT,
-    model_name="claude-opus-4-8",
-    temperature=None,
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     prompt_caching=True,
     cache_config={"ttl": "1h"},   # extended cache; beta header added automatically
@@ -178,8 +175,7 @@ SYSTEM_PROMPT = (
 agent = Agent(
     agent_name="FinancialAnalyst",
     system_prompt=SYSTEM_PROMPT,
-    model_name="claude-opus-4-8",
-    temperature=None,
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     prompt_caching=True,
     cache_config={
@@ -239,8 +235,7 @@ TOOLS = [
 agent = Agent(
     agent_name="FinancialAnalyst",
     system_prompt=SYSTEM_PROMPT,
-    model_name="claude-opus-4-8",
-    temperature=None,
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     prompt_caching=True,
     tools_list_dictionary=TOOLS,
@@ -320,8 +315,7 @@ SYSTEM_PROMPT = (
 agent = Agent(
     agent_name="FinancialAnalyst",
     system_prompt=SYSTEM_PROMPT,
-    model_name="claude-opus-4-8",
-    temperature=None,
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     prompt_caching=True,
     cache_config={
@@ -358,17 +352,44 @@ Caching is **silently skipped** below the provider's minimum cacheable prefix â€
 
 ## Verifying cache hits
 
-`Agent.run()` returns a formatted string, so it won't show token usage. To inspect cache behavior, read from the agent's underlying LLM wrapper directly with `return_all = True`, which returns the raw provider response including the usage block.
+`agent.usage` sums the provider's token counts over every call the agent has made. Its `cached_tokens` key is the part of `input_tokens` the provider served from its cache, so a cache hit shows up as a rise in `cached_tokens` between runs:
 
 ```python
 # After building `agent` with prompt_caching=True
 
-agent.llm.return_all = True
-resp = agent.llm.run("Analyze the semiconductor supply chain in 2026.")
+agent.run("Analyze the semiconductor supply chain in 2026.")  # writes the cache
+before = agent.usage
 
-usage = resp["usage"] if isinstance(resp, dict) else resp.usage
-print(usage)
+agent.run("Now do the same for the memory market.")  # should read it
+after = agent.usage
+
+print("cached tokens on the second run:", after["cached_tokens"] - before["cached_tokens"])
 ```
+
+See [Token usage](/agents/token-usage) for every field `agent.usage` reports.
+
+`agent.usage` does not break out cache writes. To see `cache_creation_input_tokens`, call a standalone `LiteLLM` with `return_all=True`, which returns the raw provider response as a dict:
+
+```python
+from swarms import LiteLLM
+
+llm = LiteLLM(
+    model_name="claude-sonnet-4-6",
+    system_prompt=SYSTEM_PROMPT,
+    prompt_caching=True,
+    max_tokens=128,
+    top_p=None,
+    return_all=True,
+)
+
+for label in ("write", "read"):
+    resp = llm.run("Summarize your standing instructions in one sentence.")
+    print(label, resp["usage"])
+```
+
+<Note>
+  Setting `agent.llm.return_all = True` on an agent's own LLM does not return the raw response. The agent passes `thinking_tokens` (default `1024`) to its LLM, and that routes replies through the reasoning formatter before `return_all` is checked.
+</Note>
 
 **What the usage fields mean:**
 
@@ -381,7 +402,7 @@ print(usage)
 </ParamField>
 
 <ParamField path="prompt_tokens_details.cached_tokens" type="int">
-  (OpenAI-style) Number of prompt tokens served from cache on this request.
+  (OpenAI-style) Number of prompt tokens served from cache on this request. This is the value `agent.usage["cached_tokens"]` adds up.
 </ParamField>
 
 <Note>
@@ -393,7 +414,7 @@ print(usage)
 - **Prefix match is exact.** Any byte change before a breakpoint invalidates everything after it. Keep timestamps, per-request IDs, random seeds, and other volatile content out of the system prompt and tool definitions.
 - **Watch for silent invalidators.** Time-enabled conversation history, dynamically reordered tools, or a per-request nonce in the persona will quietly break caching. If `cache_read_input_tokens` is always 0, hunt for one of these.
 - **Clear the token minimum.** Caching is skipped below the provider minimum with no error. If the prefix is too small, make the system prompt larger or accept that small prompts won't cache. The examples repeat the persona to exceed the minimum.
-- **`temperature=None` on newer Anthropic models.** Opus 4.7 / 4.8 and Sonnet 5 reject a `temperature` value â€” pass `temperature=None` on the Agent for those models (as every Anthropic example above does).
+- **Leave `temperature` unset on models that reject it.** `temperature` defaults to `None`, and an unset temperature is not sent at all, so newer Claude models that reject any temperature value work without extra configuration.
 - **The 1-hour cache costs 2x on writes.** Use `ttl="1h"` only when gaps between related requests exceed the 5-minute default window; otherwise the extra write cost isn't worth it.
 - **Order matters for tool-heavy agents.** Tools render before the system prompt, so a large, stable tool block cached via `cache_tools=True` is often the single biggest saving.
 - **Stay within 4 breakpoints (Anthropic).** The defaults use 3 (tools + system + last message). If you add manual breakpoints elsewhere, keep the total at or below 4.

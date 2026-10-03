@@ -59,7 +59,7 @@ Database Director (Coordinator)
 ## Install
 
 ```bash
-pip install -U swarms sqlite3 loguru
+pip install -U swarms loguru
 ```
 
 ## ENV
@@ -735,7 +735,7 @@ database_creator_agent = Agent(
     - Handle database creation errors and provide solutions
 
     You work with precise technical specifications and always ensure databases are created correctly and efficiently.""",
-    model_name="claude-sonnet-4-20250514",
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     temperature=0.3,
     dynamic_temperature_enabled=True,
@@ -779,7 +779,7 @@ table_manager_agent = Agent(
     - Provide detailed table information and metadata
 
     You work with precision and always ensure tables are created with optimal structure and performance characteristics.""",
-    model_name="claude-sonnet-4-20250514",
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     temperature=0.3,
     dynamic_temperature_enabled=True,
@@ -830,7 +830,7 @@ data_operations_agent = Agent(
     - Provide detailed operation results and statistics
 
     You work with extreme precision and always prioritize data integrity and safety in all operations.""",
-    model_name="claude-sonnet-4-20250514",
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     temperature=0.3,
     dynamic_temperature_enabled=True,
@@ -881,7 +881,7 @@ query_specialist_agent = Agent(
     - Ensure query security and data protection
 
     You work with expertise in SQL optimization and always ensure queries are secure, efficient, and provide accurate results.""",
-    model_name="claude-sonnet-4-20250514",
+    model_name="claude-sonnet-4-6",
     max_loops=1,
     temperature=0.3,
     dynamic_temperature_enabled=True,
@@ -891,10 +891,7 @@ query_specialist_agent = Agent(
 # =============================================================================
 # DATABASE DIRECTOR SETTINGS
 # =============================================================================
-# HierarchicalSwarm builds its own director internally (with the structured
-# OrderBatch output wiring it needs to delegate to workers), so a custom
-# director's config is supplied via `director_settings=` rather than as a
-# standalone Agent passed in `agents=`.
+# director_settings configures the director HierarchicalSwarm builds, which keeps the OrderBatch tool it delegates with.
 database_director_settings = {
     "agent_name": "Database-Director",
     "system_prompt": """You are the Database Director, the senior executive responsible for orchestrating comprehensive database operations and coordinating a team of specialized database experts. Your role is to:
@@ -939,9 +936,13 @@ database_director_settings = {
     - Operation workflow management and optimization
     - Database security and best practices implementation
 
-    You deliver comprehensive database solutions that leverage the full expertise of your specialized team, ensuring all database operations work together to provide reliable, efficient, and secure data management.""",
-    "model_name": "claude-sonnet-4-20250514",
+    You deliver comprehensive database solutions that leverage the full expertise of your specialized team, ensuring all database operations work together to provide reliable, efficient, and secure data management.
+
+    Return only an OrderBatch containing the worker orders.""",
+    "model_name": "claude-sonnet-4-6",
     "temperature": 0.5,
+    # Claude rejects temperature and top_p together, and the director sends top_p=0.9 by default.
+    "top_p": None,
     "dynamic_temperature_enabled": True,
 }
 
@@ -1064,4 +1065,4 @@ if __name__ == "__main__":
 ```
 
 
-- Run the file with `smart_database_swarm.py`
+- Run the file with `python smart_database_swarm.py`
